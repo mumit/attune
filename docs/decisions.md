@@ -71,6 +71,26 @@ when the design doc gets long. Newest first.
 - Ties together all three earlier primitives: fuelix routing, autonomy matrix,
   memory (search-before-draft, capture-signal-after).
 
+## 2026-07 — Connector layer + morning brief
+- **Swappable WorkspaceConnector interface** with two implementations behind it:
+  `McpWorkspaceConnector` (Google managed MCP servers) and
+  `DirectOAuthConnector` (direct google-api-python-client). Selected by
+  `config.ConnectorMode` via `make_connector` — a TELUS "no" on MCP is a config
+  change, not a rewrite. MCP connector is real; direct-OAuth is a documented stub.
+- **Send is not a default capability.** The managed Gmail MCP server exposes
+  create_draft + labeling but NOT send, so the MCP connector structurally can't
+  send. `send_reply` is refused by default (`SendNotPermitted`); only the
+  direct-OAuth path can send, and only with an explicit gmail.send scope +
+  autonomy grant + `send_enabled` flag. Safe default (draft, human sends) is
+  structural, not disciplinary.
+- **Provenance tagged at the boundary.** Every fetched thread is marked
+  `Provenance.FETCHED` (untrusted) where external data enters, so downstream
+  layers can't forget it. Escalating OAuth scopes (readonly → compose → send)
+  documented on the direct path; never request send "to avoid re-auth."
+- **Morning brief** (`brief.py`) is the first end-to-end deliverable: read-only
+  (unread mail + today's events → summary via CONVERSE model), writes nothing,
+  frames mail as untrusted. The safe first thing to ship.
+
 ## Still open
 - Google Chat action-layer API design (sync events only vs full Workspace Events
   pull pattern for v1).
