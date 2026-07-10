@@ -19,16 +19,18 @@ classifiers = [
 dependencies = [
     "bearer-openai>=0.1,<0.2",
     # Added as each phase comes online; kept minimal until then:
-    # "langgraph>=0.2",
     # "slack-bolt>=1.20",
     # "google-api-python-client>=2",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "langgraph>=0.2"]
 # Memory substrate. Kept optional so the package imports without it; install
 # when standing up the Mem0 store. `[nlp]` adds BM25 + entity extraction.
 memory = ["mem0ai>=0.1", "qdrant-client>=1.9"]
+# Orchestration. Kept optional so the package imports without it; install when
+# building/running graphs. Use a Postgres checkpointer in production.
+orchestrator = ["langgraph>=0.2"]
 
 [project.urls]
 Homepage = "https://github.com/telus-labs/aidedecamp"

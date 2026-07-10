@@ -52,6 +52,25 @@ when the design doc gets long. Newest first.
 - Deep scheduled consolidation (cross-memory dedupe / stale-fact supersession on
   the strong model) deferred to Phase 4; Mem0's write-time update covers v1.
 
+## 2026-07 — Orchestrator (LangGraph, HITL draft-and-approve)
+- **LangGraph**, one small checkpointed graph per workflow rather than a single
+  giant graph. Checkpointer required for interrupts; InMemorySaver in dev,
+  Postgres/SQLite in production.
+- **Draft-and-approve is the canonical rung-2 loop**: retrieve → draft → gate →
+  approve(interrupt) → apply → capture. The assistant does the mechanical work;
+  the human makes the judgment call via `interrupt()`/`Command(resume=...)`.
+- **The autonomy gate fails safe**: without an explicit per-(action,domain)
+  grant at ACT_NOTIFY+, the graph always routes through the human approval
+  interrupt — it can never silently send. Only a deliberate graduated grant
+  skips the interrupt.
+- **State discipline**: audit trail is the one accumulator field
+  (`Annotated[list, add]`); everything else overwrite. Raw bodies/transcripts
+  kept out of state to avoid checkpoint bloat. `iteration_count` guards loops.
+- **Provenance at the prompt boundary**: incoming content is tagged UNTRUSTED in
+  the drafting prompt, enforcing the security discipline at the point it matters.
+- Ties together all three earlier primitives: fuelix routing, autonomy matrix,
+  memory (search-before-draft, capture-signal-after).
+
 ## Still open
 - Google Chat action-layer API design (sync events only vs full Workspace Events
   pull pattern for v1).
