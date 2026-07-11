@@ -105,6 +105,25 @@ when the design doc gets long. Newest first.
   wiring is tested with a fake Bolt app, no live Slack.
 - No-inbound-port transport is the concrete OpenClaw-class mitigation (design 8.1).
 
+## 2026-07 — Runtime assembly (app.py)
+- **`AppContext` dataclass** holds the compiled graph, client, store, and
+  settings together. It is a context manager that closes the SQLite connection
+  on `__exit__`, so the connection lifecycle is handled correctly without
+  requiring callers to track the `sqlite3.connect` handle directly.
+- **`build_app()`** accepts optional overrides for every collaborator
+  (`client`, `store`, `checkpointer`, `matrix`). When an override is absent the
+  real implementation is constructed (Fuel iX client from env token, Mem0Store
+  from `build_mem0_config()`, `SqliteSaver` backed by
+  `settings.checkpointer_db_path`). The lazy-import convention is preserved:
+  `SqliteSaver` is only imported inside `build_app` when no checkpointer is
+  injected, so the package loads without `langgraph-checkpoint-sqlite`.
+- **`settings.checkpointer_db_path`** added to `Settings` (env var
+  `ADC_DB_PATH`, default `./aidedecamp.db`). `langgraph-checkpoint-sqlite>=2`
+  added to the `orchestrator` optional extra.
+- The SQLite connection is opened with `check_same_thread=False` because
+  LangGraph resumes may arrive from a different thread than the one that created
+  the saver.
+
 ## 2026-07 — Ingestion (Gmail watch → Pub/Sub → history)
 - **Gmail push via users.watch → Pub/Sub → users.history.list.** Watch expires
   ≤7 days and stops *silently* on lapse, so renewal is a first-class daily

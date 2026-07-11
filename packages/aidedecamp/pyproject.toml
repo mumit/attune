@@ -30,7 +30,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "langgraph>=0.2"]
 memory = ["mem0ai>=0.1", "qdrant-client>=1.9"]
 # Orchestration. Kept optional so the package imports without it; install when
 # building/running graphs. Use a Postgres checkpointer in production.
-orchestrator = ["langgraph>=0.2"]
+orchestrator = ["langgraph>=0.2", "langgraph-checkpoint-sqlite>=2"]
 # Slack channel (Socket Mode). Kept optional; install to run the Slack surface.
 slack = ["slack-bolt>=1.24"]
 

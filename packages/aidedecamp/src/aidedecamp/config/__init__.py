@@ -45,6 +45,7 @@ class Settings:
     slack_app_token: str | None = None
     slack_bot_token: str | None = None
     google_project_id: str | None = None
+    checkpointer_db_path: str = "./aidedecamp.db"
     extra: dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -58,4 +59,5 @@ class Settings:
             slack_app_token=e.get("SLACK_APP_TOKEN"),
             slack_bot_token=e.get("SLACK_BOT_TOKEN"),
             google_project_id=e.get("GOOGLE_PROJECT_ID"),
+            checkpointer_db_path=e.get("ADC_DB_PATH", "./aidedecamp.db"),
         )
