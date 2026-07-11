@@ -55,10 +55,20 @@ class Settings:
     gmail_pubsub_subscription: str | None = None
     chat_pubsub_topic: str | None = None
     chat_pubsub_subscription: str | None = None
+    # Calendar has no Pub/Sub option (design 4.6) — Google POSTs directly to
+    # calendar_webhook_address, a thin external republisher which forwards a
+    # decoded notification onto this topic/subscription instead, so this
+    # process still never opens an inbound port (rule 5).
+    calendar_pubsub_topic: str | None = None
+    calendar_pubsub_subscription: str | None = None
+    calendar_webhook_address: str | None = None
+    calendar_id: str = "primary"
     checkpointer_db_path: str = "./aidedecamp.db"
     # Where the ingestion watch/subscription baselines persist between restarts.
     gmail_watch_state_path: str = "./gmail_watch_state.json"
     chat_subscription_state_path: str = "./chat_subscription_state.json"
+    calendar_watch_state_path: str = "./calendar_watch_state.json"
+    calendar_sync_state_path: str = "./calendar_sync_state.json"
     # The single identity this deployment acts as (memory/audit user_id, and
     # the Gmail API "me" alias). One deployment = one identity, per design 4.6.
     user_id: str = "me"
@@ -84,12 +94,22 @@ class Settings:
             gmail_pubsub_subscription=e.get("ADC_GMAIL_PUBSUB_SUBSCRIPTION"),
             chat_pubsub_topic=e.get("ADC_CHAT_PUBSUB_TOPIC"),
             chat_pubsub_subscription=e.get("ADC_CHAT_PUBSUB_SUBSCRIPTION"),
+            calendar_pubsub_topic=e.get("ADC_CALENDAR_PUBSUB_TOPIC"),
+            calendar_pubsub_subscription=e.get("ADC_CALENDAR_PUBSUB_SUBSCRIPTION"),
+            calendar_webhook_address=e.get("ADC_CALENDAR_WEBHOOK_ADDRESS"),
+            calendar_id=e.get("ADC_CALENDAR_ID", "primary"),
             checkpointer_db_path=e.get("ADC_DB_PATH", "./aidedecamp.db"),
             gmail_watch_state_path=e.get(
                 "ADC_GMAIL_WATCH_STATE_PATH", "./gmail_watch_state.json"
             ),
             chat_subscription_state_path=e.get(
                 "ADC_CHAT_SUBSCRIPTION_STATE_PATH", "./chat_subscription_state.json"
+            ),
+            calendar_watch_state_path=e.get(
+                "ADC_CALENDAR_WATCH_STATE_PATH", "./calendar_watch_state.json"
+            ),
+            calendar_sync_state_path=e.get(
+                "ADC_CALENDAR_SYNC_STATE_PATH", "./calendar_sync_state.json"
             ),
             user_id=e.get("ADC_USER_ID", "me"),
             slack_default_channel=e.get("ADC_SLACK_CHANNEL"),

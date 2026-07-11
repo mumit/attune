@@ -29,7 +29,26 @@ from .chat_events import (
     ensure_subscription,
     process_chat_event,
 )
-from .state import JsonChatSubscriptionState, JsonGmailWatchState
+from .calendar_watch import (
+    ChannelResult,
+    ChannelState,
+    ensure_calendar_watch,
+    stop_calendar_channel,
+)
+from .calendar_sync import (
+    CalendarChanges,
+    SyncExpired,
+    SyncState,
+    decode_calendar_headers,
+    full_calendar_sync,
+    process_calendar_notification,
+)
+from .state import (
+    JsonCalendarChannelState,
+    JsonCalendarSyncState,
+    JsonChatSubscriptionState,
+    JsonGmailWatchState,
+)
 
 __all__ = [
     "ensure_watch",
@@ -44,6 +63,18 @@ __all__ = [
     "SubscriptionState",
     "ensure_subscription",
     "process_chat_event",
+    "ChannelResult",
+    "ChannelState",
+    "ensure_calendar_watch",
+    "stop_calendar_channel",
+    "CalendarChanges",
+    "SyncExpired",
+    "SyncState",
+    "decode_calendar_headers",
+    "full_calendar_sync",
+    "process_calendar_notification",
     "JsonGmailWatchState",
     "JsonChatSubscriptionState",
+    "JsonCalendarChannelState",
+    "JsonCalendarSyncState",
 ]

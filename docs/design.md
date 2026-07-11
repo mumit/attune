@@ -269,11 +269,11 @@ Each phase should produce something you actually use daily before moving to the 
 - ❌ **Done when:** you get a genuinely useful daily brief in Slack, generated from your real inbox, for a full week without babysitting it — blocked on the entrypoint, not the logic
 
 ### Phase 1 - Read-only assistant, both data sources, two channels
-- ❌ Add Calendar (read-only) — connector supports `list_events`/`create_hold`, but there's no Calendar push-notification ingestion (design 4.6's one genuine webhook exception) yet
+- ✅ Add Calendar (read-only) — `list_events`/`create_hold` on the connector, plus push-notification ingestion (`ingestion/calendar_watch.py`/`calendar_sync.py`, design 4.6's one genuine webhook exception, handled via the same thin-republisher pattern as Gmail/Chat) — reconciliation stops at changed-event-ids; nothing reacts to them yet (see Phase 3's scheduling gap)
 - ✅ Add Google Chat as a second channel — Cards v2 + Workspace Events ingestion, both done
 - ✅ Add conversational Q&A backed by memory + live retrieval — both channels now share it: `dispatcher.handle_chat_message`/`handle_slack_message` route through the same `_respond_to_message` → `_converse`
 - ✅ Start correction/implicit-feedback capture (`memory/signals.py`, wired into the draft-approve graph's `capture` node) — already doing more than "start," see Phase 2
-- **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly — blocked on Calendar ingestion (above) and actual deployment, not on remaining code
+- **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly — blocked on actual deployment, not on remaining code
 
 ### Phase 2 - Draft assistance (rung 2 autonomy)
 - ✅ Draft replies delivered as interactive cards (Slack + Chat) with Send / Edit / Discard — scheduling proposals specifically (a scheduling graph) not built; only a generic draft-reply workflow exists

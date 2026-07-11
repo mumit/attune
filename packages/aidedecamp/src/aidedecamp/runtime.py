@@ -41,11 +41,19 @@ from .credentials import load_google_credentials
 from .dispatcher import handle_chat_message, handle_gmail_notification, handle_slack_message
 from .ingestion import (
     HistoryExpired,
+    JsonCalendarChannelState,
+    JsonCalendarSyncState,
     JsonChatSubscriptionState,
     JsonGmailWatchState,
+    SyncExpired,
+    ensure_calendar_watch,
     ensure_subscription,
     ensure_watch,
+    full_calendar_sync,
+    process_calendar_notification as _reconcile_calendar_notification,
 )
+from .ingestion.calendar_sync import SyncState
+from .ingestion.calendar_watch import ChannelState
 from .ingestion.chat_events import SubscriptionState
 from .ingestion.gmail_watch import WatchState
 
@@ -64,6 +72,9 @@ class Runtime:
     slack_say: Callable[..., Any] | None = None
     gchat: Any = None          # channels.GoogleChatChannel, or None if not configured
     chat_events_service: Any = None  # raw workspaceevents API resource, for renewal
+    calendar_service: Any = None     # raw Calendar API resource, for ingestion
+    calendar_watch_state: Any = None  # ingestion.calendar_watch.ChannelState
+    calendar_sync_state: Any = None   # ingestion.calendar_sync.SyncState
 
     # --- event processing (testable) ---------------------------------------
 
@@ -122,6 +133,32 @@ class Runtime:
             brief_fn=_brief_fn,
         )
 
+    def process_calendar_notification(self, notification: dict[str, Any]):
+        """Reconcile one decoded Calendar webhook notification (already
+        validated and republished by the thin republisher, per rule 5) into
+        changed/cancelled event ids.
+
+        ``notification`` is whatever ``decode_calendar_headers`` produced.
+        On :class:`~ingestion.SyncExpired` (no baseline, or an expired 410
+        sync token) this performs a full resync itself and returns the
+        result — unlike Gmail, where renewing the watch happens to also
+        re-baseline historyId, Calendar's sync token is entirely independent
+        of the channel/watch lifecycle and can only be re-obtained via a full
+        ``events.list()`` pass.
+
+        There is no draft/action step yet (no scheduling graph exists) — this
+        is the same ingestion boundary as ``gmail_history.process_notification``,
+        just without a further dispatcher-level routing step to call.
+        """
+        try:
+            return _reconcile_calendar_notification(
+                self.calendar_service, self.calendar_sync_state, self.settings.calendar_id
+            )
+        except SyncExpired:
+            return full_calendar_sync(
+                self.calendar_service, self.calendar_sync_state, self.settings.calendar_id
+            )
+
     # --- watch/subscription renewal (testable, called on a daily schedule) --
 
     def renew_gmail_watch(self, *, force: bool = False):
@@ -139,6 +176,15 @@ class Runtime:
             self.chat_state,
             space=self.settings.chat_default_space,
             topic=self.settings.chat_pubsub_topic,
+            force=force,
+        )
+
+    def renew_calendar_watch(self, *, force: bool = False):
+        return ensure_calendar_watch(
+            self.calendar_service,
+            self.calendar_watch_state,
+            calendar_id=self.settings.calendar_id,
+            address=self.settings.calendar_webhook_address,
             force=force,
         )
 
@@ -189,14 +235,42 @@ class Runtime:
                     }
                 )
 
+    def run_calendar_pubsub_loop(self) -> None:  # pragma: no cover
+        """Pull decoded Calendar webhook notifications forever and reconcile
+        each one. The webhook itself (rule 5's one genuine exception) is
+        received and republished by an external thin service, not this
+        process — this only pulls the republished, already-decoded
+        notification off the Pub/Sub subscription."""
+        from google.cloud import pubsub_v1
+
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription = self.settings.calendar_pubsub_subscription
+        while True:
+            response = subscriber.pull(
+                request={"subscription": subscription, "max_messages": 10},
+                timeout=30,
+            )
+            for received in response.received_messages:
+                notification = json.loads(received.message.data)
+                self.process_calendar_notification(notification)
+                subscriber.acknowledge(
+                    request={
+                        "subscription": subscription,
+                        "ack_ids": [received.ack_id],
+                    }
+                )
+
     def run(self) -> None:  # pragma: no cover
-        """Start the always-on process: Gmail/Chat pull loops run in background
-        daemon threads; Slack Socket Mode blocks the main thread (or, absent
-        Slack, the main thread just waits so the daemon threads keep running)."""
+        """Start the always-on process: Gmail/Chat/Calendar pull loops run in
+        background daemon threads; Slack Socket Mode blocks the main thread
+        (or, absent Slack, the main thread just waits so the daemon threads
+        keep running)."""
         if self.settings.gmail_pubsub_subscription:
             threading.Thread(target=self.run_gmail_pubsub_loop, daemon=True).start()
         if self.settings.chat_pubsub_subscription and self.gchat is not None:
             threading.Thread(target=self.run_chat_pubsub_loop, daemon=True).start()
+        if self.settings.calendar_pubsub_subscription:
+            threading.Thread(target=self.run_calendar_pubsub_loop, daemon=True).start()
 
         if self.slack is not None:
             self.slack.start()
@@ -217,6 +291,9 @@ def build_runtime(
     slack_say: Callable[..., Any] | None = None,
     gchat: Any = None,
     chat_events_service: Any = None,
+    calendar_service: Any = None,
+    calendar_watch_state: ChannelState | None = None,
+    calendar_sync_state: SyncState | None = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -226,11 +303,13 @@ def build_runtime(
 
     - *credentials* — via ``load_google_credentials(settings)``
     - *connector*   — via ``make_connector(settings, credentials=...)``
-    - *gmail_service* — a raw Gmail API resource, built from *credentials*
-      (ingestion needs this directly; it's independent of *connector*, which
-      may be the MCP implementation instead)
-    - *watch_state* / *chat_state* — ``JsonGmailWatchState`` /
-      ``JsonChatSubscriptionState``, backed by ``settings.*_state_path``
+    - *gmail_service* / *calendar_service* — raw Gmail/Calendar API resources,
+      built from *credentials* (ingestion needs these directly; independent of
+      *connector*, which may be the MCP implementation instead)
+    - *watch_state* / *chat_state* / *calendar_watch_state* /
+      *calendar_sync_state* — ``JsonGmailWatchState`` /
+      ``JsonChatSubscriptionState`` / ``JsonCalendarChannelState`` /
+      ``JsonCalendarSyncState``, backed by ``settings.*_state_path``
     - *slack* / *gchat* — only built when the relevant tokens/state are
       present in ``settings``; a deployment need not run both channels
     """
@@ -238,7 +317,9 @@ def build_runtime(
     resolved_app = app or build_app(settings)
 
     resolved_credentials = credentials
-    if resolved_credentials is None and (connector is None or gmail_service is None):
+    if resolved_credentials is None and (
+        connector is None or gmail_service is None or calendar_service is None
+    ):
         resolved_credentials = load_google_credentials(settings)
 
     resolved_connector = connector or make_connector(
@@ -259,6 +340,20 @@ def build_runtime(
     resolved_chat_state = chat_state or JsonChatSubscriptionState(
         settings.chat_subscription_state_path
     )
+    resolved_calendar_watch_state = calendar_watch_state or JsonCalendarChannelState(
+        settings.calendar_watch_state_path
+    )
+    resolved_calendar_sync_state = calendar_sync_state or JsonCalendarSyncState(
+        settings.calendar_sync_state_path
+    )
+
+    resolved_calendar_service = calendar_service
+    if resolved_calendar_service is None:  # pragma: no cover - requires live creds
+        from googleapiclient.discovery import build as _build
+
+        resolved_calendar_service = _build(
+            "calendar", "v3", credentials=resolved_credentials
+        )
 
     resolved_slack = slack
     resolved_slack_say = slack_say
@@ -312,4 +407,7 @@ def build_runtime(
         slack_say=resolved_slack_say,
         gchat=resolved_gchat,
         chat_events_service=resolved_chat_events_service,
+        calendar_service=resolved_calendar_service,
+        calendar_watch_state=resolved_calendar_watch_state,
+        calendar_sync_state=resolved_calendar_sync_state,
     )

@@ -27,7 +27,7 @@ Dev setup and full test run:
 ```bash
 pip install -e "packages/bearer-openai[dev]"
 pip install -e "packages/aidedecamp[dev]"
-pytest        # 216 tests should pass as a baseline before you change anything
+pytest        # 253 tests should pass as a baseline before you change anything
 ```
 
 Optional extras are lazy-imported so the package loads without them:
@@ -56,9 +56,13 @@ and `credentials.py`).
   `handle_interaction` + `post_text`) + pure `blocks.py` builders shared by both.
 - `ingestion/` — `gmail_watch.py` + `gmail_history.py` (Gmail watch lifecycle,
   Pub/Sub notification reconciliation); `chat_events.py` (Workspace Events
-  subscription lifecycle + message parsing); `state.py` (`JsonGmailWatchState`/
-  `JsonChatSubscriptionState` — concrete, file-backed persistence for the two
-  protocols above). No Calendar ingestion yet.
+  subscription lifecycle + message parsing); `calendar_watch.py` +
+  `calendar_sync.py` (Calendar channel lifecycle + sync-token reconciliation —
+  the one source with a real inbound webhook, see rule 5 below); `state.py`
+  (`JsonGmailWatchState`/`JsonChatSubscriptionState`/`JsonCalendarChannelState`/
+  `JsonCalendarSyncState` — concrete, file-backed persistence for all four
+  protocols above). No action layer wired to Calendar changes yet (no
+  scheduling graph exists).
 - `dispatcher.py` — the routing seam: turns a decoded Gmail notification or a
   Chat/Slack message into a graph invocation or a brief/converse reply.
   Channel-agnostic (`post_approval`/`post_text` are injected callables);
@@ -70,9 +74,10 @@ and `credentials.py`).
   Fuel iX client, Mem0Store, SqliteSaver, and audit log into one process.
 - `runtime.py` — the always-on entrypoint (`build_runtime` → `Runtime`): wires
   `AppContext` + connector + credentials + Slack/Chat channels into one
-  process; `process_gmail_notification`/`process_chat_event`/`renew_*` are
-  tested wiring, `run`/`run_*_pubsub_loop` are thin live loops (pull
-  subscriptions, no inbound port) needing real GCP/Slack. `__main__.py` calls
+  process; `process_gmail_notification`/`process_chat_event`/
+  `process_calendar_notification`/`renew_*` are tested wiring,
+  `run`/`run_*_pubsub_loop` are thin live loops (pull subscriptions, no
+  inbound port) needing real GCP/Slack. `__main__.py` calls
   `build_runtime().run()`.
 - `audit/` — `JsonlAuditLog`: structured, queryable reason-for-action log
   (design 4.7). Wired into `dispatcher.handle_gmail_notification` only — Q&A
@@ -135,22 +140,22 @@ Fuel iX: `base_url = https://api.fuelix.ai`; models `claude-haiku-4-5`,
 
 `app.py`, `DirectOAuthConnector`, the Google Chat channel, `credentials.py`,
 Chat ingestion, `dispatcher.py`, the audit log, `runtime.py` (the entrypoint),
-and Slack conversational Q&A are all done (see `docs/decisions.md`). What's
-left:
+Slack conversational Q&A, and Calendar ingestion are all done (see
+`docs/decisions.md`). What's left:
 
-1. **Calendar ingestion.** `list_events`/`create_hold` exist on the connector,
-   but there's no Calendar push-notification path. Design 4.6 flags this as the
-   one source needing a real inbound webhook (HTTPS, no Pub/Sub option) — route
-   it through a thin, stateless republisher so the credential-holding process
-   still never has an open port (rule 5).
-2. **(Lower priority) A triage step.** `Task.CLASSIFY` (Haiku 4.5) is routed in
-   `fuelix.py` but never called — every new thread goes straight to draft, with
-   no urgent/routine/noise pass. Design 4.2 calls this a separate small graph.
-3. **Actually deploy it.** `runtime.py`'s wiring is tested, but `run()`,
-   `run_gmail_pubsub_loop()`, and `run_chat_pubsub_loop()` have never touched a
-   real GCP project or Slack workspace — that requires provisioning the Pub/Sub
-   topics/subscriptions design 4.6 describes, which is infrastructure work, not
-   code.
+1. **A triage step.** `Task.CLASSIFY` (Haiku 4.5) is routed in `fuelix.py` but
+   never called — every new thread goes straight to draft, with no
+   urgent/routine/noise pass. Design 4.2 calls this a separate small graph.
+2. **A scheduling action layer for Calendar.** Ingestion (`calendar_watch.py`/
+   `calendar_sync.py`, `Runtime.process_calendar_notification`) stops at
+   "here are the changed/cancelled event ids" — there's no graph that reacts
+   to them (propose a hold, flag a conflict, etc.), matching design's
+   unbuilt "scheduling graph."
+3. **Actually deploy it.** `runtime.py`'s wiring is tested, but `run()` and
+   the `run_*_pubsub_loop()` methods have never touched a real GCP project or
+   Slack workspace — that requires provisioning the Pub/Sub topics/
+   subscriptions (and, for Calendar, the external webhook republisher) design
+   4.6 describes, which is infrastructure work, not code.
 
 ## Still open (verify before relying on)
 

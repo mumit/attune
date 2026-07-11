@@ -3,6 +3,55 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Calendar ingestion (design 4.3, 4.6's one webhook exception)
+
+- **Two ingestion modules, mirroring the Gmail split exactly**:
+  `ingestion/calendar_watch.py` (channel registration/renewal, parallel to
+  `gmail_watch.py`) and `ingestion/calendar_sync.py` (notification
+  reconciliation, parallel to `gmail_history.py`). Same reason for the split:
+  channel/watch lifecycle and change-tracking are genuinely separate concerns.
+- **Calendar's change-tracking is structurally different from Gmail's, and
+  that difference is load-bearing.** Gmail's `users.watch()` call itself
+  returns a fresh `historyId`, so re-registering the watch on
+  `HistoryExpired` happens to also re-baseline it — one recovery action fixes
+  both problems. Calendar's `events.watch()` returns no sync token at all; a
+  sync token can *only* come from a full `events.list()` pass. So renewing
+  the notification channel (`ensure_calendar_watch`) and recovering from an
+  expired sync token (`full_calendar_sync`) are two **unrelated** operations
+  here — `runtime.Runtime.process_calendar_notification()` catches
+  `SyncExpired` and calls `full_calendar_sync`, never
+  `renew_calendar_watch()`. Conflating the two would look plausible (it's
+  exactly what works for Gmail) and would silently fail to recover.
+- **Channel renewal stops the superseded channel** (`stop_calendar_channel`,
+  called from inside `ensure_calendar_watch` on a real renewal) so Google
+  doesn't accumulate stale channels against the same calendar resource —
+  Gmail/Chat have no equivalent "stop" step since Pub/Sub watches don't leak
+  the same way.
+- **Calendar is confirmed as the one source needing a real inbound webhook**
+  (design 4.6): `events.watch()` only delivers via HTTPS POST, no Pub/Sub
+  option. The architectural answer stays the same as the rest of the system
+  (rule 5): a thin, stateless external republisher receives and validates the
+  webhook, then republishes onto a Pub/Sub topic
+  (`calendar_pubsub_subscription`) this process pulls from — this codebase
+  only implements the pull side and `decode_calendar_headers` (for that
+  republisher's convenience, mirroring `decode_pubsub_message`), never an
+  inbound listener.
+- **No action layer wired yet, deliberately.** `Runtime.process_calendar_notification()`
+  stops at "here are the changed/cancelled event ids" — the same boundary
+  `gmail_history.process_notification` has before `dispatcher.py` takes over
+  and invokes the draft-approve graph. There is no scheduling graph yet
+  (design confirms this is unbuilt), so inventing a dispatcher-level
+  "handle_calendar_notification" would mean fabricating an action the design
+  doesn't define. This is an honest stopping point, not a gap to silently
+  paper over.
+- **New concrete state**: `JsonCalendarChannelState` (epoch-ms expiration,
+  same convention as `JsonGmailWatchState`) and `JsonCalendarSyncState`
+  (trivial — a sync token is just an opaque string, no datetime involved).
+- **New config**: `calendar_pubsub_topic`/`calendar_pubsub_subscription`,
+  `calendar_webhook_address` (the republisher's HTTPS endpoint — Google POSTs
+  here, not to this process), `calendar_id` (default `"primary"`),
+  `calendar_watch_state_path`/`calendar_sync_state_path`.
+
 ## 2026-07 — Slack conversational Q&A (design 4.4)
 
 - **`dispatcher.py` gains `handle_slack_message`**, sharing a new

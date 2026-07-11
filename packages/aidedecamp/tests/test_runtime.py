@@ -240,7 +240,7 @@ def test_build_runtime_uses_all_overrides():
         chat_state=chat_state,
         slack=slack,
         gchat=gchat,
-        chat_events_service=object(),
+        chat_events_service=object(), calendar_service=object(),
     )
 
     assert isinstance(runtime, Runtime)
@@ -266,7 +266,7 @@ def test_build_runtime_defaults_watch_and_chat_state_to_json_files(tmp_path):
         app=_app_ctx(),
         connector=_FakeConnector(),
         gmail_service=_FakeGmailService(),
-        chat_events_service=object(),
+        chat_events_service=object(), calendar_service=object(),
     )
 
     assert isinstance(runtime.watch_state, JsonGmailWatchState)
@@ -277,7 +277,7 @@ def test_build_runtime_slack_none_when_no_bot_token():
     settings = _settings()  # no SLACK_BOT_TOKEN
     runtime = build_runtime(
         settings, app=_app_ctx(), connector=_FakeConnector(),
-        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(), calendar_service=object(),
     )
     assert runtime.slack is None
     assert runtime.slack_say is None
@@ -287,7 +287,7 @@ def test_build_runtime_builds_slack_channel_when_bot_token_present():
     settings = _settings(SLACK_BOT_TOKEN="xoxb-token")
     runtime = build_runtime(
         settings, app=_app_ctx(), connector=_FakeConnector(),
-        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(), calendar_service=object(),
     )
     from aidedecamp.channels import SlackChannel
 
@@ -300,7 +300,7 @@ def test_build_runtime_builds_slack_say_when_channel_configured():
     settings = _settings(SLACK_BOT_TOKEN="xoxb-token", ADC_SLACK_CHANNEL="C123")
     runtime = build_runtime(
         settings, app=_app_ctx(), connector=_FakeConnector(),
-        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(), calendar_service=object(),
     )
     assert callable(runtime.slack_say)
 
@@ -310,7 +310,7 @@ def test_build_runtime_wires_slack_message_fn_to_converse():
     settings = _settings(SLACK_BOT_TOKEN="xoxb-token")
     runtime = build_runtime(
         settings, app=_app_ctx(client=client), connector=_FakeConnector(),
-        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(), calendar_service=object(),
     )
 
     replies = []
@@ -325,7 +325,7 @@ def test_build_runtime_wires_slack_message_fn_to_brief():
     client = _FakeClient(reply="Two unread, one meeting.")
     runtime = build_runtime(
         settings, app=_app_ctx(client=client), connector=connector,
-        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(), calendar_service=object(),
     )
 
     replies = []
@@ -338,7 +338,7 @@ def test_build_runtime_gchat_none_when_no_default_space():
     settings = _settings()  # no ADC_CHAT_SPACE
     runtime = build_runtime(
         settings, app=_app_ctx(), connector=_FakeConnector(),
-        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(), calendar_service=object(),
     )
     assert runtime.gchat is None
 
@@ -351,7 +351,7 @@ def test_build_runtime_respects_gchat_override_even_with_default_space():
     runtime = build_runtime(
         settings, app=_app_ctx(), connector=_FakeConnector(),
         gmail_service=_FakeGmailService(), gchat=fake_gchat,
-        chat_events_service=object(),
+        chat_events_service=object(), calendar_service=object(),
     )
     assert runtime.gchat is fake_gchat
 
@@ -390,7 +390,7 @@ def test_build_runtime_builds_gchat_via_make_chat_send_fn(tmp_path):
         runtime = build_runtime(
             settings, app=_app_ctx(), connector=_FakeConnector(),
             gmail_service=_FakeGmailService(), credentials=object(),
-            chat_events_service=object(),
+            chat_events_service=object(), calendar_service=object(),
         )
 
     from aidedecamp.channels import GoogleChatChannel
@@ -412,7 +412,7 @@ def _runtime(**overrides):
         gmail_service=_FakeGmailService(),
         watch_state=_FakeWatchState(),
         chat_state=_FakeChatState(),
-        chat_events_service=object(),
+        chat_events_service=object(), calendar_service=object(),
     )
     kwargs.update(overrides)
     return build_runtime(_settings(), **kwargs)
@@ -572,3 +572,173 @@ def test_renew_chat_subscription_uses_settings_space_and_topic():
 
     assert result.space == "spaces/ABC"
     assert calls[0]["targetResource"] == "//chat.googleapis.com/spaces/ABC"
+
+
+# ---------------------------------------------------------------------------
+# build_runtime — Calendar state defaults
+# ---------------------------------------------------------------------------
+
+
+def test_build_runtime_defaults_calendar_state_to_json_files(tmp_path):
+    from aidedecamp.ingestion.state import JsonCalendarChannelState, JsonCalendarSyncState
+
+    watch_path = tmp_path / "cal_watch.json"
+    sync_path = tmp_path / "cal_sync.json"
+    settings = _settings(
+        ADC_CALENDAR_WATCH_STATE_PATH=str(watch_path),
+        ADC_CALENDAR_SYNC_STATE_PATH=str(sync_path),
+    )
+
+    runtime = build_runtime(
+        settings, app=_app_ctx(), connector=_FakeConnector(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        calendar_service=object(),
+    )
+
+    assert isinstance(runtime.calendar_watch_state, JsonCalendarChannelState)
+    assert isinstance(runtime.calendar_sync_state, JsonCalendarSyncState)
+
+
+def test_build_runtime_uses_calendar_service_override():
+    calendar_service = object()
+    runtime = build_runtime(
+        _settings(), app=_app_ctx(), connector=_FakeConnector(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(),
+        calendar_service=calendar_service,
+    )
+    assert runtime.calendar_service is calendar_service
+
+
+# ---------------------------------------------------------------------------
+# process_calendar_notification
+# ---------------------------------------------------------------------------
+
+
+class _FakeCalendarEventsService:
+    def __init__(self, pages):
+        self._pages = pages
+        self._i = 0
+        self.list_calls: list[dict] = []
+
+    def events(self):
+        svc = self
+
+        class _Events:
+            def list(self, **kwargs):
+                svc.list_calls.append(kwargs)
+                class _Req:
+                    def execute(self_):
+                        page = svc._pages[svc._i]
+                        svc._i += 1
+                        return page
+                return _Req()
+        return _Events()
+
+
+class _FakeCalendarSyncState:
+    def __init__(self, initial=None):
+        self._data = dict(initial or {})
+
+    def get(self, calendar_id):
+        return self._data.get(calendar_id)
+
+    def put(self, calendar_id, *, sync_token):
+        self._data[calendar_id] = {"sync_token": sync_token}
+
+
+def test_process_calendar_notification_reconciles_with_baseline():
+    from aidedecamp.ingestion.calendar_sync import CalendarChanges
+
+    sync_state = _FakeCalendarSyncState({"primary": {"sync_token": "old-token"}})
+    calendar_service = _FakeCalendarEventsService(pages=[
+        {"items": [{"id": "e1"}], "nextSyncToken": "new-token"}
+    ])
+    runtime = _runtime(
+        calendar_service=calendar_service, calendar_sync_state=sync_state,
+    )
+    runtime.settings = _settings(ADC_CALENDAR_ID="primary")
+
+    result = runtime.process_calendar_notification({"resource_state": "exists"})
+
+    assert isinstance(result, CalendarChanges)
+    assert result.event_ids == ["e1"]
+    assert sync_state.get("primary")["sync_token"] == "new-token"
+
+
+def test_process_calendar_notification_full_syncs_on_expired():
+    sync_state = _FakeCalendarSyncState()  # no baseline -> SyncExpired
+    calendar_service = _FakeCalendarEventsService(pages=[
+        {"items": [{"id": "e1"}], "nextSyncToken": "fresh-token"}
+    ])
+    runtime = _runtime(
+        calendar_service=calendar_service, calendar_sync_state=sync_state,
+    )
+    runtime.settings = _settings(ADC_CALENDAR_ID="primary")
+
+    result = runtime.process_calendar_notification({"resource_state": "sync"})
+
+    assert result.event_ids == ["e1"]
+    assert result.next_sync_token == "fresh-token"
+    assert sync_state.get("primary")["sync_token"] == "fresh-token"
+
+
+# ---------------------------------------------------------------------------
+# renew_calendar_watch
+# ---------------------------------------------------------------------------
+
+
+class _FakeCalendarWatchService:
+    def __init__(self, resource_id="res-1", expire_ms="99999999999999"):
+        self._resource_id = resource_id
+        self._expire_ms = expire_ms
+        self.watch_calls: list = []
+
+    def events(self):
+        svc = self
+
+        class _Events:
+            def watch(self, calendarId, body):
+                svc.watch_calls.append({"calendarId": calendarId, "body": body})
+                class _Req:
+                    def execute(self_):
+                        return {"resourceId": svc._resource_id, "expiration": svc._expire_ms}
+                return _Req()
+        return _Events()
+
+    def channels(self):
+        class _Channels:
+            def stop(self, body):
+                class _Req:
+                    def execute(self_):
+                        return {}
+                return _Req()
+        return _Channels()
+
+
+class _FakeCalendarWatchState:
+    def __init__(self):
+        self._data: dict = {}
+
+    def get(self, calendar_id):
+        return self._data.get(calendar_id)
+
+    def put(self, calendar_id, *, channel_id, resource_id, expiration):
+        self._data[calendar_id] = {
+            "channel_id": channel_id, "resource_id": resource_id, "expiration": expiration,
+        }
+
+
+def test_renew_calendar_watch_uses_settings_calendar_id_and_address():
+    calendar_service = _FakeCalendarWatchService(resource_id="res-42")
+    watch_state = _FakeCalendarWatchState()
+    runtime = _runtime(calendar_service=calendar_service, calendar_watch_state=watch_state)
+    runtime.settings = _settings(
+        ADC_CALENDAR_ID="primary",
+        ADC_CALENDAR_WEBHOOK_ADDRESS="https://republisher.example.com/hook",
+    )
+
+    result = runtime.renew_calendar_watch(force=True)
+
+    assert result.calendar_id == "primary"
+    assert result.resource_id == "res-42"
+    assert calendar_service.watch_calls[0]["body"]["address"] == "https://republisher.example.com/hook"

@@ -85,3 +85,50 @@ class JsonChatSubscriptionState:
             "expiration": expiration.astimezone(timezone.utc).isoformat(),
         }
         _save(self._path, data)
+
+
+class JsonCalendarChannelState:
+    """Persists Calendar notification channels:
+    ``{calendar_id: {channel_id, resource_id, expiration}}``.
+
+    ``expiration`` is stored as epoch milliseconds — the form
+    ``calendar_watch.ensure_calendar_watch``'s ``_from_epoch_ms`` expects when
+    the stored value isn't already a ``datetime`` (same convention as Gmail's
+    watch state; Calendar's ``events.watch`` returns expiration the same way).
+    """
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def get(self, calendar_id: str) -> dict[str, Any] | None:
+        return _load(self._path).get(calendar_id)
+
+    def put(
+        self, calendar_id: str, *, channel_id: str, resource_id: str, expiration: datetime
+    ) -> None:
+        data = _load(self._path)
+        data[calendar_id] = {
+            "channel_id": channel_id,
+            "resource_id": resource_id,
+            "expiration": int(expiration.timestamp() * 1000),
+        }
+        _save(self._path, data)
+
+
+class JsonCalendarSyncState:
+    """Persists Calendar incremental sync tokens: ``{calendar_id: {sync_token}}``.
+
+    No datetime involved, so serialization is trivial — the token is an
+    opaque string round-tripped as-is.
+    """
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def get(self, calendar_id: str) -> dict[str, Any] | None:
+        return _load(self._path).get(calendar_id)
+
+    def put(self, calendar_id: str, *, sync_token: str) -> None:
+        data = _load(self._path)
+        data[calendar_id] = {"sync_token": sync_token}
+        _save(self._path, data)
