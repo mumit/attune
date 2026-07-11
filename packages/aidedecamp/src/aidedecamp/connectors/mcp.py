@@ -106,6 +106,14 @@ class McpWorkspaceConnector(WorkspaceConnector):
     @staticmethod
     def _to_thread(d: dict[str, Any]) -> EmailThread:
         # Bodies from the server are external content -> FETCHED/untrusted.
+        last_at = d.get("last_message_at")
+        if isinstance(last_at, str):
+            try:
+                from datetime import datetime as _dt
+
+                last_at = _dt.fromisoformat(last_at)
+            except ValueError:
+                last_at = None
         return EmailThread(
             thread_id=d.get("thread_id") or d.get("id", ""),
             subject=d.get("subject", ""),
@@ -114,6 +122,8 @@ class McpWorkspaceConnector(WorkspaceConnector):
             body=d.get("body", d.get("snippet", "")),
             provenance=Provenance.FETCHED,
             labels=d.get("labels", []),
+            last_from_addr=d.get("last_from", d.get("from", "")),
+            last_message_at=last_at,
         )
 
     @staticmethod

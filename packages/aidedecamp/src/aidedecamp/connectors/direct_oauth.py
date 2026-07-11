@@ -269,6 +269,7 @@ def _thread_from_metadata(data: dict[str, Any]) -> EmailThread:
     this format (use ``get_thread`` for the full body)."""
     messages = data.get("messages") or []
     first = messages[0] if messages else {}
+    last = messages[-1] if messages else {}
     snippet = first.get("snippet", "")
     return EmailThread(
         thread_id=data.get("id", ""),
@@ -279,6 +280,8 @@ def _thread_from_metadata(data: dict[str, Any]) -> EmailThread:
         provenance=Provenance.FETCHED,
         received_at=_received_at(first),
         labels=first.get("labelIds", []),
+        last_from_addr=_header(last, "from"),
+        last_message_at=_received_at(last),
     )
 
 
@@ -297,6 +300,8 @@ def _thread_from_full(data: dict[str, Any]) -> EmailThread:
         provenance=Provenance.FETCHED,
         received_at=_received_at(first),
         labels=first.get("labelIds", []),
+        last_from_addr=_header(last, "from"),
+        last_message_at=_received_at(last),
     )
 
 

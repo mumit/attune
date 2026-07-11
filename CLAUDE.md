@@ -118,7 +118,11 @@ and `credentials.py`).
   NOT the MemoryStore — no `store.add`, no learning; that boundary is stated
   in its docstring and must stay hard.
 - `brief.py` — read-only morning brief (first end-to-end deliverable). A plain
-  function, not a graph — it has no HITL/interrupt need.
+  function, not a graph — it has no HITL/interrupt need. v2: local-timezone
+  day boundaries/rendering (`ADC_TIMEZONE`), per-meeting prep (memory + one
+  capped related-thread query per event, still one model call total), and
+  `find_quiet_threads` — the single source of "waiting on" truth; the
+  follow-up nudge feature must reuse it, not reimplement it.
 - `scheduler.py` — hand-rolled in-process scheduler (injected clock,
   deterministic tests; deliberately not APScheduler). `Runtime.build_scheduler()`
   assembles the standard jobs: daily brief (`ADC_BRIEF_TIME`/`ADC_TIMEZONE`),

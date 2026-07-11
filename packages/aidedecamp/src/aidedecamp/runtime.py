@@ -36,11 +36,62 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .app import AppContext, build_app
+from .brief import assemble_brief
+from .config import Settings
+from .conversation import JsonConversationLog
+from .connectors import WorkspaceConnector, make_connector
+from .credentials import load_google_credentials
+from .dispatcher import (
+    handle_calendar_notification,
+    handle_chat_interaction,
+    handle_chat_message,
+    handle_gmail_notification,
+    handle_slack_message,
+)
+from .ingestion import (
+    HistoryExpired,
+    JsonCalendarChannelState,
+    JsonCalendarSyncState,
+    JsonChatSubscriptionState,
+    JsonGmailWatchState,
+    ensure_calendar_watch,
+    ensure_subscription,
+    ensure_watch,
+)
+from .orchestrator import (
+    JsonPendingApprovals,
+    make_connector_apply_fn,
+    resume_workflow,
+    sweep_ignored,
+)
+from .ingestion.calendar_sync import SyncState
+from .ingestion.calendar_watch import ChannelState
+from .ingestion.chat_events import SubscriptionState
+from .ingestion.gmail_watch import WatchState
+
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 300
 BACKOFF_INITIAL_SECONDS = 1
 BACKOFF_MAX_SECONDS = 60
+
+
+def _assemble_runtime_brief(connector: Any, app: AppContext, settings: Settings):
+    """The one place brief-assembly arguments are derived from settings, used
+    by every surface that produces a brief (scheduled post, Slack DM, Chat
+    message). ``user_email`` only when user_id is a real address — the quiet-
+    thread section needs something to match the last sender against, and the
+    Gmail "me" alias matches nothing."""
+    user = settings.user_id
+    return assemble_brief(
+        connector,
+        app.client,
+        store=app.store,
+        user_id=user,
+        user_email=user if "@" in user else None,
+        tz=settings.timezone,
+    )
 
 
 def next_backoff(current: float) -> float:
@@ -83,41 +134,6 @@ class LoopStats:
         self.pulled = self.handled = self.failed = 0
         self._last_beat = now
         return line
-
-from .app import AppContext, build_app
-from .brief import assemble_brief
-from .config import Settings
-from .conversation import JsonConversationLog
-from .connectors import WorkspaceConnector, make_connector
-from .credentials import load_google_credentials
-from .dispatcher import (
-    handle_calendar_notification,
-    handle_chat_interaction,
-    handle_chat_message,
-    handle_gmail_notification,
-    handle_slack_message,
-)
-from .ingestion import (
-    HistoryExpired,
-    JsonCalendarChannelState,
-    JsonCalendarSyncState,
-    JsonChatSubscriptionState,
-    JsonGmailWatchState,
-    ensure_calendar_watch,
-    ensure_subscription,
-    ensure_watch,
-)
-from .orchestrator import (
-    JsonPendingApprovals,
-    make_connector_apply_fn,
-    resume_workflow,
-    sweep_ignored,
-)
-from .ingestion.calendar_sync import SyncState
-from .ingestion.calendar_watch import ChannelState
-from .ingestion.chat_events import SubscriptionState
-from .ingestion.gmail_watch import WatchState
-
 
 @dataclass
 class Runtime:
@@ -186,8 +202,9 @@ class Runtime:
             self.gchat.post_text(self.settings.chat_default_space, text)
 
         def _brief_fn() -> str:
-            brief = assemble_brief(self.connector, self.app.client)
-            return brief.summary
+            return _assemble_runtime_brief(
+                self.connector, self.app, self.settings
+            ).summary
 
         handle_chat_message(
             self.app,
@@ -259,7 +276,7 @@ class Runtime:
         """Assemble one morning brief and post it to every configured channel
         (the Phase-0 deliverable — until the scheduler, nothing ever called
         this). Returns the Brief for callers that want the text."""
-        brief = assemble_brief(self.connector, self.app.client)
+        brief = _assemble_runtime_brief(self.connector, self.app, self.settings)
         if self.slack is not None and self.slack_say is not None:
             self.slack.post_brief(self.slack_say, brief)
         if self.gchat is not None and self.settings.chat_default_space:
@@ -705,8 +722,8 @@ def build_runtime(
                 text=text,
                 user_id=user_id,
                 post_text=post_text,
-                brief_fn=lambda: assemble_brief(
-                    resolved_connector, resolved_app.client
+                brief_fn=lambda: _assemble_runtime_brief(
+                    resolved_connector, resolved_app, settings
                 ).summary,
                 conversation=resolved_conversation,
             )

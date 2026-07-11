@@ -46,7 +46,13 @@ class Provenance(str, Enum):
 @dataclass
 class EmailThread:
     """A minimal, provenance-tagged view of a mail thread. Bodies are FETCHED
-    (untrusted) by construction."""
+    (untrusted) by construction.
+
+    ``from_addr``/``received_at`` describe the thread's FIRST message (who
+    started it, when); ``last_from_addr``/``last_message_at`` describe its
+    LATEST message — the pair quiet-thread detection needs ("the user sent
+    the last message N days ago, still no reply"; see ``brief.
+    find_quiet_threads``)."""
 
     thread_id: str
     subject: str
@@ -56,6 +62,8 @@ class EmailThread:
     provenance: Provenance = Provenance.FETCHED
     received_at: datetime | None = None
     labels: list[str] = field(default_factory=list)
+    last_from_addr: str = ""
+    last_message_at: datetime | None = None
 
 
 @dataclass

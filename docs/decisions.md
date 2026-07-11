@@ -3,6 +3,40 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Brief v2: local timezone, meeting prep, quiet threads (roadmap prompt 07)
+
+- **The UTC day-boundary bug is fixed** (roadmap defect #7): `assemble_brief`
+  computed "today" as the UTC day and rendered event times in UTC — for a
+  Pacific user that's the wrong day window and every meeting seven hours
+  off. It now takes `tz` (from `ADC_TIMEZONE`, stdlib `zoneinfo` — no new
+  dependency): day boundaries are computed in the user's timezone and
+  converted to UTC for the API window; rendered times are local, labeled
+  `(times in <tz>)`.
+- **Meeting prep** (design 3.3's "prep notes pulled from the last thread on
+  each"): per event (capped at 8), up to two remembered facts via
+  `store.search` plus the most recent related thread via **one**
+  metadata-level `list_threads` query (`"<summary>" OR from:<attendee>`,
+  `max_results=1` — read volume stays low per the still-open Google quota
+  concern). Prep lines ride inside the existing untrusted block; still
+  exactly one model call per brief, pinned by a test. Prep failures are
+  garnish, never fatal.
+- **`find_quiet_threads`** (design 3.3's "gone quiet"): threads where the
+  user sent the last message ≥ N days ago (default 3). Deliberately the
+  single source of quiet-thread truth — the follow-up nudge flow (roadmap
+  prompt 15) must reuse it, not reimplement it. This needed latest-message
+  metadata the thread dataclass didn't carry: `EmailThread` gained
+  `last_from_addr`/`last_message_at` (first-message fields unchanged),
+  implemented in both connectors (`messages[-1]` on the direct path; loose
+  `last_from`/`last_message_at` keys on MCP).
+- **`Brief` is structured now**: `meetings: list[MeetingPrep]`,
+  `waiting_on: list[EmailThread]`, `timezone` — so the CLI (prompt 08) and
+  future surfaces render parts without re-parsing prose. The quiet section
+  only exists when a real `user_email` is available to match the last
+  sender against; `runtime._assemble_runtime_brief` is the one place brief
+  arguments derive from settings (all three brief surfaces share it), and
+  passes `user_id` as the email only when it contains `@` (the Gmail
+  `"me"` alias matches nothing).
+
 ## 2026-07 — Loop supervision + structured logging (roadmap prompt 06)
 
 - **The silent-thread-death defect is closed.** Every pull loop was a bare
