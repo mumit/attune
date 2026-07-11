@@ -141,7 +141,8 @@ when the design doc gets long. Newest first.
   `McpWorkspaceConnector` (Google managed MCP servers) and
   `DirectOAuthConnector` (direct google-api-python-client). Selected by
   `config.ConnectorMode` via `make_connector` — a TELUS "no" on MCP is a config
-  change, not a rewrite. MCP connector is real; direct-OAuth is a documented stub.
+  change, not a rewrite. MCP connector is real; direct-OAuth was a documented
+  stub at this point (implemented later — see "DirectOAuthConnector" below).
 - **Send is not a default capability.** The managed Gmail MCP server exposes
   create_draft + labeling but NOT send, so the MCP connector structurally can't
   send. `send_reply` is refused by default (`SendNotPermitted`); only the
@@ -262,6 +263,8 @@ when the design doc gets long. Newest first.
   cadence; daily renewal + event-driven reads (not polling) keeps call volume low.
 
 ## Still open
-- Google Chat action-layer API design (sync events only vs full Workspace Events
-  pull pattern for v1).
 - Google's agent-tool quota/tiering impact on Gmail/Calendar watch + poll cadence.
+
+(Google Chat action-layer API design is answered — see "Google Chat channel"
+above. Current still-open / next-steps list lives in `CLAUDE.md`, not here, to
+avoid this list drifting out of sync with that one.)

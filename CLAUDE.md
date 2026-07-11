@@ -27,11 +27,13 @@ Dev setup and full test run:
 ```bash
 pip install -e "packages/bearer-openai[dev]"
 pip install -e "packages/aidedecamp[dev]"
-pytest        # 59 tests should pass as a baseline before you change anything
+pytest        # 169 tests should pass as a baseline before you change anything
 ```
 
 Optional extras are lazy-imported so the package loads without them:
-`[memory]` (mem0+qdrant), `[orchestrator]` (langgraph), `[slack]` (slack-bolt).
+`[memory]` (mem0+qdrant), `[orchestrator]` (langgraph), `[slack]` (slack-bolt),
+`[google]` (google-api-python-client + google-auth, for DirectOAuthConnector
+and `credentials.py`).
 
 ## Module map (aidedecamp)
 
@@ -39,17 +41,32 @@ Optional extras are lazy-imported so the package loads without them:
   models. The ONLY place Fuel iX specifics live.
 - `config/` — per-deployment Settings from env (personal vs TELUS are separate
   deployments, not in-code branches).
+- `credentials.py` — Google credential loading (service account / OAuth user /
+  ADC), scoped for Gmail/Calendar/Chat.
 - `orchestrator/` — LangGraph. `autonomy.py` (permission matrix), `state.py`,
   `draft_approve.py` (the canonical retrieve→draft→gate→approve→capture loop).
 - `memory/` — substrate-agnostic `MemoryStore` (`base.py`), Mem0 impl
   (`mem0_store.py`), capture signals (`signals.py`).
 - `connectors/` — swappable `WorkspaceConnector`: `mcp.py` (real, Google managed
-  MCP), `direct_oauth.py` (STUB — next to implement). `make_connector` selects by
-  config.
-- `channels/` — `slack.py` (Socket Mode) + pure `blocks.py` builders.
-- `ingestion/` — Gmail watch lifecycle + Pub/Sub notification reconciliation.
-- `brief.py` — read-only morning brief (first end-to-end deliverable).
-- `audit/` — reason-for-action log (stub).
+  MCP), `direct_oauth.py` (real, google-api-python-client). `make_connector`
+  selects by config.
+- `channels/` — `slack.py` (Socket Mode, approval buttons only — no
+  conversational wiring yet) + `gchat.py`/`gchat_cards.py` (Cards v2, thin-door,
+  approvals + `handle_interaction`) + pure `blocks.py` builders shared by both.
+- `ingestion/` — `gmail_watch.py` + `gmail_history.py` (Gmail watch lifecycle,
+  Pub/Sub notification reconciliation); `chat_events.py` (Workspace Events
+  subscription lifecycle + message parsing). No Calendar ingestion yet.
+- `dispatcher.py` — the routing seam: turns a decoded Gmail notification or
+  Chat event into a graph invocation + channel post. Channel-agnostic
+  (`post_approval`/`post_text` are injected callables); nothing wires this to a
+  running Slack/Chat process yet (see Next steps).
+- `brief.py` — read-only morning brief (first end-to-end deliverable). A plain
+  function, not a graph — it has no HITL/interrupt need.
+- `app.py` — runtime assembly (`build_app` → `AppContext`): wires the real
+  Fuel iX client, Mem0Store, SqliteSaver, and audit log into one process.
+- `audit/` — `JsonlAuditLog`: structured, queryable reason-for-action log
+  (design 4.7). Wired into `dispatcher.handle_gmail_notification`; not yet
+  wired into anything Slack-side.
 
 ## Non-negotiable rules
 
@@ -105,15 +122,37 @@ Fuel iX: `base_url = https://api.fuelix.ai`; models `claude-haiku-4-5`,
 
 ## Next steps (suggested order)
 
-1. `app.py` runtime assembly — wire real SqliteSaver checkpointer + Mem0Store +
-   Fuel iX client + draft-approve graph into one runnable process. Keep
-   everything else injected. Add tests.
-2. Implement `DirectOAuthConnector` against google-api-python-client, conforming
-   to `connectors/base.py`. Do NOT touch send-gating (rule 4).
-3. Google Chat as the second channel (reuse `channels/blocks.py` patterns).
+`app.py`, `DirectOAuthConnector`, the Google Chat channel, `credentials.py`,
+Chat ingestion, `dispatcher.py`, and the audit log are all done (see
+`docs/decisions.md`). What's left to make this an actually-running assistant,
+not just a tested library:
+
+1. **An entrypoint/`main.py`** that wires `build_app()` + a real connector +
+   Gmail/Chat ingestion + `SlackChannel`/`GoogleChatChannel` + `dispatcher.py`
+   into one always-on process (design 4.6). Nothing today binds
+   `dispatcher.handle_gmail_notification`'s `post_approval` callable to a real
+   channel and runs continuously — nothing is deployed yet.
+2. **Slack conversational Q&A.** `dispatcher.handle_chat_message`/`_converse`
+   exists and is wired for Google Chat only. Slack has no equivalent
+   (`SlackChannel` currently only handles approval-button clicks) — design 4.4
+   calls for Bolt's `Assistant` class (`assistant_thread_started`, `message.im`).
+3. **Calendar ingestion.** `list_events`/`create_hold` exist on the connector,
+   but there's no Calendar push-notification path. Design 4.6 flags this as the
+   one source needing a real inbound webhook (HTTPS, no Pub/Sub option) — route
+   it through a thin, stateless republisher so the credential-holding process
+   still never has an open port (rule 5).
+4. **(Lower priority) A triage step.** `Task.CLASSIFY` (Haiku 4.5) is routed in
+   `fuelix.py` but never called — every new thread goes straight to draft, with
+   no urgent/routine/noise pass. Design 4.2 calls this a separate small graph.
 
 ## Still open (verify before relying on)
 
-- Google Chat action-layer API design (sync events vs full Workspace Events pull).
 - Google agent-tool quota/tiering vs. the Gmail watch-renewal + read cadence —
   confirm against current Google quota docs before production.
+- No live deployment yet — Phase 0's "brief for a full week without
+  babysitting" bar (design.md §6) is unverified; everything above is
+  code-complete-and-tested, not run-in-production-complete.
+
+(Google Chat's action-layer API design — sync events vs. Workspace Events pull
+— is answered; see `docs/decisions.md`, "Google Chat channel" and "Credentials,
+Chat ingestion, and dispatcher".)

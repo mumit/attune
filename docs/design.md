@@ -254,29 +254,36 @@ Recommendation: build voice last, start with the cascaded approach, and only inv
 
 Each phase should produce something you actually use daily before moving to the next - this is the difference between a project that compounds and one that stalls at 80% forever.
 
+> **Implementation status (2026-07):** everything below marked ✅ is built and
+> covered by tests (169 passing) in `packages/aidedecamp/`; nothing has been
+> deployed or run against real accounts yet, so no phase's "Done when" usage
+> bar is actually met — that requires the entrypoint work in `CLAUDE.md`'s
+> "Next steps." Details and rationale for each ✅ item live in
+> `docs/decisions.md`.
+
 ### Phase 0 - Foundations (prove the loop end to end)
-- Stand up the LangGraph orchestrator with a Fuel iX-backed model client (incl. token refresh handling)
-- Stand up Mem0 self-hosted as the memory store
-- Pick **one** channel (Slack - fastest to prototype with Bolt's Assistant template) and **one** data source (Gmail, read-only)
-- Ship a v0 "morning brief": pulls unread/important mail, summarizes, posts to Slack
-- **Done when:** you get a genuinely useful daily brief in Slack, generated from your real inbox, for a full week without babysitting it
+- ✅ Stand up the LangGraph orchestrator with a Fuel iX-backed model client (incl. token refresh handling)
+- ✅ Stand up Mem0 self-hosted as the memory store
+- ✅ Pick **one** channel (Slack - fastest to prototype with Bolt's Assistant template) and **one** data source (Gmail, read-only) — *note: implemented without Bolt's `Assistant` class; see Phase 1 gap below*
+- ✅ Ship a v0 "morning brief": pulls unread/important mail, summarizes (`brief.py`) — not yet posted anywhere automatically; posting is wired (`SlackChannel.post_brief`) but nothing schedules/calls it
+- ❌ **Done when:** you get a genuinely useful daily brief in Slack, generated from your real inbox, for a full week without babysitting it — blocked on the entrypoint, not the logic
 
 ### Phase 1 - Read-only assistant, both data sources, two channels
-- Add Calendar (read-only) alongside Gmail
-- Add Google Chat as a second channel
-- Add conversational Q&A ("what's on my plate," "what did X say about Y") backed by memory + live retrieval
-- Start correction/implicit-feedback capture, even though nothing is being learned from it yet - you want historical data by the time Phase 4 arrives
-- **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly
+- ❌ Add Calendar (read-only) — connector supports `list_events`/`create_hold`, but there's no Calendar push-notification ingestion (design 4.6's one genuine webhook exception) yet
+- ✅ Add Google Chat as a second channel — Cards v2 + Workspace Events ingestion, both done
+- ✅/❌ Add conversational Q&A backed by memory + live retrieval — done for Chat (`dispatcher.handle_chat_message` → `_converse`); **not done for Slack** (design 4.4's Bolt `Assistant` class was never wired; `SlackChannel` only handles approval-button clicks today)
+- ✅ Start correction/implicit-feedback capture (`memory/signals.py`, wired into the draft-approve graph's `capture` node) — already doing more than "start," see Phase 2
+- **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly — not reachable until the Slack conversational gap above closes
 
 ### Phase 2 - Draft assistance (rung 2 autonomy)
-- Draft replies and scheduling proposals, delivered as interactive cards (Slack + Chat) with Send / Edit / Discard
-- Wire up correction-diff capture properly: every edit-before-send becomes a structured preference signal
-- **Done when:** more than half of routine replies start from an agent draft you only lightly edit
+- ✅ Draft replies delivered as interactive cards (Slack + Chat) with Send / Edit / Discard — scheduling proposals specifically (a scheduling graph) not built; only a generic draft-reply workflow exists
+- ✅ Wire up correction-diff capture properly: every edit-before-send becomes a structured preference signal (`capture_correction`)
+- **Done when:** more than half of routine replies start from an agent draft you only lightly edit — a usage claim, unverified with no deployment yet
 
 ### Phase 3 - Narrow autonomy (rung 3, then rung 4 for specific routines)
 - Graduate specific, low-risk, reversible actions to "act, notify after" (e.g., auto-decline obvious spam invites, auto-file newsletters)
 - Build the permission matrix UI (even a simple one) so you can see and adjust what's autonomous, per action type × domain
-- Full audit log with reasoning, queryable
+- ✅ Full audit log with reasoning, queryable — pulled forward from Phase 3 and already built (`audit/log.py`'s `JsonlAuditLog`), ahead of the rest of this phase
 - **Done when:** you've graduated at least 2–3 routines to autonomous and haven't had to claw one back
 
 ### Phase 4 - Memory maturity
@@ -312,8 +319,10 @@ Each phase should produce something you actually use daily before moving to the 
 5. **Project name and license (settled).** Name **Aide-de-camp** (`aidedecamp` on PyPI), **MIT** licensed, matching the permissive norm of the surrounding ecosystem (Mem0, LangGraph tooling, community Workspace MCP servers) and keeping TELUS dependency review frictionless. The Fuel iX adapter is a separate generic package (`bearer-openai` candidate), not named after the assistant, to maximize its reuse by others behind the same kind of enterprise gateway.
 
 ### Still open
-- **Google Chat action-layer API design** - decide for v1 whether Chat is handled via synchronous interaction events (@mentions, slash commands, card clicks) only, or whether the full Workspace Events API pull pattern (per §4.6) is needed from the start. Retrofitting the pull pattern later is more expensive than choosing it now.
 - **Agent-tool quota/tiering** - Google's new standardized usage tiers for agentic Workspace access (rollout from May 1, 2026; 60 days' notice for existing projects) specifically target always-on, high-volume watch/poll patterns. Confirm the intended Gmail/Calendar watch-renewal and polling cadence against current quota docs before Phase 0 ingestion is built.
+
+### Answered (2026-07)
+- **Google Chat action-layer API design** - both, not either/or: synchronous card-interaction events (`GoogleChatChannel.handle_interaction`, via the same thin-republisher pattern as Gmail) handle @mentions/button clicks, and the Workspace Events API pull pattern (`ingestion/chat_events.py::ensure_subscription`, mirroring the Gmail watch lifecycle) handles proactive message ingestion. See `docs/decisions.md` ("Google Chat channel" and "Credentials, Chat ingestion, and dispatcher").
 
 ### Verified (2026-07)
 - **Fuel iX base URL and model identifiers.** `base_url = https://api.fuelix.ai`. Models: `claude-haiku-4-5`, `claude-sonnet-4-7`, `claude-sonnet-5`, `gpt-5.4`, `gpt-5.6-luna`, `gpt-5.6-terra`. Encoded in Aide-de-camp's `fuelix.py` config module with task-shape routing (classify→Haiku 4.5, draft/converse→Sonnet 4.7, reason/consolidate→Sonnet 5).
