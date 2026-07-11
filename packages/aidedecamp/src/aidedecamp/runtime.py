@@ -204,6 +204,107 @@ class Runtime:
             audit_log=self.app.audit_log,
         )
 
+    def post_brief(self) -> Any:
+        """Assemble one morning brief and post it to every configured channel
+        (the Phase-0 deliverable — until the scheduler, nothing ever called
+        this). Returns the Brief for callers that want the text."""
+        brief = assemble_brief(self.connector, self.app.client)
+        if self.slack is not None and self.slack_say is not None:
+            self.slack.post_brief(self.slack_say, brief)
+        if self.gchat is not None and self.settings.chat_default_space:
+            self.gchat.post_brief(self.settings.chat_default_space, brief)
+        return brief
+
+    def renew_all_watches(self) -> dict[str, str]:
+        """Run every configured watch/subscription renewal, isolating and
+        auditing each — renewals are exactly the silent-failure class the
+        audit log exists for (a lapsed Gmail watch doesn't error, mail just
+        quietly stops arriving). Returns {name: "renewed" | "failed: ..."}.
+        """
+        renewals: list[tuple[str, Any]] = []
+        if self.settings.gmail_pubsub_topic:
+            renewals.append(("gmail_watch", self.renew_gmail_watch))
+        if self.settings.chat_pubsub_topic and self.settings.chat_default_space:
+            renewals.append(("chat_subscription", self.renew_chat_subscription))
+        if self.settings.calendar_webhook_address:
+            renewals.append(("calendar_watch", self.renew_calendar_watch))
+
+        results: dict[str, str] = {}
+        for name, renew in renewals:
+            try:
+                renew()
+                results[name] = "renewed"
+                event = {"event": "watch_renewed", "target": name}
+            except Exception as exc:  # noqa: BLE001 — one failure must not skip the rest
+                results[name] = f"failed: {type(exc).__name__}"
+                event = {
+                    "event": "renewal_failed",
+                    "target": name,
+                    "error": type(exc).__name__,
+                }
+            from datetime import datetime, timezone as _tz
+
+            event["ts"] = datetime.now(_tz.utc).isoformat()
+            self.app.audit_log.record(
+                thread_id=f"ops:renewal:{name}",
+                workflow="ops",
+                events=[event],
+                domain="ops",
+                user_id=self.settings.user_id,
+            )
+        return results
+
+    def run_consolidation(self) -> Any:
+        """Nightly memory-consolidation pass (design 2.2). The base substrate
+        implementation is currently a no-op report; this gives it its cadence
+        so the real pass (roadmap prompt 13) lands with a caller already in
+        place. The report is audited either way."""
+        report = self.app.store.consolidate(user_id=self.settings.user_id)
+        from datetime import datetime, timezone as _tz
+
+        self.app.audit_log.record(
+            thread_id="ops:consolidation",
+            workflow="ops",
+            events=[{
+                "event": "consolidation_ran",
+                "ts": datetime.now(_tz.utc).isoformat(),
+                "merged": getattr(report, "merged", 0),
+                "superseded": getattr(report, "superseded", 0),
+            }],
+            domain="ops",
+            user_id=self.settings.user_id,
+        )
+        return report
+
+    def build_scheduler(self) -> Any:
+        """Assemble the standard job set from settings (roadmap prompt 05):
+        daily brief at ``brief_time``, daily watch renewals, 6-hourly pending
+        sweep, nightly consolidation at ``consolidate_time`` — all in
+        ``settings.timezone`` where a wall-clock time is involved."""
+        from .scheduler import Job, Scheduler, daily_at, every
+
+        tz = self.settings.timezone
+        scheduler = Scheduler()
+        if (self.slack is not None and self.slack_say is not None) or (
+            self.gchat is not None and self.settings.chat_default_space
+        ):
+            scheduler.add(
+                Job("daily_brief", daily_at(self.settings.brief_time, tz), self.post_brief)
+            )
+        scheduler.add(Job("renew_watches", every(hours=24), self.renew_all_watches))
+        if self.pending is not None:
+            scheduler.add(
+                Job("sweep_pending", every(hours=6), self.sweep_pending_ignored)
+            )
+        scheduler.add(
+            Job(
+                "consolidate",
+                daily_at(self.settings.consolidate_time, tz),
+                self.run_consolidation,
+            )
+        )
+        return scheduler
+
     def sweep_pending_ignored(self, *, now: Any = None) -> int:
         """Turn stale unanswered approval cards into IGNORED memory signals
         (design 2.2). Called on a schedule; safe to call any time — each
@@ -348,10 +449,16 @@ class Runtime:
                 )
 
     def run(self) -> None:  # pragma: no cover
-        """Start the always-on process: Gmail/Chat/Calendar pull loops run in
-        background daemon threads; Slack Socket Mode blocks the main thread
-        (or, absent Slack, the main thread just waits so the daemon threads
-        keep running)."""
+        """Start the always-on process: renew all watches once at startup (a
+        fresh deployment must not wait a day for its first registration),
+        start the scheduler (brief / renewals / sweep / consolidation) and
+        the Gmail/Chat/Calendar pull loops on daemon threads; Slack Socket
+        Mode blocks the main thread (or, absent Slack, the main thread just
+        waits so the daemon threads keep running)."""
+        self.renew_all_watches()
+        scheduler = self.build_scheduler()
+        threading.Thread(target=scheduler.run_loop, daemon=True).start()
+
         if self.settings.gmail_pubsub_subscription:
             threading.Thread(target=self.run_gmail_pubsub_loop, daemon=True).start()
         if self.settings.chat_pubsub_subscription and self.gchat is not None:

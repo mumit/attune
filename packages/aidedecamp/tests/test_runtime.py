@@ -148,6 +148,12 @@ class _FakeMemoryStore:
 
     def add(self, *a, **kw): pass
 
+    def consolidate(self, *, user_id):
+        from aidedecamp.memory.base import ConsolidationReport
+        from datetime import datetime, timezone
+
+        return ConsolidationReport(user_id=user_id, ran_at=datetime.now(timezone.utc))
+
 
 class _FakeClient:
     def __init__(self, reply="assistant reply"):
@@ -179,6 +185,7 @@ class _FakeAuditLog:
 class _FakeSlackChannel:
     def __init__(self):
         self.approvals: list[dict] = []
+        self.briefs: list = []
 
     def post_approval(self, say, *, thread_id, domain, proposed_draft, rationale=None):
         self.approvals.append(
@@ -186,11 +193,15 @@ class _FakeSlackChannel:
              "proposed_draft": proposed_draft, "rationale": rationale}
         )
 
+    def post_brief(self, say, brief):
+        self.briefs.append(brief)
+
 
 class _FakeGChatChannel:
     def __init__(self):
         self.approvals: list[dict] = []
         self.texts: list[tuple] = []
+        self.briefs: list[tuple] = []
 
     def post_approval(self, space, *, thread_id, domain, proposed_draft, rationale=None):
         self.approvals.append(
@@ -200,6 +211,9 @@ class _FakeGChatChannel:
 
     def post_text(self, space, text):
         self.texts.append((space, text))
+
+    def post_brief(self, space, brief):
+        self.briefs.append((space, brief))
 
 
 def _settings(**overrides):
@@ -864,6 +878,98 @@ def test_process_chat_interaction_reject_posts_rejection_confirmation():
     runtime.process_chat_interaction(_interaction_click("adc_reject", "t-9"))
 
     assert gchat.texts == [("spaces/ABC", "🗑️ Rejected — nothing sent.")]
+
+
+def test_build_scheduler_assembles_expected_jobs():
+    """The standard job set (prompt 05): brief only when a channel can carry
+    it, renewals always, sweep when a registry exists, consolidation always."""
+    runtime = _runtime(slack=_FakeSlackChannel(), slack_say=lambda **kw: None)
+    names = [j.name for j in runtime.build_scheduler().jobs]
+    assert names == ["daily_brief", "renew_watches", "sweep_pending", "consolidate"]
+
+    # No channel configured -> no brief job (nowhere to post it).
+    quiet = _runtime()
+    names = [j.name for j in quiet.build_scheduler().jobs]
+    assert "daily_brief" not in names
+
+    # No registry -> no sweep job.
+    no_pending = _runtime(pending=None)
+    no_pending.pending = None
+    names = [j.name for j in no_pending.build_scheduler().jobs]
+    assert "sweep_pending" not in names
+
+
+def test_scheduler_brief_job_uses_configured_time_and_tz():
+    from datetime import datetime, timezone as _tz
+
+    runtime = _runtime(slack=_FakeSlackChannel(), slack_say=lambda **kw: None)
+    runtime.settings = _settings(ADC_BRIEF_TIME="06:15", ADC_TIMEZONE="America/Vancouver")
+    scheduler = runtime.build_scheduler()
+
+    # First tick schedules; 06:15 Vancouver in July (PDT) is 13:15 UTC.
+    t0 = datetime(2026, 7, 10, 1, 0, tzinfo=_tz.utc)
+    scheduler.run_pending(t0)
+    assert scheduler.next_run("daily_brief") == datetime(
+        2026, 7, 10, 13, 15, tzinfo=_tz.utc
+    )
+
+
+def test_post_brief_posts_to_both_channels():
+    slack = _FakeSlackChannel()
+    gchat = _FakeGChatChannel()
+    runtime = _runtime(slack=slack, slack_say=lambda **kw: None, gchat=gchat)
+    runtime.settings = _settings(ADC_CHAT_SPACE="spaces/ABC")
+
+    brief = runtime.post_brief()
+
+    assert brief.summary  # assembled from the fake connector/client
+    assert len(slack.briefs) == 1
+    assert len(gchat.briefs) == 1
+
+
+def test_renew_all_watches_isolates_and_audits_failures():
+    """One failing renewal must not skip the rest, and both outcomes are
+    audited under the ops workflow (prompt 05)."""
+    audit = _FakeAuditLog()
+    runtime = _runtime(app=_app_ctx(audit_log=audit))
+    runtime.settings = _settings(
+        ADC_GMAIL_PUBSUB_TOPIC="projects/p/topics/gmail",
+        ADC_CHAT_PUBSUB_TOPIC="projects/p/topics/chat",
+        ADC_CHAT_SPACE="spaces/ABC",
+    )
+
+    def boom(**kw):
+        raise RuntimeError("watch API down")
+
+    runtime.renew_gmail_watch = boom
+    renewed = []
+    runtime.renew_chat_subscription = lambda **kw: renewed.append("chat")
+
+    results = runtime.renew_all_watches()
+
+    assert results["gmail_watch"].startswith("failed")
+    assert results["chat_subscription"] == "renewed"
+    assert renewed == ["chat"]  # failure upstream didn't skip it
+    events = [r["events"][0]["event"] for r in audit.records]
+    assert events == ["renewal_failed", "watch_renewed"]
+    assert all(r["workflow"] == "ops" for r in audit.records)
+
+
+def test_renew_all_watches_skips_unconfigured_sources():
+    runtime = _runtime()  # _settings() sets no topics/spaces/webhook
+    assert runtime.renew_all_watches() == {}
+
+
+def test_run_consolidation_audits_report():
+    audit = _FakeAuditLog()
+    runtime = _runtime(app=_app_ctx(audit_log=audit))
+
+    report = runtime.run_consolidation()
+
+    assert report is not None
+    rec = audit.records[0]
+    assert rec["workflow"] == "ops"
+    assert rec["events"][0]["event"] == "consolidation_ran"
 
 
 def test_gmail_notification_registers_pending_card():

@@ -3,6 +3,37 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Scheduler: the always-on process finally schedules things (roadmap prompt 05)
+
+- **`scheduler.py`** — a deliberately hand-rolled in-process scheduler (~60
+  lines, injected clock, fully deterministic under test) rather than
+  APScheduler: four jobs on fixed cadences don't justify a dependency.
+  `Job(name, next_run_fn, action)` + `daily_at("HH:MM", tz)` / `every(...)`
+  helpers + `Scheduler.run_pending(now)` which fires due jobs, reschedules,
+  and isolates failures (one failing job logs into `last_error` and never
+  blocks siblings — and stays on cadence). Only `run_loop()` is a thin
+  threaded shell (`pragma: no cover`, the pull-loop precedent).
+- **First tick schedules, never fires.** Startup work that must happen
+  immediately is the caller's job — `Runtime.run()` now calls
+  `renew_all_watches()` once at boot (a fresh deployment must not wait a day
+  for its first watch registration), and a fire-on-boot rule would repost
+  the brief on every restart.
+- **The standard job set** (`Runtime.build_scheduler()`): `daily_brief` at
+  `ADC_BRIEF_TIME` in `ADC_TIMEZONE` (only when a channel is configured to
+  carry it), `renew_watches` every 24h, `sweep_pending` every 6h (prompt
+  03's registered TODO, now closed), `consolidate` at
+  `ADC_CONSOLIDATE_TIME` — the nightly design-2.2 pass now has a caller;
+  the substrate impl is still the no-op report until roadmap prompt 13.
+- **Renewals are audited per-target under an `"ops"` workflow**
+  (`watch_renewed`/`renewal_failed`) — a lapsed Gmail watch doesn't error,
+  mail just quietly stops arriving, which is exactly the silent-failure
+  class the audit log exists for. `renew_all_watches` only attempts
+  renewals whose settings are configured, and one failure never skips the
+  rest. `run_consolidation` audits its report the same way.
+- **New config**: `timezone` (`ADC_TIMEZONE`, IANA name, default UTC —
+  prompt 07's brief reuses this), `brief_time` (`ADC_BRIEF_TIME`, default
+  07:30), `consolidate_time` (`ADC_CONSOLIDATE_TIME`, default 02:00).
+
 ## 2026-07 — Conversation context for Q&A (roadmap prompt 04)
 
 - **`conversation.py`** — a `ConversationLog` Protocol + `JsonConversationLog`

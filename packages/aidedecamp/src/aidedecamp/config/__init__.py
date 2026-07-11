@@ -84,6 +84,11 @@ class Settings:
     conversation_state_path: str = "./conversation_state.json"
     converse_window_turns: int = 10
     converse_ttl_minutes: int = 120
+    # Scheduler cadences. timezone is an IANA name; brief/consolidate times
+    # are local wall-clock "HH:MM" in that timezone.
+    timezone: str = "UTC"
+    brief_time: str = "07:30"
+    consolidate_time: str = "02:00"
     # The single identity this deployment acts as (memory/audit user_id, and
     # the Gmail API "me" alias). One deployment = one identity, per design 4.6.
     user_id: str = "me"
@@ -139,6 +144,9 @@ class Settings:
             ),
             converse_window_turns=int(e.get("ADC_CONVERSE_WINDOW_TURNS", "10")),
             converse_ttl_minutes=int(e.get("ADC_CONVERSE_TTL_MINUTES", "120")),
+            timezone=e.get("ADC_TIMEZONE", "UTC"),
+            brief_time=e.get("ADC_BRIEF_TIME", "07:30"),
+            consolidate_time=e.get("ADC_CONSOLIDATE_TIME", "02:00"),
             user_id=e.get("ADC_USER_ID", "me"),
             slack_default_channel=e.get("ADC_SLACK_CHANNEL"),
             chat_default_space=e.get("ADC_CHAT_SPACE"),

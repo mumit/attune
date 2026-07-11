@@ -119,6 +119,12 @@ and `credentials.py`).
   in its docstring and must stay hard.
 - `brief.py` — read-only morning brief (first end-to-end deliverable). A plain
   function, not a graph — it has no HITL/interrupt need.
+- `scheduler.py` — hand-rolled in-process scheduler (injected clock,
+  deterministic tests; deliberately not APScheduler). `Runtime.build_scheduler()`
+  assembles the standard jobs: daily brief (`ADC_BRIEF_TIME`/`ADC_TIMEZONE`),
+  daily watch renewals (also run once at startup by `run()`), 6-hourly
+  pending sweep, nightly consolidation (`ADC_CONSOLIDATE_TIME`). First tick
+  schedules without firing — boot-time work belongs to the caller.
 - `app.py` — runtime assembly (`build_app` → `AppContext`): wires the real
   Fuel iX client, Mem0Store, SqliteSaver, and audit log into one process.
 - `runtime.py` — the always-on entrypoint (`build_runtime` → `Runtime`): wires
