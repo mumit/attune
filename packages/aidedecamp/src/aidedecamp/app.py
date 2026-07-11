@@ -19,6 +19,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
+from .audit.log import AuditLog, JsonlAuditLog
 from .config import Settings
 from .fuelix import make_client
 from .memory.base import MemoryStore
@@ -40,6 +41,7 @@ class AppContext:
     client: Any
     store: MemoryStore
     settings: Settings
+    audit_log: AuditLog
     _db_conn: Any = field(default=None, repr=False)
 
     def close(self) -> None:
@@ -62,6 +64,7 @@ def build_app(
     store: MemoryStore | None = None,
     checkpointer: Any = None,
     matrix: PermissionMatrix | None = None,
+    audit_log: AuditLog | None = None,
 ) -> AppContext:
     """Assemble the runtime from config and optional overrides.
 
@@ -73,10 +76,13 @@ def build_app(
     - *checkpointer* via ``SqliteSaver`` backed by
                      ``settings.checkpointer_db_path`` (requires
                      langgraph-checkpoint-sqlite)
+    - *audit_log*    via ``JsonlAuditLog(settings.audit_log_path)`` — the
+                     structured reason-for-action log (design rule 4.7)
 
-    Pass fakes for all three in tests to keep the suite offline::
+    Pass fakes for all four in tests to keep the suite offline::
 
-        build_app(client=FakeClient(), store=FakeStore(), checkpointer=InMemorySaver())
+        build_app(client=FakeClient(), store=FakeStore(), checkpointer=InMemorySaver(),
+                  audit_log=FakeAuditLog())
     """
     settings = settings or Settings.from_env()
 
@@ -99,6 +105,7 @@ def build_app(
         resolved_checkpointer = checkpointer
 
     resolved_store: MemoryStore = store or Mem0Store(build_mem0_config())
+    resolved_audit_log: AuditLog = audit_log or JsonlAuditLog(settings.audit_log_path)
 
     graph = build_draft_approve_graph(
         client=resolved_client,
@@ -112,5 +119,6 @@ def build_app(
         client=resolved_client,
         store=resolved_store,
         settings=settings,
+        audit_log=resolved_audit_log,
         _db_conn=db_conn,
     )

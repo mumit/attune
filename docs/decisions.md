@@ -3,6 +3,35 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Audit log (structured, retrievable reason-for-action)
+
+- **`audit/log.py` implements the design-4.7 requirement.** The draft-approve
+  graph already produced structured `audit_events` (`retrieved`, `drafted`,
+  `autonomy_gate`, `human_decision`, `auto_applied`, `signal_captured`) via
+  `_audit()`, but they only ever lived inside the LangGraph checkpoint, keyed
+  by `thread_id` — there was no way to ask "why did it do that" across
+  workflows or after a checkpoint is pruned. This closes that gap.
+- **`JsonlAuditLog`**: one JSON object per line, append-on-write, linear scan
+  on read, at `settings.audit_log_path` (already-existing config, previously
+  unused). Deliberately the simplest thing that satisfies "retrievable later"
+  — a SQL/index-backed store is a drop-in swap behind the same two-method
+  `AuditLog` protocol (`record`/`query`) later, exactly like the
+  `MemoryStore` substrate-agnostic pattern.
+- **`record()` stamps join keys onto every raw event**: `thread_id`,
+  `workflow`, `domain`, `user_id` are attached at write time so a later
+  `query()` needs only the audit file, never the original checkpoint.
+  `query()` filters by any combination of `thread_id` / `domain` / `user_id` /
+  `since`, plus a `limit` that keeps the most recent N.
+- **Wired into `AppContext`** as a required field (`build_app()` constructs a
+  real `JsonlAuditLog(settings.audit_log_path)` when no override is
+  injected, following the same override-or-build-real pattern as `client`,
+  `store`, and `checkpointer`).
+- **Wired into `dispatcher.handle_gmail_notification`** via an optional
+  `audit_log` keyword: when supplied, each workflow's `audit_events` are
+  recorded against its `lg_tid` right after `graph.invoke()` returns. Left
+  optional (not required) so existing callers/tests that don't care about
+  audit history aren't forced to inject one.
+
 ## 2026-07 — Credentials, Chat ingestion, and dispatcher
 
 - **`credentials.py`** resolves Google auth in priority order: (1) explicit

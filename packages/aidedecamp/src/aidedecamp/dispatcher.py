@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .app import AppContext
+from .audit.log import AuditLog
 from .connectors.base import WorkspaceConnector
 from .fuelix import Task, model_for
 from .ingestion.chat_events import ChatMessage, process_chat_event
@@ -40,6 +41,7 @@ def handle_gmail_notification(
     post_approval: Callable[[str, str, list[str] | None], None],
     user_id: str,
     thread_id_prefix: str = "gmail",
+    audit_log: AuditLog | None = None,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -47,6 +49,11 @@ def handle_gmail_notification(
     newly-changed thread the draft-approve graph is started; the graph pauses at
     the human-approval interrupt, and ``post_approval(lg_tid, draft, rationale)``
     is called so the channel can post an approval card.
+
+    When ``audit_log`` is supplied, the workflow's ``audit_events`` (retrieve,
+    draft, autonomy_gate, ...) are recorded against ``lg_tid`` so "why did it do
+    that" is answerable later, per design rule 4.7 — not just while the graph's
+    checkpoint happens to still exist.
 
     Returns the list of LangGraph thread_ids that were submitted (one per
     changed Gmail thread).  Raises :class:`~ingestion.HistoryExpired` when the
@@ -78,6 +85,15 @@ def handle_gmail_notification(
         config = {"configurable": {"thread_id": lg_tid}}
 
         result = app_ctx.graph.invoke(state, config)
+
+        if audit_log is not None:
+            audit_log.record(
+                thread_id=lg_tid,
+                workflow="draft_approve",
+                events=result.get("audit_events", []),
+                domain="mail",
+                user_id=user_id,
+            )
 
         proposed = result.get("proposed_draft") or ""
         rationale: list[str] | None = result.get("retrieved_memories") or None

@@ -91,14 +91,33 @@ class _FakeGmail:
 class _FakeGraph:
     """Fake LangGraph compiled graph that immediately returns a proposed_draft."""
 
-    def __init__(self, proposed="draft text", memories=None):
+    def __init__(self, proposed="draft text", memories=None, audit_events=None):
         self._proposed = proposed
         self._memories = memories or []
+        self._audit_events = audit_events or [
+            {"event": "retrieved", "ts": "2026-07-10T00:00:00+00:00"},
+            {"event": "drafted", "ts": "2026-07-10T00:00:01+00:00"},
+        ]
         self.calls: list[dict] = []
 
     def invoke(self, state, config):
         self.calls.append({"state": state, "config": config})
-        return {"proposed_draft": self._proposed, "retrieved_memories": self._memories}
+        return {
+            "proposed_draft": self._proposed,
+            "retrieved_memories": self._memories,
+            "audit_events": self._audit_events,
+        }
+
+
+class _FakeAuditLog:
+    def __init__(self):
+        self.records: list[dict] = []
+
+    def record(self, **kwargs):
+        self.records.append(kwargs)
+
+    def query(self, **kwargs):
+        return []
 
 
 class _FakeMemoryStore:
@@ -127,7 +146,7 @@ class _FakeClient:
         return _Resp()
 
 
-def _fake_app_ctx(graph=None, store=None, client=None):
+def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None):
     from aidedecamp.app import AppContext
     from aidedecamp.config import Settings
     s = Settings.from_env({"ADC_DEPLOYMENT": "personal", "ADC_CONNECTOR_MODE": "mcp",
@@ -137,6 +156,7 @@ def _fake_app_ctx(graph=None, store=None, client=None):
         client=client or _FakeClient(),
         store=store or _FakeMemoryStore(),
         settings=s,
+        audit_log=audit_log or _FakeAuditLog(),
     )
 
 
@@ -266,6 +286,74 @@ def test_handle_gmail_rationale_passed_through():
         user_id="me@example.com",
     )
     assert approvals[0][2] == mems
+
+
+# ---------------------------------------------------------------------------
+# handle_gmail_notification — audit_log wiring
+# ---------------------------------------------------------------------------
+
+
+def test_gmail_notification_records_audit_events_when_log_provided():
+    audit_log = _FakeAuditLog()
+    graph = _FakeGraph(audit_events=[{"event": "drafted", "ts": "2026-07-10T00:00:00+00:00"}])
+    app = _fake_app_ctx(graph=graph, audit_log=audit_log)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+
+    result = handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "600"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        audit_log=audit_log,
+    )
+
+    assert len(audit_log.records) == 1
+    rec = audit_log.records[0]
+    assert rec["thread_id"] == result[0]
+    assert rec["workflow"] == "draft_approve"
+    assert rec["domain"] == "mail"
+    assert rec["user_id"] == "me@example.com"
+    assert rec["events"] == [{"event": "drafted", "ts": "2026-07-10T00:00:00+00:00"}]
+
+
+def test_gmail_notification_no_audit_calls_when_log_absent():
+    graph = _FakeGraph()
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+
+    # audit_log intentionally omitted — should not raise, no recording call.
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "601"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+    )
+
+
+def test_gmail_notification_audit_skipped_for_failed_thread_fetch():
+    audit_log = _FakeAuditLog()
+    graph = _FakeGraph()
+    app = _fake_app_ctx(graph=graph, audit_log=audit_log)
+    connector = _FakeConnector({})  # get_thread raises for all
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "602"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        audit_log=audit_log,
+    )
+
+    assert audit_log.records == []
 
 
 # ---------------------------------------------------------------------------

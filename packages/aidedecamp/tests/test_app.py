@@ -53,7 +53,19 @@ class FakeClient:
         return _FakeResp("Short reply.")
 
 
+class FakeAuditLog:
+    def __init__(self):
+        self.recorded: list[dict] = []
+
+    def record(self, **kwargs):
+        self.recorded.append(kwargs)
+
+    def query(self, **kwargs):
+        return []
+
+
 def _fake_app(**kwargs):
+    kwargs.setdefault("audit_log", FakeAuditLog())
     return build_app(
         client=FakeClient(),
         store=FakeStore(),
@@ -91,6 +103,21 @@ def test_build_app_wires_all_collaborators():
     assert app.client is not None
     assert app.store is not None
     assert app.settings is not None
+    assert app.audit_log is not None
+
+
+def test_build_app_constructs_real_audit_log_when_absent(tmp_path):
+    from aidedecamp.audit.log import JsonlAuditLog
+
+    log_path = tmp_path / "audit.log.jsonl"
+    settings = Settings.from_env({"ADC_AUDIT_LOG_PATH": str(log_path)})
+    app = build_app(
+        settings=settings,
+        client=FakeClient(),
+        store=FakeStore(),
+        checkpointer=InMemorySaver(),
+    )
+    assert isinstance(app.audit_log, JsonlAuditLog)
 
 
 def test_build_app_uses_provided_settings():
@@ -157,6 +184,7 @@ def test_close_calls_conn_close():
         client=None,
         store=FakeStore(),
         settings=Settings.from_env(),
+        audit_log=FakeAuditLog(),
         _db_conn=_FakeConn(),
     )
     app.close()
@@ -176,6 +204,7 @@ def test_close_is_idempotent_on_real_conn():
         client=None,
         store=FakeStore(),
         settings=Settings.from_env(),
+        audit_log=FakeAuditLog(),
         _db_conn=_FakeConn(),
     )
     app.close()
@@ -195,6 +224,7 @@ def test_context_manager_closes_conn():
         client=None,
         store=FakeStore(),
         settings=Settings.from_env(),
+        audit_log=FakeAuditLog(),
         _db_conn=_FakeConn(),
     )
     with app:
