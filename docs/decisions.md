@@ -3,6 +3,37 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Roadmap v2 + build prompts (full design/implementation review)
+
+- **A full user-perspective review** (312 tests green at time of review) found
+  the safety architecture and test discipline sound, but three product-level
+  gaps: the interaction loop is open at both ends (Approve never materializes
+  a Gmail draft — `create_draft` had zero callers — and the Edit flow, the
+  design's richest learning signal, is a stub on both channels); the runtime
+  cannot run unattended (no scheduler ever calls the `renew_*` watch
+  renewals, posts the brief, or runs consolidation, and pull-loop daemon
+  threads die silently on any exception); and setup requires the full GCP
+  push stack before the first brief, though every reconciliation primitive is
+  already trigger-agnostic and could be timer-driven.
+- **`docs/roadmap.md` is the working execution plan** — five milestones
+  ordered by user value (close the loop → runs itself → easy setup → visible
+  learning → proactive), each with a "felt as" bar, superseding design.md §6
+  as the day-to-day plan while keeping its phases as the long arc. It also
+  catalogs 12 specific defects found (e.g., the brief computes "today" in
+  UTC; `ActionSignal.IGNORED` is never captured; the Slack approve
+  confirmation says "sending", which is false).
+- **`docs/build-prompts/` contains 16 self-contained Sonnet prompts**, one
+  per roadmap item, each restating the non-negotiable rules it brushes
+  against, its dependencies, and offline-test acceptance criteria — designed
+  to be run individually with Claude Code from the repo root.
+- **Notable directional decisions encoded in the prompts**: polling becomes
+  the default ingestion mode (outbound-only, rule-5-clean; push stays the
+  hardened production posture); a single `ADC_DATA_DIR` derives all state
+  paths; autonomy grants get persistence + an audit-derived track record but
+  a human always makes the grant (suggestions are never auto-applied, and
+  grant/revoke is CLI-only, not chat); the calendar write layer stays
+  design-first (prompt 16 phase 1 is a decisions entry, not code).
+
 ## 2026-07 — CI fixed: `deploy/` excluded from the main test collection
 
 - **Real CI failure**: `pytest packages/aidedecamp -q` (CI's actual invocation)

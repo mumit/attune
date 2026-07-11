@@ -4,6 +4,9 @@ Standing context for Claude Code. Read this and `docs/decisions.md` at the start
 of every session before making changes. `docs/design.md` is the deeper reference
 for architecture, memory model, autonomy ladder, and roadmap. `docs/deployment.md`
 covers the concrete GCP setup for personal and TELUS deployments.
+`docs/roadmap.md` is the current execution plan (2026-07 review findings +
+five prioritized milestones), with self-contained build prompts in
+`docs/build-prompts/` — if asked "what's next," start there.
 
 ## What this is
 
@@ -188,7 +191,13 @@ Chat ingestion, `dispatcher.py`, the audit log, `runtime.py` (the entrypoint),
 Slack conversational Q&A, Calendar ingestion, the triage step, Calendar
 scheduling-conflict detection, `deploy/republisher/` (Calendar webhook +
 Chat interactions, both async), and the async Chat card-interaction flow are
-all done (see `docs/decisions.md`). What's left:
+all done (see `docs/decisions.md`). **The full prioritized plan for what's
+left now lives in `docs/roadmap.md`** (a 2026-07 review found the interaction
+loop open at both ends — Approve never calls `create_draft`, Edit is a stub —
+plus no scheduler and silent pull-loop death; see the defect table there),
+with one ready-to-run build prompt per item in `docs/build-prompts/`. The two
+long-standing items below remain true and are folded into that plan (roadmap
+M2/M3 and prompt 16 respectively):
 
 1. **A Calendar write-action layer**, if wanted: creating holds or responding
    to invites automatically. Deliberately not built — there's no well-defined
