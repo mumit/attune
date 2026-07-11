@@ -11,7 +11,12 @@ from typing import Any
 
 import pytest
 
-from aidedecamp.dispatcher import handle_chat_message, handle_gmail_notification, _converse
+from aidedecamp.dispatcher import (
+    handle_chat_message,
+    handle_gmail_notification,
+    handle_slack_message,
+    _converse,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +451,78 @@ def test_chat_no_brief_fn_returns_fallback():
         # no brief_fn
     )
     assert "Brief not configured" in replies[0]
+
+
+# ---------------------------------------------------------------------------
+# handle_slack_message — same brief/converse routing, no event decoding step
+# ---------------------------------------------------------------------------
+
+
+def test_slack_message_converses_for_regular_text():
+    client = _FakeClient(reply="here is your answer")
+    app = _fake_app_ctx(client=client)
+    replies = []
+
+    handle_slack_message(
+        app, text="what's on my calendar?", user_id="U1", post_text=replies.append
+    )
+
+    assert replies == ["here is your answer"]
+
+
+def test_slack_message_calls_brief_fn_for_brief_keyword():
+    app = _fake_app_ctx()
+    replies = []
+
+    handle_slack_message(
+        app, text="give me the morning brief", user_id="U1",
+        post_text=replies.append, brief_fn=lambda: "brief content here",
+    )
+
+    assert replies == ["brief content here"]
+
+
+def test_slack_message_brief_fn_triggered_by_summary_keyword():
+    app = _fake_app_ctx()
+    replies = []
+
+    handle_slack_message(
+        app, text="I need a summary", user_id="U1",
+        post_text=replies.append, brief_fn=lambda: "your summary",
+    )
+
+    assert replies == ["your summary"]
+
+
+def test_slack_message_no_brief_fn_returns_fallback():
+    app = _fake_app_ctx()
+    replies = []
+
+    handle_slack_message(
+        app, text="morning brief please", user_id="U1", post_text=replies.append,
+        # no brief_fn
+    )
+
+    assert "Brief not configured" in replies[0]
+
+
+def test_slack_message_and_chat_message_share_routing_logic():
+    """handle_slack_message and handle_chat_message must agree on which
+    keywords trigger the brief path, since they share _respond_to_message."""
+    app = _fake_app_ctx()
+    slack_replies = []
+    chat_replies = []
+
+    handle_slack_message(
+        app, text="summary please", user_id="U1",
+        post_text=slack_replies.append, brief_fn=lambda: "B",
+    )
+    handle_chat_message(
+        app, _chat_event("summary please"),
+        post_text=chat_replies.append, user_id="me@example.com", brief_fn=lambda: "B",
+    )
+
+    assert slack_replies == chat_replies == ["B"]
 
 
 # ---------------------------------------------------------------------------

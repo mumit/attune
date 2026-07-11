@@ -38,7 +38,7 @@ from .brief import assemble_brief
 from .config import Settings
 from .connectors import WorkspaceConnector, make_connector
 from .credentials import load_google_credentials
-from .dispatcher import handle_chat_message, handle_gmail_notification
+from .dispatcher import handle_chat_message, handle_gmail_notification, handle_slack_message
 from .ingestion import (
     HistoryExpired,
     JsonChatSubscriptionState,
@@ -265,7 +265,20 @@ def build_runtime(
     if resolved_slack is None and settings.slack_bot_token:
         from .channels import SlackChannel, make_slack_say
 
-        resolved_slack = SlackChannel(graph=resolved_app.graph)
+        def _slack_message_fn(text, user_id, post_text):  # noqa: ANN001
+            handle_slack_message(
+                resolved_app,
+                text=text,
+                user_id=user_id,
+                post_text=post_text,
+                brief_fn=lambda: assemble_brief(
+                    resolved_connector, resolved_app.client
+                ).summary,
+            )
+
+        resolved_slack = SlackChannel(
+            graph=resolved_app.graph, message_fn=_slack_message_fn
+        )
         if settings.slack_default_channel:
             resolved_slack_say = make_slack_say(
                 settings.slack_bot_token, settings.slack_default_channel

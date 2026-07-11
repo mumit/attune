@@ -21,14 +21,21 @@ from aidedecamp.channels import (
 
 
 class FakeApp:
-    """Captures @app.action handlers by action_id."""
+    """Captures @app.action and @app.event handlers by id/name."""
 
     def __init__(self):
         self.handlers = {}
+        self.event_handlers = {}
 
     def action(self, action_id):
         def deco(fn):
             self.handlers[action_id] = fn
+            return fn
+        return deco
+
+    def event(self, event_name):
+        def deco(fn):
+            self.event_handlers[event_name] = fn
             return fn
         return deco
 
@@ -90,6 +97,91 @@ def test_reject_button_resumes_graph_rejected():
         ack=lambda: None, body=body, respond=lambda **k: None
     )
     assert resumes == [("t-9", "rejected", None)]
+
+
+# --- message -> conversational reply routing -----------------------------
+
+
+def _im_event(text="hello", user="U1", **overrides):
+    event = {"channel_type": "im", "text": text, "user": user}
+    event.update(overrides)
+    return event
+
+
+def test_message_handler_calls_message_fn_for_dm():
+    calls = []
+    app = FakeApp()
+    ch = SlackChannel(
+        app=app,
+        message_fn=lambda text, user, post_text: calls.append((text, user, post_text)),
+    )
+    say, say_calls = _say_recorder()
+
+    app.event_handlers["message"](event=_im_event("what's on my plate?"), say=say)
+
+    assert len(calls) == 1
+    text, user, post_text = calls[0]
+    assert text == "what's on my plate?"
+    assert user == "U1"
+
+    post_text("here's your answer")
+    assert say_calls == [{"text": "here's your answer"}]
+
+
+def test_message_handler_ignores_non_im_messages():
+    calls = []
+    app = FakeApp()
+    ch = SlackChannel(
+        app=app,
+        message_fn=lambda text, user, post_text: calls.append((text, user)),
+    )
+    say, _ = _say_recorder()
+
+    app.event_handlers["message"](
+        event=_im_event(channel_type="channel"), say=say
+    )
+
+    assert calls == []
+
+
+def test_message_handler_ignores_bot_id_messages():
+    calls = []
+    app = FakeApp()
+    ch = SlackChannel(
+        app=app,
+        message_fn=lambda text, user, post_text: calls.append((text, user)),
+    )
+    say, _ = _say_recorder()
+
+    app.event_handlers["message"](event=_im_event(bot_id="B123"), say=say)
+
+    assert calls == []
+
+
+def test_message_handler_ignores_bot_message_subtype():
+    calls = []
+    app = FakeApp()
+    ch = SlackChannel(
+        app=app,
+        message_fn=lambda text, user, post_text: calls.append((text, user)),
+    )
+    say, _ = _say_recorder()
+
+    app.event_handlers["message"](
+        event=_im_event(subtype="bot_message"), say=say
+    )
+
+    assert calls == []
+
+
+def test_unconfigured_message_fn_raises_on_dm():
+    app = FakeApp()
+    ch = SlackChannel(app=app)  # no message_fn injected
+    say, _ = _say_recorder()
+
+    import pytest
+    with pytest.raises(RuntimeError, match="message_fn"):
+        app.event_handlers["message"](event=_im_event("hi"), say=say)
 
 
 def test_post_brief_uses_say():

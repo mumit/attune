@@ -37,6 +37,14 @@ class SlackChannel:
         resume_fn: callable(thread_id, decision, text) -> resumes the graph.
             Injected so tests don't need a real compiled graph; defaults to a
             Command(resume=...) invoke against ``graph``.
+        message_fn: callable(text, user_id, post_text) -> handles an incoming
+            DM (design 4.4's conversational Q&A). ``post_text`` is a
+            callable(response_text) the handler calls to reply, wrapping
+            Bolt's live ``say`` — mirrors the ``post_text`` convention used by
+            Google Chat's conversational flow. No default: an unconfigured
+            channel should fail loudly on the first DM rather than silently
+            ignore users, same rationale as ``GoogleChatChannel``'s
+            unconfigured ``send_fn``.
         app: a pre-built Bolt App (tests inject a fake); if None, one is created
             from env tokens on first use.
     """
@@ -46,11 +54,13 @@ class SlackChannel:
         *,
         graph: Any = None,
         resume_fn: Callable[[str, str, str | None], Any] | None = None,
+        message_fn: Callable[[str, str, Callable[[str], None]], None] | None = None,
         app: Any = None,
     ):
         self._graph = graph
         self._app = app
         self._resume = resume_fn or self._default_resume
+        self._message = message_fn or _no_message_fn
         if app is not None:
             self._register(app)
 
@@ -137,6 +147,31 @@ class SlackChannel:
             # submit it calls self._resume(thread_id, "edited", edited_text).
             # The modal round-trip is UI wiring deferred to implementation.
             pass
+
+        @app.event("message")
+        def _message(event, say):  # noqa: ANN001
+            # Design 4.4's message.im: DMs only, and never our own messages
+            # (bot_id/subtype guard against self-reply loops, same rationale
+            # as chat_events.process_chat_event's BOT-sender filter).
+            if event.get("channel_type") != "im":
+                return
+            if event.get("bot_id") or event.get("subtype") == "bot_message":
+                return
+
+            text = event.get("text", "")
+            user = event.get("user", "")
+
+            def _post_text(response: str) -> None:
+                say(text=response)
+
+            self._message(text, user, _post_text)
+
+
+def _no_message_fn(text: str, user_id: str, post_text: Callable[[str], Any]) -> None:
+    raise RuntimeError(
+        "SlackChannel: no message_fn provided. Pass message_fn=<a callable "
+        "bound to dispatcher.handle_slack_message> or inject a fake for tests."
+    )
 
 
 def make_slack_say(bot_token: str, channel: str) -> Callable[..., Any]:

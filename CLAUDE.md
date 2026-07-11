@@ -27,7 +27,7 @@ Dev setup and full test run:
 ```bash
 pip install -e "packages/bearer-openai[dev]"
 pip install -e "packages/aidedecamp[dev]"
-pytest        # 204 tests should pass as a baseline before you change anything
+pytest        # 216 tests should pass as a baseline before you change anything
 ```
 
 Optional extras are lazy-imported so the package loads without them:
@@ -50,17 +50,20 @@ and `credentials.py`).
 - `connectors/` — swappable `WorkspaceConnector`: `mcp.py` (real, Google managed
   MCP), `direct_oauth.py` (real, google-api-python-client). `make_connector`
   selects by config.
-- `channels/` — `slack.py` (Socket Mode, approval buttons only — no
-  conversational wiring yet) + `gchat.py`/`gchat_cards.py` (Cards v2, thin-door,
-  approvals + `handle_interaction`) + pure `blocks.py` builders shared by both.
+- `channels/` — `slack.py` (Socket Mode: approval buttons + `message.im`
+  conversational DMs via `message_fn`, `make_slack_say` for proactive posts) +
+  `gchat.py`/`gchat_cards.py` (Cards v2, thin-door, approvals +
+  `handle_interaction` + `post_text`) + pure `blocks.py` builders shared by both.
 - `ingestion/` — `gmail_watch.py` + `gmail_history.py` (Gmail watch lifecycle,
   Pub/Sub notification reconciliation); `chat_events.py` (Workspace Events
   subscription lifecycle + message parsing); `state.py` (`JsonGmailWatchState`/
   `JsonChatSubscriptionState` — concrete, file-backed persistence for the two
   protocols above). No Calendar ingestion yet.
-- `dispatcher.py` — the routing seam: turns a decoded Gmail notification or
-  Chat event into a graph invocation + channel post. Channel-agnostic
-  (`post_approval`/`post_text` are injected callables).
+- `dispatcher.py` — the routing seam: turns a decoded Gmail notification or a
+  Chat/Slack message into a graph invocation or a brief/converse reply.
+  Channel-agnostic (`post_approval`/`post_text` are injected callables);
+  `handle_chat_message` and `handle_slack_message` share the brief-vs-converse
+  routing via `_respond_to_message`.
 - `brief.py` — read-only morning brief (first end-to-end deliverable). A plain
   function, not a graph — it has no HITL/interrupt need.
 - `app.py` — runtime assembly (`build_app` → `AppContext`): wires the real
@@ -72,8 +75,9 @@ and `credentials.py`).
   subscriptions, no inbound port) needing real GCP/Slack. `__main__.py` calls
   `build_runtime().run()`.
 - `audit/` — `JsonlAuditLog`: structured, queryable reason-for-action log
-  (design 4.7). Wired into `dispatcher.handle_gmail_notification`; not yet
-  wired into anything Slack-side.
+  (design 4.7). Wired into `dispatcher.handle_gmail_notification` only — Q&A
+  exchanges (Slack/Chat) aren't audited, which is probably fine (they're not
+  draft/approve/reject actions) but hasn't been explicitly decided.
 
 ## Non-negotiable rules
 
@@ -130,23 +134,19 @@ Fuel iX: `base_url = https://api.fuelix.ai`; models `claude-haiku-4-5`,
 ## Next steps (suggested order)
 
 `app.py`, `DirectOAuthConnector`, the Google Chat channel, `credentials.py`,
-Chat ingestion, `dispatcher.py`, the audit log, and `runtime.py` (the
-entrypoint) are all done (see `docs/decisions.md`). What's left:
+Chat ingestion, `dispatcher.py`, the audit log, `runtime.py` (the entrypoint),
+and Slack conversational Q&A are all done (see `docs/decisions.md`). What's
+left:
 
-1. **Slack conversational Q&A.** `dispatcher.handle_chat_message`/`_converse`
-   is wired for Google Chat only (`runtime.Runtime.process_chat_event` only
-   targets `gchat`). Slack has no equivalent (`SlackChannel` currently only
-   handles approval-button clicks) — design 4.4 calls for Bolt's `Assistant`
-   class (`assistant_thread_started`, `message.im`).
-2. **Calendar ingestion.** `list_events`/`create_hold` exist on the connector,
+1. **Calendar ingestion.** `list_events`/`create_hold` exist on the connector,
    but there's no Calendar push-notification path. Design 4.6 flags this as the
    one source needing a real inbound webhook (HTTPS, no Pub/Sub option) — route
    it through a thin, stateless republisher so the credential-holding process
    still never has an open port (rule 5).
-3. **(Lower priority) A triage step.** `Task.CLASSIFY` (Haiku 4.5) is routed in
+2. **(Lower priority) A triage step.** `Task.CLASSIFY` (Haiku 4.5) is routed in
    `fuelix.py` but never called — every new thread goes straight to draft, with
    no urgent/routine/noise pass. Design 4.2 calls this a separate small graph.
-4. **Actually deploy it.** `runtime.py`'s wiring is tested, but `run()`,
+3. **Actually deploy it.** `runtime.py`'s wiring is tested, but `run()`,
    `run_gmail_pubsub_loop()`, and `run_chat_pubsub_loop()` have never touched a
    real GCP project or Slack workspace — that requires provisioning the Pub/Sub
    topics/subscriptions design 4.6 describes, which is infrastructure work, not

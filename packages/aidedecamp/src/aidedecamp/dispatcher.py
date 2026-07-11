@@ -14,6 +14,13 @@ no credential details — both are injected by the caller.
     Decodes a Chat space event, dispatches to a brief flow or a conversational
     reply, and calls ``post_text`` with the result.
 
+``handle_slack_message``
+    Same brief/converse routing as ``handle_chat_message``, for Slack DMs.
+    Slack has no separate event-decoding step here — Socket Mode delivers
+    already-parsed events, and bot-message/channel-type filtering happens in
+    ``SlackChannel``'s registered handler before this is ever called (there is
+    no separate ingestion path for Slack the way Gmail/Chat need Pub/Sub).
+
 All collaborators (graph, connector, gmail_service, watch_state, store) are
 injected so the dispatcher is testable offline with fakes.
 """
@@ -127,11 +134,42 @@ def handle_chat_message(
     if chat_msg is None:
         return
 
-    text_lower = chat_msg.text.lower()
+    _respond_to_message(
+        app_ctx, chat_msg.text, user_id, post_text=post_text, brief_fn=brief_fn
+    )
+
+
+def handle_slack_message(
+    app_ctx: AppContext,
+    *,
+    text: str,
+    user_id: str,
+    post_text: Callable[[str], None],
+    brief_fn: Callable[[], str] | None = None,
+) -> None:
+    """Route one already-decoded Slack DM to a brief or a conversational reply.
+
+    Mirrors ``handle_chat_message``'s routing exactly (same brief keywords,
+    same ``_converse`` fallback); the two share ``_respond_to_message`` so that
+    logic isn't duplicated per channel.
+    """
+    _respond_to_message(app_ctx, text, user_id, post_text=post_text, brief_fn=brief_fn)
+
+
+def _respond_to_message(
+    app_ctx: AppContext,
+    text: str,
+    user_id: str,
+    *,
+    post_text: Callable[[str], None],
+    brief_fn: Callable[[], str] | None,
+) -> None:
+    """Shared brief-keyword-vs-converse routing for both chat channels."""
+    text_lower = text.lower()
     if any(kw in text_lower for kw in ("brief", "summary", "morning")):
         response = brief_fn() if brief_fn is not None else "Brief not configured."
     else:
-        response = _converse(app_ctx, chat_msg.text, user_id)
+        response = _converse(app_ctx, text, user_id)
 
     post_text(response)
 

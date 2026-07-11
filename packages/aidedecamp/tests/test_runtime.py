@@ -305,6 +305,35 @@ def test_build_runtime_builds_slack_say_when_channel_configured():
     assert callable(runtime.slack_say)
 
 
+def test_build_runtime_wires_slack_message_fn_to_converse():
+    client = _FakeClient(reply="here's your answer")
+    settings = _settings(SLACK_BOT_TOKEN="xoxb-token")
+    runtime = build_runtime(
+        settings, app=_app_ctx(client=client), connector=_FakeConnector(),
+        gmail_service=_FakeGmailService(), chat_events_service=object(),
+    )
+
+    replies = []
+    runtime.slack._message("what's on my plate?", "U1", replies.append)
+
+    assert replies == ["here's your answer"]
+
+
+def test_build_runtime_wires_slack_message_fn_to_brief():
+    settings = _settings(SLACK_BOT_TOKEN="xoxb-token")
+    connector = _FakeConnector(threads={"t1": _FakeThread()}, events=[])
+    client = _FakeClient(reply="Two unread, one meeting.")
+    runtime = build_runtime(
+        settings, app=_app_ctx(client=client), connector=connector,
+        gmail_service=_FakeGmailService(), chat_events_service=object(),
+    )
+
+    replies = []
+    runtime.slack._message("give me the morning brief", "U1", replies.append)
+
+    assert replies == ["Two unread, one meeting."]
+
+
 def test_build_runtime_gchat_none_when_no_default_space():
     settings = _settings()  # no ADC_CHAT_SPACE
     runtime = build_runtime(

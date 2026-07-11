@@ -264,16 +264,16 @@ Each phase should produce something you actually use daily before moving to the 
 ### Phase 0 - Foundations (prove the loop end to end)
 - ✅ Stand up the LangGraph orchestrator with a Fuel iX-backed model client (incl. token refresh handling)
 - ✅ Stand up Mem0 self-hosted as the memory store
-- ✅ Pick **one** channel (Slack - fastest to prototype with Bolt's Assistant template) and **one** data source (Gmail, read-only) — *note: implemented without Bolt's `Assistant` class; see Phase 1 gap below*
+- ✅ Pick **one** channel (Slack - fastest to prototype with Bolt's Assistant template) and **one** data source (Gmail, read-only) — *note: implemented via a plain `@app.event("message")` handler rather than Bolt's `Assistant` class, which also offers suggested-prompts/streaming UI not yet used*
 - ✅ Ship a v0 "morning brief": pulls unread/important mail, summarizes (`brief.py`) — not yet posted anywhere automatically; posting is wired (`SlackChannel.post_brief`) but nothing schedules/calls it
 - ❌ **Done when:** you get a genuinely useful daily brief in Slack, generated from your real inbox, for a full week without babysitting it — blocked on the entrypoint, not the logic
 
 ### Phase 1 - Read-only assistant, both data sources, two channels
 - ❌ Add Calendar (read-only) — connector supports `list_events`/`create_hold`, but there's no Calendar push-notification ingestion (design 4.6's one genuine webhook exception) yet
 - ✅ Add Google Chat as a second channel — Cards v2 + Workspace Events ingestion, both done
-- ✅/❌ Add conversational Q&A backed by memory + live retrieval — done for Chat (`dispatcher.handle_chat_message` → `_converse`); **not done for Slack** (design 4.4's Bolt `Assistant` class was never wired; `SlackChannel` only handles approval-button clicks today)
+- ✅ Add conversational Q&A backed by memory + live retrieval — both channels now share it: `dispatcher.handle_chat_message`/`handle_slack_message` route through the same `_respond_to_message` → `_converse`
 - ✅ Start correction/implicit-feedback capture (`memory/signals.py`, wired into the draft-approve graph's `capture` node) — already doing more than "start," see Phase 2
-- **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly — not reachable until the Slack conversational gap above closes
+- **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly — blocked on Calendar ingestion (above) and actual deployment, not on remaining code
 
 ### Phase 2 - Draft assistance (rung 2 autonomy)
 - ✅ Draft replies delivered as interactive cards (Slack + Chat) with Send / Edit / Discard — scheduling proposals specifically (a scheduling graph) not built; only a generic draft-reply workflow exists

@@ -3,6 +3,37 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Slack conversational Q&A (design 4.4)
+
+- **`dispatcher.py` gains `handle_slack_message`**, sharing a new
+  `_respond_to_message` helper with `handle_chat_message` so the brief-keyword-
+  vs-`_converse` routing logic is defined once, not duplicated per channel.
+  Unlike `handle_chat_message`, it takes already-extracted `text`/`user_id`
+  rather than a raw event — Slack has no separate ingestion/decode step the
+  way Gmail/Chat need Pub/Sub; Socket Mode delivers events synchronously
+  in-process, so parsing happens right where the event arrives.
+- **`SlackChannel` gains a `message_fn` constructor param** (mirrors
+  `resume_fn`'s shape: injected, testable without a live graph) and registers
+  `@app.event("message")`. The handler filters to DMs only
+  (`channel_type == "im"`, matching design 4.4's specific mention of
+  `message.im`, not all channel traffic) and drops the bot's own messages
+  (`bot_id` present or `subtype == "bot_message"`) — same self-reply-loop
+  rationale as `chat_events.process_chat_event`'s BOT-sender filter, just
+  enforced at the channel layer since Slack has no separate ingestion layer.
+  An unconfigured `message_fn` raises on the first DM rather than silently
+  ignoring users — deliberately loud, matching `GoogleChatChannel`'s
+  unconfigured-`send_fn` precedent.
+- **`runtime.build_runtime()` wires it**: the auto-built `SlackChannel` gets a
+  `message_fn` closure over the real `AppContext`/connector, calling
+  `handle_slack_message` with `brief_fn` bound to `assemble_brief`. This
+  closes the last channel-parity gap between Slack and Chat: both now support
+  brief-on-request and conversational Q&A, not just approval-button clicks.
+- **Still open**: nothing wires Slack DM *replies* to memory capture the way
+  the draft-approve graph's `capture` node does — a Q&A exchange isn't itself
+  a draft/approve/reject signal, so this is likely fine as-is, not a gap to
+  close, but worth flagging if future design work assumes Q&A also feeds
+  learning.
+
 ## 2026-07 — Runtime entrypoint (design 4.6, always-on process)
 
 - **`runtime.py`** is the wiring layer that turns the tested library into an
