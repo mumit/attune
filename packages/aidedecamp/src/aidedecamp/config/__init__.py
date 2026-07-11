@@ -45,6 +45,12 @@ class Settings:
     slack_app_token: str | None = None
     slack_bot_token: str | None = None
     google_project_id: str | None = None
+    # Path to a Google credentials JSON file (service account or OAuth user).
+    # When absent, google.auth.default() (ADC) is used.
+    google_credentials_file: str | None = None
+    # Fully-qualified Pub/Sub topic names for Gmail and Chat ingestion.
+    gmail_pubsub_topic: str | None = None
+    chat_pubsub_topic: str | None = None
     checkpointer_db_path: str = "./aidedecamp.db"
     extra: dict[str, str] = field(default_factory=dict)
 
@@ -59,5 +65,8 @@ class Settings:
             slack_app_token=e.get("SLACK_APP_TOKEN"),
             slack_bot_token=e.get("SLACK_BOT_TOKEN"),
             google_project_id=e.get("GOOGLE_PROJECT_ID"),
+            google_credentials_file=e.get("ADC_GOOGLE_CREDENTIALS_FILE"),
+            gmail_pubsub_topic=e.get("ADC_GMAIL_PUBSUB_TOPIC"),
+            chat_pubsub_topic=e.get("ADC_CHAT_PUBSUB_TOPIC"),
             checkpointer_db_path=e.get("ADC_DB_PATH", "./aidedecamp.db"),
         )

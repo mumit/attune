@@ -22,6 +22,13 @@ from .gmail_history import (
     decode_pubsub_message,
     process_notification,
 )
+from .chat_events import (
+    ChatMessage,
+    SubscriptionResult,
+    SubscriptionState,
+    ensure_subscription,
+    process_chat_event,
+)
 
 __all__ = [
     "ensure_watch",
@@ -31,4 +38,9 @@ __all__ = [
     "decode_pubsub_message",
     "MailboxChanges",
     "HistoryExpired",
+    "ChatMessage",
+    "SubscriptionResult",
+    "SubscriptionState",
+    "ensure_subscription",
+    "process_chat_event",
 ]

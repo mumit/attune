@@ -3,6 +3,42 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Credentials, Chat ingestion, and dispatcher
+
+- **`credentials.py`** resolves Google auth in priority order: (1) explicit
+  credentials JSON file (`settings.google_credentials_file` → detects service
+  account vs. OAuth user credentials by the `"type"` field), (2) ADC
+  (`google.auth.default`). `SCOPES_DEFAULT` is the minimal set (read + compose
+  for Gmail, read for Calendar, send + space-read for Chat). Scopes are
+  injectable for tests/overrides. `google-auth` is a lazy import under the
+  `[google]` extra, consistent with the optional-dependency convention.
+
+- **`ingestion/chat_events.py`** follows the Gmail watch pattern exactly:
+  `ensure_subscription` renews proactively at < 48h remaining, persists via
+  an injected `SubscriptionState`, and falls back to a 7-day expiry when the
+  Workspace Events API omits `expireTime`. `process_chat_event` extracts a
+  bot-safe `ChatMessage` — returns `None` for BOT senders (preventing
+  self-reply loops) and prefers `argumentText` over `text` to strip @mention
+  prefixes before dispatching.
+
+- **`dispatcher.py`** is the single routing seam: `handle_gmail_notification`
+  processes a decoded Pub/Sub notification → reconciles history → fetches each
+  changed thread via the connector → starts one draft-approve workflow per
+  thread (LangGraph `thread_id = "gmail:<gmailTid>:<historyId>"`), waits for
+  the interrupt, then calls an injected `post_approval(lg_tid, draft, rationale)`
+  so the channel can post an approval card. `handle_chat_message` decodes a
+  Chat space event, dispatches to an injectable `brief_fn` on brief/summary
+  keywords, and falls back to `_converse()` (memory search + CONVERSE model)
+  for everything else. Both functions accept all collaborators as keyword
+  arguments and are fully testable offline.
+
+- **Channel-agnostic callables** (`post_approval`, `post_text`, `brief_fn`)
+  decouple the dispatcher from both Slack and Google Chat — the dispatcher
+  never imports channel code. Space IDs and `say` callables are bound into
+  the callables at assembly time (in `app.py` or the channel handler), not
+  passed through the dispatcher. This makes the dispatcher a stable seam: the
+  same function handles mail/chat regardless of which channel posts the card.
+
 ## 2026-07 — Name and license
 - **Name: Aide-de-camp** (PyPI `aidedecamp`). Renamed from the working title
   "Steward" to avoid collision with several existing near-identical GitHub
