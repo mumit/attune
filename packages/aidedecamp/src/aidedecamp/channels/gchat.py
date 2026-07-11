@@ -136,10 +136,10 @@ class GoogleChatChannel:
         if interaction is None:
             return None
 
-        self._resume(interaction.thread_id, interaction.decision, None)
-        if interaction.decision == "approved":
-            return {"text": "✅ Approved — draft accepted."}
-        return {"text": "🗑️ Rejected — nothing sent."}
+        result = self._resume(interaction.thread_id, interaction.decision, None)
+        from ..orchestrator import apply_confirmation
+
+        return {"text": apply_confirmation(interaction.decision, result)}
 
     # --- internals ---------------------------------------------------------
 

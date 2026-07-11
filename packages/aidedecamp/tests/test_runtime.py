@@ -812,7 +812,10 @@ def test_process_chat_interaction_resumes_and_posts_confirmation():
     runtime.process_chat_interaction(_interaction_click("adc_approve", "t-42"))
 
     assert len(graph.calls) == 1
-    assert gchat.texts == [("spaces/ABC", "✅ Approved — draft accepted.")]
+    # The fake graph's final state has no applied_ref, so the honest
+    # confirmation claims nothing beyond the recorded decision (prompt 01:
+    # never announce a materialization that didn't happen).
+    assert gchat.texts == [("spaces/ABC", "✅ Approved.")]
 
 
 def test_process_chat_interaction_reject_posts_rejection_confirmation():

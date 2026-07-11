@@ -38,7 +38,9 @@ class DraftApproveState(TypedDict, total=False):
     user_id: str
     domain: str                      # "mail" | "chat" | "slack" (maps to autonomy.Domain)
     action: str                      # e.g. "draft_reply" (maps to autonomy.Action)
-    incoming_ref: str                # pointer to the source item; NOT the raw body
+    incoming_ref: str                # pointer to the source item (e.g. the Gmail
+                                     # thread id — what apply materializes
+                                     # against); NOT the raw body
     incoming_summary: str            # short, provenance-tagged summary for the model
 
     # --- working state (overwrite) ---
@@ -46,6 +48,8 @@ class DraftApproveState(TypedDict, total=False):
     proposed_draft: Optional[str]    # what the assistant proposes
     final_text: Optional[str]        # what the human approved/edited (if any)
     decision: Optional[Decision]
+    applied_ref: Optional[str]       # external ref apply produced (Gmail draft id)
+    apply_error: Optional[str]       # exception class name if apply failed
 
     # --- accumulator: append-only, survives resume ---
     audit_events: Annotated[list[dict[str, Any]], operator.add]

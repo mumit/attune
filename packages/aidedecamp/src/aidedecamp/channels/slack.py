@@ -126,15 +126,23 @@ class SlackChannel:
         def _approve(ack, body, respond):  # noqa: ANN001
             ack()
             thread_id = body["actions"][0]["value"]
-            self._resume(thread_id, "approved", None)
-            respond(text="✅ Approved — sending.", replace_original=True)
+            result = self._resume(thread_id, "approved", None)
+            from ..orchestrator import apply_confirmation
+
+            respond(
+                text=apply_confirmation("approved", result), replace_original=True
+            )
 
         @app.action(ACTION_REJECT)
         def _reject(ack, body, respond):  # noqa: ANN001
             ack()
             thread_id = body["actions"][0]["value"]
-            self._resume(thread_id, "rejected", None)
-            respond(text="🗑️ Rejected — nothing sent.", replace_original=True)
+            result = self._resume(thread_id, "rejected", None)
+            from ..orchestrator import apply_confirmation
+
+            respond(
+                text=apply_confirmation("rejected", result), replace_original=True
+            )
 
         @app.action(ACTION_EDIT)
         def _edit(ack, body, client):  # noqa: ANN001 # pragma: no cover - modal UI

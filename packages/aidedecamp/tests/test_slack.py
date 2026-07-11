@@ -99,6 +99,51 @@ def test_reject_button_resumes_graph_rejected():
     assert resumes == [("t-9", "rejected", None)]
 
 
+def test_approve_confirmation_is_honest_about_created_draft():
+    """The respond text reflects what the resumed graph actually did (prompt
+    01): a created Gmail draft is announced; otherwise plain 'Approved.' —
+    and never the old false '— sending.' claim (rule 4: nothing can send)."""
+    responded = []
+    ch = SlackChannel(
+        resume_fn=lambda tid, decision, text: {"applied_ref": "d-1"}, app=FakeApp()
+    )
+    ch._app.handlers[ACTION_APPROVE](
+        ack=lambda: None,
+        body={"actions": [{"value": "t-7"}]},
+        respond=lambda **k: responded.append(k),
+    )
+    assert responded[0]["text"] == "✅ Approved — draft created in Gmail."
+
+
+def test_approve_confirmation_plain_when_nothing_materialized():
+    responded = []
+    ch = SlackChannel(
+        resume_fn=lambda tid, decision, text: {"applied_ref": None}, app=FakeApp()
+    )
+    ch._app.handlers[ACTION_APPROVE](
+        ack=lambda: None,
+        body={"actions": [{"value": "t-7"}]},
+        respond=lambda **k: responded.append(k),
+    )
+    assert responded[0]["text"] == "✅ Approved."
+    assert "sending" not in responded[0]["text"].lower()
+
+
+def test_approve_confirmation_admits_apply_failure():
+    responded = []
+    ch = SlackChannel(
+        resume_fn=lambda tid, decision, text: {"apply_error": "ConnectionError"},
+        app=FakeApp(),
+    )
+    ch._app.handlers[ACTION_APPROVE](
+        ack=lambda: None,
+        body={"actions": [{"value": "t-7"}]},
+        respond=lambda **k: responded.append(k),
+    )
+    assert "failed" in responded[0]["text"]
+    assert "ConnectionError" in responded[0]["text"]
+
+
 # --- message -> conversational reply routing -----------------------------
 
 

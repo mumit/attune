@@ -15,8 +15,10 @@ from aidedecamp.orchestrator import (
     Action,
     Domain,
     Rung,
+    apply_confirmation,
     build_draft_approve_graph,
     default_matrix,
+    make_connector_apply_fn,
     resume_workflow,
 )
 
@@ -157,6 +159,221 @@ def test_audit_trail_accumulates():
     # the full reason-for-action chain is present and ordered
     assert events[:3] == ["retrieved", "drafted", "autonomy_gate"]
     assert "human_decision" in events and "signal_captured" in events
+
+
+# ---------------------------------------------------------------------------
+# apply — materializing the decision (prompt 01: Approve must produce a real
+# Gmail draft via the injected apply_fn, never a dead end)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_called_with_final_text_on_approval():
+    store = FakeStore()
+    applied: list[dict] = []
+    graph = build_draft_approve_graph(
+        client=FakeClient(),
+        store=store,
+        apply_fn=lambda state: applied.append(state) or "draft-abc",
+    )
+    cfg = {"configurable": {"thread_id": "t-apply"}}
+    graph.invoke(_base_state(), cfg)
+    out = graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert len(applied) == 1
+    assert applied[0]["final_text"] == out["final_text"]
+    assert applied[0]["incoming_ref"] == "msg-123"
+    assert out["applied_ref"] == "draft-abc"
+    events = [e["event"] for e in out["audit_events"]]
+    assert "applied" in events
+
+
+def test_apply_called_on_edited_with_edited_text():
+    store = FakeStore()
+    applied: list[dict] = []
+    graph = build_draft_approve_graph(
+        client=FakeClient(),
+        store=store,
+        apply_fn=lambda state: applied.append(state) or "draft-edit",
+    )
+    cfg = {"configurable": {"thread_id": "t-apply-edit"}}
+    graph.invoke(_base_state(), cfg)
+    out = graph.invoke(
+        Command(resume={"decision": "edited", "text": "Custom reply."}), cfg
+    )
+
+    assert applied[0]["final_text"] == "Custom reply."
+    assert out["applied_ref"] == "draft-edit"
+
+
+def test_apply_skipped_on_rejection():
+    store = FakeStore()
+    applied: list[dict] = []
+    graph = build_draft_approve_graph(
+        client=FakeClient(),
+        store=store,
+        apply_fn=lambda state: applied.append(state) or "never",
+    )
+    cfg = {"configurable": {"thread_id": "t-apply-rej"}}
+    graph.invoke(_base_state(), cfg)
+    out = graph.invoke(Command(resume={"decision": "rejected"}), cfg)
+
+    assert applied == []
+    assert out.get("applied_ref") is None
+    events = [e["event"] for e in out["audit_events"]]
+    assert "apply_skipped" in events and "applied" not in events
+
+
+def test_apply_runs_on_autonomous_path_too():
+    store = FakeStore()
+    applied: list[dict] = []
+    matrix = default_matrix().grant(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    graph = build_draft_approve_graph(
+        client=FakeClient(),
+        store=store,
+        matrix=matrix,
+        apply_fn=lambda state: applied.append(state) or "draft-auto",
+    )
+    out = graph.invoke(_base_state(), {"configurable": {"thread_id": "t-apply-auto"}})
+
+    assert len(applied) == 1
+    assert out["applied_ref"] == "draft-auto"
+
+
+def test_apply_failure_recorded_not_raised():
+    """An apply failure must not lose the decision or the capture step, and
+    must be visible in state + audit so the channel can report it honestly."""
+    store = FakeStore()
+
+    def boom(state):
+        raise ConnectionError("gmail down")
+
+    graph = build_draft_approve_graph(client=FakeClient(), store=store, apply_fn=boom)
+    cfg = {"configurable": {"thread_id": "t-apply-fail"}}
+    graph.invoke(_base_state(), cfg)
+    out = graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert out["decision"] == "approved"
+    assert out.get("applied_ref") is None
+    assert out["apply_error"] == "ConnectionError"
+    events = [e["event"] for e in out["audit_events"]]
+    assert "apply_failed" in events
+    # capture still ran: the decision signal was not lost
+    assert "signal_captured" in events
+    assert any(a["metadata"]["signal"] == "action" for a in store.added)
+
+
+def test_default_apply_is_noop():
+    store = FakeStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store)
+    cfg = {"configurable": {"thread_id": "t-apply-default"}}
+    graph.invoke(_base_state(), cfg)
+    out = graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert out.get("applied_ref") is None
+    assert out.get("apply_error") is None
+    events = [e["event"] for e in out["audit_events"]]
+    assert "apply_skipped" in events
+
+
+# ---------------------------------------------------------------------------
+# make_connector_apply_fn — the production apply: create_draft, never send
+# ---------------------------------------------------------------------------
+
+
+class _FakeDraftRef:
+    def __init__(self, draft_id):
+        self.draft_id = draft_id
+
+
+class _FakeConnector:
+    def __init__(self):
+        self.drafts: list[dict] = []
+
+    def get_thread(self, thread_id):
+        return type(
+            "T", (), {"subject": "Quarterly sync", "from_addr": "vendor@example.com"}
+        )()
+
+    def create_draft(self, *, to, subject, body, thread_id=None):
+        self.drafts.append(
+            {"to": to, "subject": subject, "body": body, "thread_id": thread_id}
+        )
+        return _FakeDraftRef("d-99")
+
+
+def test_connector_apply_fn_creates_reply_draft():
+    conn = _FakeConnector()
+    apply = make_connector_apply_fn(conn)
+    ref = apply(
+        {
+            "domain": "mail",
+            "incoming_ref": "thr-1",
+            "final_text": "Sounds good — Thursday works.",
+        }
+    )
+
+    assert ref == "d-99"
+    d = conn.drafts[0]
+    assert d["to"] == "vendor@example.com"
+    assert d["subject"] == "Re: Quarterly sync"
+    assert d["body"] == "Sounds good — Thursday works."
+    assert d["thread_id"] == "thr-1"
+
+
+def test_connector_apply_fn_preserves_existing_re_prefix():
+    conn = _FakeConnector()
+    conn.get_thread = lambda tid: type(
+        "T", (), {"subject": "RE: Quarterly sync", "from_addr": "v@example.com"}
+    )()
+    apply = make_connector_apply_fn(conn)
+    apply({"domain": "mail", "incoming_ref": "thr-1", "final_text": "ok"})
+
+    assert conn.drafts[0]["subject"] == "RE: Quarterly sync"
+
+
+def test_connector_apply_fn_noop_outside_mail_or_without_ref():
+    conn = _FakeConnector()
+    apply = make_connector_apply_fn(conn)
+
+    assert apply({"domain": "chat", "incoming_ref": "x", "final_text": "hi"}) is None
+    assert apply({"domain": "mail", "final_text": "hi"}) is None
+    assert apply({"domain": "mail", "incoming_ref": "x"}) is None
+    assert conn.drafts == []
+
+
+# ---------------------------------------------------------------------------
+# apply_confirmation — honest channel text (rule 4: never claim "sending")
+# ---------------------------------------------------------------------------
+
+
+def test_confirmation_reports_created_draft():
+    text = apply_confirmation("approved", {"applied_ref": "d-1"})
+    assert text == "✅ Approved — draft created in Gmail."
+
+
+def test_confirmation_plain_when_nothing_materialized():
+    assert apply_confirmation("approved", {"applied_ref": None}) == "✅ Approved."
+    # a fake/None resume result (e.g. injected resume_fn in tests) is tolerated
+    assert apply_confirmation("approved", None) == "✅ Approved."
+
+
+def test_confirmation_admits_apply_failure():
+    text = apply_confirmation("approved", {"apply_error": "ConnectionError"})
+    assert "failed" in text and "ConnectionError" in text
+    assert "recorded" in text
+
+
+def test_confirmation_edited_and_rejected():
+    assert apply_confirmation("edited", {"applied_ref": "d-2"}) == (
+        "✏️ Edited — draft created in Gmail."
+    )
+    assert apply_confirmation("rejected", {}) == "🗑️ Rejected — nothing sent."
+
+
+def test_confirmation_never_says_sending():
+    for decision in ("approved", "edited", "rejected"):
+        for result in (None, {}, {"applied_ref": "d"}, {"apply_error": "E"}):
+            assert "sending" not in apply_confirmation(decision, result).lower()
 
 
 # ---------------------------------------------------------------------------

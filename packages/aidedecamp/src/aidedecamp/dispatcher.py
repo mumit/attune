@@ -58,6 +58,7 @@ from .ingestion.chat_events import ChatMessage, process_chat_event
 from .ingestion.chat_interactions import decode_chat_interaction
 from .ingestion.gmail_history import HistoryExpired, process_notification
 from .ingestion.gmail_watch import WatchState
+from .orchestrator.draft_approve import apply_confirmation
 from .orchestrator.scheduling import ConflictResult, detect_conflict
 from .orchestrator.triage import Priority, TriageResult, triage_thread
 
@@ -135,6 +136,9 @@ def handle_gmail_notification(
 
         state: dict[str, Any] = {
             "incoming_summary": incoming_summary,
+            # The Gmail thread id — what the apply step materializes the
+            # approved draft against (create_draft on this thread).
+            "incoming_ref": gmail_tid,
             "user_id": user_id,
             "action": "draft_reply",
             "domain": "mail",
@@ -255,12 +259,11 @@ def handle_chat_interaction(
     if interaction is None:
         return
 
-    resume_fn(interaction.thread_id, interaction.decision, None)
+    result = resume_fn(interaction.thread_id, interaction.decision, None)
 
-    if interaction.decision == "approved":
-        post_text("✅ Approved — draft accepted.")
-    else:
-        post_text("🗑️ Rejected — nothing sent.")
+    # The confirmation states what actually happened (a Gmail draft created,
+    # or an apply failure) — never a claimed success the graph didn't produce.
+    post_text(apply_confirmation(interaction.decision, result))
 
     if audit_log is not None:
         audit_log.record(

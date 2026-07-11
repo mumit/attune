@@ -55,7 +55,7 @@ from .ingestion import (
     ensure_subscription,
     ensure_watch,
 )
-from .orchestrator import resume_workflow
+from .orchestrator import make_connector_apply_fn, resume_workflow
 from .ingestion.calendar_sync import SyncState
 from .ingestion.calendar_watch import ChannelState
 from .ingestion.chat_events import SubscriptionState
@@ -376,8 +376,10 @@ def build_runtime(
       present in ``settings``; a deployment need not run both channels
     """
     settings = settings or Settings.from_env()
-    resolved_app = app or build_app(settings)
 
+    # Credentials + connector are resolved BEFORE the app so the graph's apply
+    # step can be bound to the real connector (approved drafts materialize as
+    # Gmail drafts via create_draft — the safe write path, rule 4).
     resolved_credentials = credentials
     if resolved_credentials is None and (
         connector is None or gmail_service is None or calendar_service is None
@@ -386,6 +388,10 @@ def build_runtime(
 
     resolved_connector = connector or make_connector(
         settings, credentials=resolved_credentials
+    )
+
+    resolved_app = app or build_app(
+        settings, apply_fn=make_connector_apply_fn(resolved_connector)
     )
 
     resolved_gmail_service = gmail_service

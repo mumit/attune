@@ -277,6 +277,24 @@ def test_gmail_graph_invoked_with_correct_config():
     assert "x@y.com" in call["state"]["incoming_summary"]
 
 
+def test_gmail_graph_state_carries_thread_ref_for_apply():
+    """The Gmail thread id rides in as incoming_ref so the graph's apply step
+    can create the reply draft against the right thread (prompt 01)."""
+    graph = _FakeGraph()
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "202"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+    )
+    assert graph.calls[0]["state"]["incoming_ref"] == "t1"
+
+
 def test_handle_gmail_rationale_passed_through():
     mems = ["prefers short replies"]
     graph = _FakeGraph(proposed="short reply", memories=mems)
@@ -768,6 +786,36 @@ def test_chat_interaction_reject_resumes_and_posts_confirmation():
 
     assert resumes == [("t-9", "rejected", None)]
     assert "Rejected" in replies[0]
+
+
+def test_chat_interaction_confirmation_reports_created_draft():
+    """When the resumed graph materialized a Gmail draft (applied_ref set),
+    the confirmation says so — and only then (prompt 01: honesty)."""
+    replies = []
+
+    handle_chat_interaction(
+        _fake_app_ctx(),
+        _click("adc_approve", "t-42"),
+        resume_fn=lambda tid, decision, text: {"applied_ref": "d-7"},
+        post_text=replies.append,
+        user_id="me@example.com",
+    )
+
+    assert replies == ["✅ Approved — draft created in Gmail."]
+
+
+def test_chat_interaction_confirmation_admits_apply_failure():
+    replies = []
+
+    handle_chat_interaction(
+        _fake_app_ctx(),
+        _click("adc_approve", "t-42"),
+        resume_fn=lambda tid, decision, text: {"apply_error": "ConnectionError"},
+        post_text=replies.append,
+        user_id="me@example.com",
+    )
+
+    assert "failed" in replies[0] and "ConnectionError" in replies[0]
 
 
 def test_chat_interaction_edit_ignored():

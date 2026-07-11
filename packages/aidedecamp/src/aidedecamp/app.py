@@ -65,6 +65,7 @@ def build_app(
     checkpointer: Any = None,
     matrix: PermissionMatrix | None = None,
     audit_log: AuditLog | None = None,
+    apply_fn: Any = None,
 ) -> AppContext:
     """Assemble the runtime from config and optional overrides.
 
@@ -78,6 +79,11 @@ def build_app(
                      langgraph-checkpoint-sqlite)
     - *audit_log*    via ``JsonlAuditLog(settings.audit_log_path)`` — the
                      structured reason-for-action log (design rule 4.7)
+    - *apply_fn*     passed through to the draft-approve graph; production
+                     (``runtime.build_runtime``) binds
+                     ``make_connector_apply_fn(connector)`` so approved drafts
+                     materialize as Gmail drafts. Absent, apply is a no-op —
+                     this module has no connector to bind.
 
     Pass fakes for all four in tests to keep the suite offline::
 
@@ -112,6 +118,7 @@ def build_app(
         store=resolved_store,
         matrix=matrix,
         checkpointer=resolved_checkpointer,
+        apply_fn=apply_fn,
     )
 
     return AppContext(

@@ -9,6 +9,15 @@ This graph is where the three primitives built in earlier phases finally meet:
 Flow:
     retrieve -> draft -> [autonomy gate] -> approve(interrupt) -> apply -> capture
 
+The apply step materializes an approved/edited decision into the real world —
+for mail, a Gmail draft via ``connector.create_draft`` (the safe write path;
+never send, rule 4). It runs through an injected ``apply_fn`` so the graph
+stays free of connector imports; ``make_connector_apply_fn`` builds the real
+one at assembly time (app.py/runtime.py). A rejected decision skips apply
+entirely, and an apply failure is recorded honestly (``apply_error`` in state,
+an ``apply_failed`` audit event) — the human's decision is never silently
+dropped, and confirmations must never claim success that didn't happen.
+
 The autonomy gate is the safety spine. Before a draft is ever shown for sending,
 we check the permission matrix. If sending on this (action, domain) isn't granted
 at rung ACT_NOTIFY or above, the graph *always* routes through the human approval
@@ -49,6 +58,7 @@ def build_draft_approve_graph(
     matrix: PermissionMatrix | None = None,
     checkpointer: Any = None,
     draft_fn: Callable[[Any, str, list[str], str], str] | None = None,
+    apply_fn: Callable[[dict[str, Any]], str | None] | None = None,
 ):
     """Compile the draft-and-approve graph.
 
@@ -61,6 +71,10 @@ def build_draft_approve_graph(
             interrupt to work; if None, an InMemorySaver is used (dev only).
         draft_fn: override the drafting call (tests inject a stub to avoid a
             live model).
+        apply_fn: materializes an approved/edited decision (state -> external
+            ref, e.g. a Gmail draft id, or None when there is nothing to
+            materialize). Defaults to a no-op returning None; production binds
+            ``make_connector_apply_fn(connector)`` at assembly time.
     """
     try:
         from langgraph.graph import END, START, StateGraph
@@ -75,6 +89,7 @@ def build_draft_approve_graph(
     matrix = matrix or default_matrix()
     checkpointer = checkpointer or InMemorySaver()
     draft_fn = draft_fn or _default_draft_fn
+    apply_fn = apply_fn or _noop_apply_fn
 
     def retrieve(state: DraftApproveState) -> dict[str, Any]:
         """Pull relevant preferences/context before drafting."""
@@ -156,6 +171,40 @@ def build_draft_approve_graph(
             "audit_events": [_audit("auto_applied")],
         }
 
+    def apply(state: DraftApproveState) -> dict[str, Any]:
+        """Materialize the human's (or auto_apply's) decision — the step that
+        turns "approved" into an actual Gmail draft rather than a dead end.
+
+        Never raises: an apply failure must not lose the decision or the
+        capture step that follows; it's recorded in state (``apply_error``)
+        and the audit trail so the channel can report it honestly."""
+        decision = state.get("decision")
+        if decision not in ("approved", "edited") or not state.get("final_text"):
+            return {
+                "applied_ref": None,
+                "audit_events": [
+                    _audit("apply_skipped", reason=decision or "no_decision")
+                ],
+            }
+        try:
+            ref = apply_fn(dict(state))
+        except Exception as exc:  # noqa: BLE001 — honesty over crash, see docstring
+            return {
+                "applied_ref": None,
+                "apply_error": type(exc).__name__,
+                "audit_events": [
+                    _audit("apply_failed", error=type(exc).__name__)
+                ],
+            }
+        if ref is None:
+            return {
+                "applied_ref": None,
+                "audit_events": [
+                    _audit("apply_skipped", reason="nothing_to_materialize")
+                ],
+            }
+        return {"applied_ref": ref, "audit_events": [_audit("applied", ref=ref)]}
+
     def capture(state: DraftApproveState) -> dict[str, Any]:
         """Write the learning signal from what the human did (design 2.2)."""
         decision = state.get("decision")
@@ -189,14 +238,16 @@ def build_draft_approve_graph(
     g.add_node("gate", gate)
     g.add_node("approve", approve)
     g.add_node("auto_apply", auto_apply)
+    g.add_node("apply", apply)
     g.add_node("capture", capture)
 
     g.add_edge(START, "retrieve")
     g.add_edge("retrieve", "draft")
     g.add_edge("draft", "gate")
     # gate uses Command(goto=...) for dynamic routing to approve|auto_apply
-    g.add_edge("approve", "capture")
-    g.add_edge("auto_apply", "capture")
+    g.add_edge("approve", "apply")
+    g.add_edge("auto_apply", "apply")
+    g.add_edge("apply", "capture")
     g.add_edge("capture", END)
 
     return g.compile(checkpointer=checkpointer)
@@ -220,6 +271,69 @@ def resume_workflow(
     if text is not None:
         payload["text"] = text
     return graph.invoke(Command(resume=payload), cfg)
+
+
+def make_connector_apply_fn(connector: Any) -> Callable[[dict[str, Any]], str | None]:
+    """Build the production ``apply_fn``: materialize a mail decision as a
+    Gmail draft via ``connector.create_draft`` (the safe write path — never
+    send, rule 4; the human sends from Gmail).
+
+    ``connector`` is duck-typed (needs ``get_thread``/``create_draft``) so this
+    module never imports the connector layer. The graph state's
+    ``incoming_ref`` is the Gmail thread id (set by
+    ``dispatcher.handle_gmail_notification``); the recipient and subject are
+    re-fetched from the thread rather than carried in checkpoint state, per
+    the state discipline (pointers, not payloads).
+    """
+
+    def apply(state: dict[str, Any]) -> str | None:
+        if state.get("domain") != "mail":
+            return None
+        thread_ref = state.get("incoming_ref")
+        final_text = state.get("final_text")
+        if not thread_ref or not final_text:
+            return None
+        thread = connector.get_thread(thread_ref)
+        subject = thread.subject or ""
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}" if subject else "Re:"
+        ref = connector.create_draft(
+            to=thread.from_addr,
+            subject=subject,
+            body=final_text,
+            thread_id=thread_ref,
+        )
+        return getattr(ref, "draft_id", None)
+
+    return apply
+
+
+def _noop_apply_fn(state: dict[str, Any]) -> str | None:
+    """Default apply: nothing to materialize (dev/tests without a connector)."""
+    return None
+
+
+def apply_confirmation(decision: str, result: Any = None) -> str:
+    """The honest post-decision confirmation, shared by every channel.
+
+    ``result`` is whatever ``resume_workflow`` returned (the final graph
+    state). The text states only what actually happened: a created Gmail
+    draft is announced, an apply failure is admitted, and nothing ever claims
+    to be "sending" — nothing here can send (rule 4).
+    """
+    if decision == "rejected":
+        return "🗑️ Rejected — nothing sent."
+
+    prefix = "✏️ Edited" if decision == "edited" else "✅ Approved"
+    state = result if isinstance(result, dict) else {}
+    if state.get("apply_error"):
+        return (
+            f"{prefix} — your decision was recorded, but creating the Gmail "
+            f"draft failed ({state['apply_error']})."
+        )
+    if state.get("applied_ref"):
+        return f"{prefix} — draft created in Gmail."
+    return f"{prefix}."
 
 
 def _default_draft_fn(

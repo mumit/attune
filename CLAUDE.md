@@ -52,10 +52,16 @@ and `credentials.py`).
 - `credentials.py` — Google credential loading (service account / OAuth user /
   ADC), scoped for Gmail/Calendar/Chat.
 - `orchestrator/` — LangGraph. `autonomy.py` (permission matrix), `state.py`,
-  `draft_approve.py` (the canonical retrieve→draft→gate→approve→capture loop;
-  also `resume_workflow(graph, thread_id, decision, text)`, the one shared
+  `draft_approve.py` (the canonical retrieve→draft→gate→approve→apply→capture
+  loop; the apply node materializes approved/edited decisions through an
+  injected `apply_fn` — `make_connector_apply_fn(connector)` is the production
+  one, creating a Gmail draft via `create_draft`, bound in `runtime.py`; also
+  `resume_workflow(graph, thread_id, decision, text)`, the one shared
   `Command(resume=...)` invoke used by Slack, Chat, and the async Chat-
-  interaction path — don't reintroduce a fourth copy of this), `triage.py`
+  interaction path — don't reintroduce a fourth copy of this — and
+  `apply_confirmation(decision, result)`, the one honest post-decision
+  confirmation text shared by every channel: it must never claim a send or a
+  materialization that didn't happen), `triage.py`
   (plain function, not a graph — one `Task.CLASSIFY` call deciding
   URGENT/ROUTINE/NOISE; see `dispatcher.py` below for where it gates drafting),
   `scheduling.py` (plain function — `detect_conflict`, read-only overlap check;

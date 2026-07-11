@@ -152,6 +152,18 @@ def test_graph_completes_after_approve():
     assert out["final_text"]
 
 
+def test_build_app_passes_apply_fn_to_graph():
+    """apply_fn injected at build_app reaches the graph's apply step (prompt
+    01): approving materializes via it, and applied_ref lands in state."""
+    applied = []
+    app = _fake_app(apply_fn=lambda state: applied.append(state) or "draft-1")
+    cfg = {"configurable": {"thread_id": "t-apply-fn"}}
+    app.graph.invoke(_state(), cfg)
+    out = app.graph.invoke(Command(resume={"decision": "approved"}), cfg)
+    assert applied and applied[0]["incoming_ref"] == "ref-1"
+    assert out["applied_ref"] == "draft-1"
+
+
 def test_graph_completes_after_reject():
     app = _fake_app()
     cfg = {"configurable": {"thread_id": "t-reject"}}

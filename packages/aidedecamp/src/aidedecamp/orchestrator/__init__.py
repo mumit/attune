@@ -18,7 +18,13 @@ from .autonomy import (
     default_matrix,
 )
 from .state import DraftApproveState
-from .draft_approve import MAX_ITERATIONS, build_draft_approve_graph, resume_workflow
+from .draft_approve import (
+    MAX_ITERATIONS,
+    apply_confirmation,
+    build_draft_approve_graph,
+    make_connector_apply_fn,
+    resume_workflow,
+)
 from .triage import Priority, TriageResult, triage_thread
 from .scheduling import ConflictResult, detect_conflict
 
@@ -29,7 +35,9 @@ __all__ = [
     "PermissionMatrix",
     "default_matrix",
     "DraftApproveState",
+    "apply_confirmation",
     "build_draft_approve_graph",
+    "make_connector_apply_fn",
     "resume_workflow",
     "MAX_ITERATIONS",
     "Priority",

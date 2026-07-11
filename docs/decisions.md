@@ -3,6 +3,46 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Apply step: approvals materialize as Gmail drafts (roadmap prompt 01)
+
+- **The draft-approve graph gained the apply node its own docstring always
+  claimed** (`retrieve → draft → gate → approve → apply → capture`). Until
+  now, approving a draft captured a memory signal and stopped —
+  `connector.create_draft` had zero callers, so an approved reply never
+  existed anywhere the user could send it from. Apply materializes an
+  `approved`/`edited` decision via an injected `apply_fn(state) -> ref |
+  None`; `rejected` skips it entirely.
+- **`apply_fn` is injected, not a connector import.**
+  `make_connector_apply_fn(connector)` (duck-typed — the orchestrator never
+  imports the connector layer) builds the production one: for `domain ==
+  "mail"` it re-fetches the thread by `incoming_ref`, builds `Re:` subject +
+  recipient from it, and calls `create_draft` — the safe write path; rule 4
+  untouched, `send_reply` untouched. Recipient/subject are re-fetched rather
+  than carried in checkpoint state, per the pointers-not-payloads state
+  discipline. Bound in `runtime.build_runtime` (credentials/connector now
+  resolve *before* `build_app` so the graph can close over the real
+  connector); `build_app` just passes `apply_fn` through, defaulting to a
+  no-op — `app.py` has no connector to bind.
+- **Reused the existing `incoming_ref` state field instead of adding the
+  `source_ref` the build prompt suggested** — the field ("pointer to the
+  source item") already existed with exactly this meaning; the dispatcher
+  just never set it. Now it does (`incoming_ref = <gmail thread id>`). New
+  state fields: `applied_ref` (the created draft id) and `apply_error`
+  (exception class name).
+- **Apply never raises.** A `create_draft` failure is recorded in state +
+  an `apply_failed` audit event and the flow continues to `capture` — the
+  human's decision and its learning signal are never lost to a transport
+  error. Success records an `applied` audit event with the draft ref; skips
+  record `apply_skipped` with a reason.
+- **Confirmations are now honest, and defined once.**
+  `apply_confirmation(decision, result)` (orchestrator) is shared by Slack's
+  button handlers, `dispatcher.handle_chat_interaction`, and
+  `GoogleChatChannel.handle_interaction`: "draft created in Gmail" only when
+  `applied_ref` is present, an explicit admission when `apply_error` is set,
+  plain "Approved."/"Edited." otherwise. This replaces Slack's false
+  "✅ Approved — sending." — nothing sends, and no confirmation may say so
+  (pinned by a test asserting "sending" never appears).
+
 ## 2026-07 — Roadmap v2 + build prompts (full design/implementation review)
 
 - **A full user-perspective review** (312 tests green at time of review) found
