@@ -174,16 +174,27 @@ def _verify_fn(claims=None, raise_exc=None):
     return _fn
 
 
-def test_verify_chat_request_accepts_valid_chat_issuer():
-    verify_fn = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+def test_verify_chat_request_accepts_valid_chat_caller_email():
+    verify_fn = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
     ok = verify_chat_request(
         {"Authorization": "Bearer good-token"}, audience="aud", verify_fn=verify_fn
     )
     assert ok is True
 
 
-def test_verify_chat_request_rejects_wrong_issuer():
-    verify_fn = _verify_fn(claims={"iss": "someone-else@example.com"})
+def test_verify_chat_request_rejects_wrong_caller_email():
+    verify_fn = _verify_fn(claims={"email": "someone-else@example.com"})
+    ok = verify_chat_request(
+        {"Authorization": "Bearer good-token"}, audience="aud", verify_fn=verify_fn
+    )
+    assert ok is False
+
+
+def test_verify_chat_request_rejects_missing_email_claim():
+    """A token that verifies fine but carries no email claim at all (e.g. the
+    wrong claim shape) must not be treated as Chat — only an exact email
+    match authenticates the caller."""
+    verify_fn = _verify_fn(claims={"iss": "https://accounts.google.com"})
     ok = verify_chat_request(
         {"Authorization": "Bearer good-token"}, audience="aud", verify_fn=verify_fn
     )
@@ -191,13 +202,13 @@ def test_verify_chat_request_rejects_wrong_issuer():
 
 
 def test_verify_chat_request_rejects_missing_auth_header():
-    verify_fn = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    verify_fn = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
     ok = verify_chat_request({}, audience="aud", verify_fn=verify_fn)
     assert ok is False
 
 
 def test_verify_chat_request_rejects_non_bearer_auth_header():
-    verify_fn = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    verify_fn = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
     ok = verify_chat_request(
         {"Authorization": "Basic xyz"}, audience="aud", verify_fn=verify_fn
     )
@@ -235,7 +246,7 @@ def test_chat_interaction_edit_returns_dialog_without_publishing(client):
     fake = _FakePublisher()
     app.config["INTERACTION_PUBLISHER"] = fake
     app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
-    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
 
     resp = client.post(
         "/chat-interaction",
@@ -252,7 +263,7 @@ def test_chat_interaction_approve_publishes_and_acks(client):
     fake = _FakePublisher()
     app.config["INTERACTION_PUBLISHER"] = fake
     app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
-    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
 
     resp = client.post(
         "/chat-interaction",
@@ -273,7 +284,7 @@ def test_chat_interaction_reject_publishes_and_acks(client):
     fake = _FakePublisher()
     app.config["INTERACTION_PUBLISHER"] = fake
     app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
-    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
 
     resp = client.post(
         "/chat-interaction",
@@ -305,7 +316,7 @@ def test_chat_interaction_missing_auth_header_returns_403(client):
     fake = _FakePublisher()
     app.config["INTERACTION_PUBLISHER"] = fake
     app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
-    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
 
     resp = client.post("/chat-interaction", json=_chat_click("adc_approve", "t-42"))
 
@@ -317,7 +328,7 @@ def test_chat_interaction_unknown_action_returns_200_without_publishing(client):
     fake = _FakePublisher()
     app.config["INTERACTION_PUBLISHER"] = fake
     app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
-    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"iss": "chat@system.gserviceaccount.com"})
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
 
     resp = client.post(
         "/chat-interaction",

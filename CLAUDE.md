@@ -192,11 +192,14 @@ all done (see `docs/decisions.md`). What's left:
    boundary is deliberate, not a shortcut.
 2. **Actually deploy it.** `runtime.py`'s wiring is tested, but `run()` and
    the `run_*_pubsub_loop()` methods have never touched a real GCP project or
-   Slack workspace, and `deploy/republisher/`'s Chat-interaction JWT
-   verification hasn't been exercised against a live Chat app (confirm the
-   audience-claim value — `docs/deployment.md` §8/§12). See
-   `docs/deployment.md` for the concrete steps, configuration, and GCP
-   resources this needs.
+   Slack workspace. `deploy/republisher/`'s Chat-interaction JWT verification
+   (`verify_chat_request`: "HTTP endpoint URL" audience mode, checks the
+   `email` claim) is now confirmed against Google's current docs — an
+   earlier version checked the wrong claim (`iss`) entirely; see
+   `docs/decisions.md` — but still hasn't been exercised against a live Chat
+   app (`docs/deployment.md` §15, step 7, is the one thing that actually
+   tests it). See `docs/deployment.md` for the concrete steps, configuration,
+   and GCP resources this needs.
 
 ## Still open (verify before relying on)
 

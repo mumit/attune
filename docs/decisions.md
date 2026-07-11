@@ -3,6 +3,37 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — `verify_chat_request` corrected against Google's actual docs
+
+- **Found and fixed a real bug** while confirming the "audience-claim value
+  needs confirming" flag from the previous entry: `verify_chat_request`
+  checked `claims.get("iss") == "chat@system.gserviceaccount.com"`. Per
+  [Google's documented Python sample](https://developers.google.com/workspace/chat/verify-requests-from-chat),
+  the correct check is on the **`email`** claim, not `iss` — a Google-issued
+  ID token's `iss` is Google's own generic OIDC issuer
+  (`https://accounts.google.com`), not the calling service account; `email`
+  is what identifies *which* service account the token was issued to. The
+  original check would have rejected every legitimate request, since `iss`
+  would never equal a service-account address — this would have failed
+  silently as "every Chat approval gets a 403," not as an obvious crash.
+- **Audience clarified**: Chat apps configure an "Authentication Audience"
+  setting with two modes. This project uses **"HTTP endpoint URL"** mode
+  (the right choice for a service, like this one, not using Cloud Run's own
+  IAM-based auth) — the `aud` claim is the exact configured endpoint URL
+  (`<republisher-url>/chat-interaction`), verified via a Google-signed OIDC
+  ID token. The alternative "Project Number" mode uses a different,
+  JWT-based check against the numeric project number instead — not
+  implemented here, and a genuinely different code path if ever needed.
+  `CHAT_APP_AUDIENCE` must be set to that exact endpoint URL string, matching
+  what's configured in the Chat app's Connection settings — not the bare
+  Cloud Run base URL, not a project number.
+- **Still not exercised against a live Chat app** — this is now confirmed
+  against Google's current documentation (as opposed to being an assumption
+  extrapolated from the general shape of Google's ID-token verification
+  APIs), but "matches the docs" and "works against a real running Chat app"
+  are different levels of confidence; `docs/deployment.md` §15 flags the
+  approval-flow smoke test as the one thing that actually exercises this.
+
 ## 2026-07 — Async Chat card-interaction flow (resolves the republisher gap)
 
 - **The problem**: `GoogleChatChannel.handle_interaction()` must return a

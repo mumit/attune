@@ -21,9 +21,7 @@ topic the main aidedecamp process pulls from, return an immediate response.
   service must never hold. Unlike the calendar route, this ONE DOES need
   request verification: without it, anyone who finds this service's public
   URL could forge an approve/reject decision on someone else's pending
-  draft. Google Chat signs its interaction calls with a bearer JWT issued by
-  ``chat@system.gserviceaccount.com``; verify it before ever publishing.
-  Edit's dialog-open click never touches the graph, so it's answered
+  draft. Edit's dialog-open click never touches the graph, so it's answered
   directly here, synchronously, with no Pub/Sub involved.
 
 Deliberately NOT part of the installable ``aidedecamp`` package — this is
@@ -31,11 +29,18 @@ deployable infrastructure, like ``deploy/mem0-compose.yml``, not application
 code. Has its own ``requirements.txt``/``Dockerfile`` and is deployed
 independently (``gcloud run deploy --source=deploy/republisher``).
 
-CONFIRM the exact JWT audience value expected against current Google Chat
-API docs before relying on ``verify_chat_request`` in production — this
-implements the documented shape (bearer JWT, issuer check, audience check
-via ``google.oauth2.id_token.verify_oauth2_token``) but hasn't been
-exercised against a live Chat app.
+Verification per https://developers.google.com/workspace/chat/verify-requests-from-chat,
+using the "HTTP endpoint URL" Authentication Audience mode (the right choice
+for a service that isn't using Cloud Run's own IAM-based auth, i.e. this
+one, which is deployed with ``--allow-unauthenticated`` and does its own
+verification): the bearer token is a Google-signed OIDC ID token whose
+``aud`` claim equals the exact endpoint URL configured in the Chat app's
+Connection settings (``<this service's URL>/chat-interaction`` — NOT the
+project number; that value is only used in the alternative "Project Number"
+audience mode, a different JWT-based verification path not implemented
+here), and whose ``email`` claim — not ``iss`` — identifies the caller as
+``chat@system.gserviceaccount.com``. Confirmed against current docs;
+**not yet exercised against a live Chat app**.
 """
 
 from __future__ import annotations
@@ -54,7 +59,10 @@ _ACTION_APPROVE = "adc_approve"
 _ACTION_REJECT = "adc_reject"
 _ACTION_EDIT = "adc_edit"
 
-_CHAT_ISSUER = "chat@system.gserviceaccount.com"
+# The email claim on the verified ID token — NOT the "iss" claim, which is
+# Google's own generic OIDC issuer, not the calling service account. See
+# https://developers.google.com/workspace/chat/verify-requests-from-chat.
+_CHAT_CALLER_EMAIL = "chat@system.gserviceaccount.com"
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +124,14 @@ def calendar_webhook():
 def verify_chat_request(headers, *, audience: str, verify_fn=None) -> bool:
     """Verify a request actually came from Google Chat.
 
-    Google Chat signs its interaction webhook calls with a bearer JWT
-    (``Authorization: Bearer <token>``) issued by
-    ``chat@system.gserviceaccount.com``. Verifying it here, before ever
-    publishing to Pub/Sub, is what stops anyone who finds this service's
-    public URL from forging approve/reject decisions on someone else's
-    pending drafts — the async hand-off to the main process only helps if
-    the thing handing off is trustworthy.
+    Google Chat signs its interaction webhook calls (when the Chat app's
+    Authentication Audience is set to "HTTP endpoint URL") with a
+    Google-issued OIDC ID token whose ``aud`` claim is this exact endpoint's
+    URL and whose ``email`` claim is ``chat@system.gserviceaccount.com``.
+    Verifying it here, before ever publishing to Pub/Sub, is what stops
+    anyone who finds this service's public URL from forging approve/reject
+    decisions on someone else's pending drafts — the async hand-off to the
+    main process only helps if the thing handing off is trustworthy.
     """
     auth_header = headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -135,7 +144,7 @@ def verify_chat_request(headers, *, audience: str, verify_fn=None) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
-    return claims.get("iss") == _CHAT_ISSUER
+    return claims.get("email") == _CHAT_CALLER_EMAIL
 
 
 def _default_verify(token: str, audience: str):  # pragma: no cover - requires live Google
@@ -147,6 +156,10 @@ def _default_verify(token: str, audience: str):  # pragma: no cover - requires l
 
 @app.route("/chat-interaction", methods=["POST"])
 def chat_interaction():
+    # CHAT_APP_AUDIENCE must be the exact URL configured as this Chat app's
+    # HTTP endpoint (e.g. "https://<service>.run.app/chat-interaction") —
+    # that's the aud claim Google's ID token carries in "HTTP endpoint URL"
+    # audience mode. See verify_chat_request's docstring.
     audience = app.config.get("CHAT_AUDIENCE") or os.environ.get("CHAT_APP_AUDIENCE", "")
     verify_fn = app.config.get("VERIFY_CHAT_FN")
     if not verify_chat_request(request.headers, audience=audience, verify_fn=verify_fn):

@@ -274,12 +274,19 @@ afterward. **This route does need request verification** — without it,
 anyone who found this service's public URL could forge an approve/reject
 decision on someone else's pending draft:
 
-1. Verify `Authorization: Bearer <token>` is a JWT genuinely issued by
-   `chat@system.gserviceaccount.com` (`verify_chat_request`, via
-   `google.oauth2.id_token.verify_oauth2_token`). Reject with 403 otherwise.
-   **Confirm the exact audience-claim value against current Google Chat API
-   docs before relying on this in production** — implemented to the
-   documented shape, not yet exercised against a live Chat app.
+1. Verify `Authorization: Bearer <token>` is a Google-signed OIDC ID token
+   whose `email` claim is `chat@system.gserviceaccount.com`
+   (`verify_chat_request`, via `google.oauth2.id_token.verify_oauth2_token`).
+   Reject with 403 otherwise. This uses Chat's **"HTTP endpoint URL"**
+   Authentication Audience mode (§12) — the `aud` claim must equal this
+   route's exact URL, e.g. `https://<service>.run.app/chat-interaction`, set
+   as `CHAT_APP_AUDIENCE`. (Chat's other mode, "Project Number," uses a
+   different JWT-based check against the numeric project number instead —
+   not implemented here; "HTTP endpoint URL" is the right choice for a
+   service that isn't using Cloud Run's own IAM-based auth, i.e. this one.)
+   Confirmed against
+   [Google's current docs](https://developers.google.com/workspace/chat/verify-requests-from-chat);
+   **not yet exercised against a live Chat app.**
 2. If the click is the **edit** button: return the dialog-open response
    directly, synchronously — opening a dialog never touches the graph, so
    there's nothing to protect by routing it through Pub/Sub.
@@ -299,12 +306,15 @@ pytest test_main.py
 Deploy it once, note its HTTPS URL, and use it for both integrations:
 `ADC_CALENDAR_WEBHOOK_ADDRESS=<url>/calendar-webhook` (the `address` field
 `ensure_calendar_watch` registers with Google), and the Chat app's
-interactivity endpoint (§12) is `<url>/chat-interaction`.
+interactivity endpoint (§12) is `<url>/chat-interaction`. `CHAT_APP_AUDIENCE`
+must be that exact `<url>/chat-interaction` string — it has to match what
+you configure as the Chat app's Connection settings URL exactly, since that's
+the `aud` claim Google's ID token carries.
 
 ```bash
 gcloud run deploy aidedecamp-republisher \
   --source=packages/aidedecamp/deploy/republisher \
-  --set-env-vars="CALENDAR_PUBSUB_TOPIC=projects/${PROJECT_ID}/topics/aidedecamp-calendar,CHAT_INTERACTION_PUBSUB_TOPIC=projects/${PROJECT_ID}/topics/aidedecamp-chat-interaction,CHAT_APP_AUDIENCE=<confirm against Chat API docs>" \
+  --set-env-vars="CALENDAR_PUBSUB_TOPIC=projects/${PROJECT_ID}/topics/aidedecamp-calendar,CHAT_INTERACTION_PUBSUB_TOPIC=projects/${PROJECT_ID}/topics/aidedecamp-chat-interaction,CHAT_APP_AUDIENCE=https://aidedecamp-republisher-xxxxx.run.app/chat-interaction" \
   --allow-unauthenticated \
   --region=us-central1
 ```
@@ -461,14 +471,21 @@ when its config is present (see `runtime.py`).
    clicks onto `aidedecamp-chat-interaction`, and answers edit clicks
    directly. It never touches the checkpointer or memory itself (see
    `docs/decisions.md` for the full reasoning).
-4. Permissions: whichever spaces/users should be able to add the app.
-5. Note the space id (`spaces/AAAAxxxxxxx`) for `ADC_CHAT_SPACE` — get it via
+4. **Authentication Audience**: set to **"HTTP endpoint URL"** (the other
+   option, "Project Number," uses a different verification path this service
+   doesn't implement). This makes the `aud` claim on Google's signed request
+   equal the URL from step 3 exactly — set that same string as the
+   republisher's `CHAT_APP_AUDIENCE` env var (§8).
+5. Permissions: whichever spaces/users should be able to add the app.
+6. Note the space id (`spaces/AAAAxxxxxxx`) for `ADC_CHAT_SPACE` — get it via
    the Chat API (`spaces.list`) or from the space's URL once the app is
    added to it.
-6. Confirm the JWT audience value Google Chat's interaction calls will carry,
-   and set it as the republisher's `CHAT_APP_AUDIENCE` env var — this is the
-   one piece of §8's `/chat-interaction` route not yet verified against a
-   live Chat app.
+
+`verify_chat_request`'s shape (audience = endpoint URL, check the `email`
+claim) is confirmed against
+[Google's current docs](https://developers.google.com/workspace/chat/verify-requests-from-chat)
+— what's still unverified is only whether it works against an actual live
+Chat app end to end (§15, step 7).
 
 ---
 
@@ -554,7 +571,12 @@ Rough end-to-end smoke test, in order:
    "✅ Approved — draft accepted." follows within the pull loop's poll window
    — this is the async hand-off (`/chat-interaction` → Pub/Sub →
    `Runtime.process_chat_interaction`) working end to end, not just the
-   synchronous path `handle_interaction` covers in tests.
+   synchronous path `handle_interaction` covers in tests. **This is also the
+   only real test of `verify_chat_request`** — if step 7 doesn't produce the
+   "Processing" ack (whatever Chat's UI shows for that failure isn't
+   confirmed here), check the republisher's Cloud Run logs for a 403, which
+   means either the Authentication Audience mode/URL (§12) or
+   `CHAT_APP_AUDIENCE` doesn't match what Chat is actually sending.
 
 ---
 
