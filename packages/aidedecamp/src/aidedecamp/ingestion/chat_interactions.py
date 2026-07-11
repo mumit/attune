@@ -11,10 +11,11 @@ then republishes the decoded event onto a Pub/Sub topic this process pulls
 from — the same "notification is untrusted-origin input, never a direct
 command" discipline already applied to Gmail/Calendar notifications.
 
-Only APPROVE/REJECT go through this async path. EDIT's initial click never
+APPROVE/REJECT and the edit dialog's SUBMIT go through this async path —
+all three actually call ``Command(resume=...)``. EDIT's *initial* click never
 touches the graph (it just opens a dialog — no state to protect), so the
-republisher handles that synchronously and immediately; only the two
-decisions that actually call ``Command(resume=...)`` need the extra hop.
+republisher handles that synchronously and immediately; it is deliberately
+not decodable here, so the async path can't accidentally resume on it.
 
 Action name strings are intentionally duplicated from ``channels/blocks.py``
 rather than imported — ``ingestion/`` doesn't depend on ``channels/``
@@ -29,33 +30,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# Mirrors channels/blocks.py's ACTION_APPROVE/ACTION_REJECT (ACTION_EDIT is
-# handled synchronously by the republisher itself — see module docstring —
-# so it's deliberately not part of the decision map below).
+# Mirrors channels/blocks.py's ACTION_APPROVE/ACTION_REJECT/ACTION_EDIT_SUBMIT
+# and gchat_cards.py's EDIT_DIALOG_FIELD (ACTION_EDIT — the dialog *open*
+# click — is handled synchronously by the republisher itself, see module
+# docstring, so it's deliberately not part of the decision map below).
 _ACTION_APPROVE = "adc_approve"
 _ACTION_REJECT = "adc_reject"
+_ACTION_EDIT_SUBMIT = "adc_edit_submit"
+_EDIT_DIALOG_FIELD = "adc_edit_text"
 
 _DECISIONS = {
     _ACTION_APPROVE: "approved",
     _ACTION_REJECT: "rejected",
+    _ACTION_EDIT_SUBMIT: "edited",
 }
 
 
 @dataclass
 class ChatInteraction:
     thread_id: str
-    decision: str  # "approved" | "rejected"
+    decision: str  # "approved" | "rejected" | "edited"
+    text: str | None = None  # the edited draft; only set for "edited"
 
 
 def decode_chat_interaction(event: dict[str, Any]) -> ChatInteraction | None:
-    """Parse a decoded CARD_CLICKED event into a ``(thread_id, decision)`` pair.
+    """Parse a decoded CARD_CLICKED event into a resume-able interaction.
 
-    Returns ``None`` for non-card-click events, a missing ``thread_id``, or
-    any action other than approve/reject (including edit — see module
-    docstring) — mirroring ``GoogleChatChannel.handle_interaction``'s
-    existing filtering, so behavior is identical whether resumption happens
-    synchronously (tests, or a direct in-process call) or asynchronously
-    (production, via the republisher + Pub/Sub).
+    Returns ``None`` for non-card-click events, a missing ``thread_id``, any
+    action other than approve/reject/edit-submit (including the edit dialog's
+    *open* click — see module docstring), or an edit submit with no edited
+    text (nothing to resume with) — mirroring
+    ``GoogleChatChannel.handle_interaction``'s existing filtering, so behavior
+    is identical whether resumption happens synchronously (tests, or a direct
+    in-process call) or asynchronously (production, via the republisher +
+    Pub/Sub).
     """
     if event.get("type") != "CARD_CLICKED":
         return None
@@ -70,7 +78,22 @@ def decode_chat_interaction(event: dict[str, Any]) -> ChatInteraction | None:
     if not thread_id:
         return None
 
-    return ChatInteraction(thread_id=thread_id, decision=decision)
+    text: str | None = None
+    if decision == "edited":
+        text = _form_input(event, _EDIT_DIALOG_FIELD)
+        if not text:
+            return None
+
+    return ChatInteraction(thread_id=thread_id, decision=decision, text=text)
+
+
+def _form_input(event: dict[str, Any], field: str) -> str | None:
+    """Read one text field from a dialog-submit event's ``common.formInputs``."""
+    try:
+        values = event["common"]["formInputs"][field]["stringInputs"]["value"]
+    except (KeyError, TypeError):
+        return None
+    return values[0] if values else None
 
 
 def _get_param(action: dict[str, Any], key: str) -> str | None:

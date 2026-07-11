@@ -23,9 +23,13 @@ from typing import Any, Callable
 from .blocks import (
     ACTION_APPROVE,
     ACTION_EDIT,
+    ACTION_EDIT_SUBMIT,
     ACTION_REJECT,
     approval_blocks,
     brief_blocks,
+    edit_modal_view,
+    extract_draft_from_blocks,
+    extract_edit_submission,
 )
 
 
@@ -145,12 +149,36 @@ class SlackChannel:
             )
 
         @app.action(ACTION_EDIT)
-        def _edit(ack, body, client):  # noqa: ANN001 # pragma: no cover - modal UI
+        def _edit(ack, body, client):  # noqa: ANN001
             ack()
-            # In the full app this opens a modal prefilled with the draft; on
-            # submit it calls self._resume(thread_id, "edited", edited_text).
-            # The modal round-trip is UI wiring deferred to implementation.
-            pass
+            thread_id = body["actions"][0]["value"]
+            draft = extract_draft_from_blocks(
+                (body.get("message") or {}).get("blocks") or []
+            )
+            channel_id = (body.get("channel") or {}).get("id", "")
+            client.views_open(
+                trigger_id=body["trigger_id"],
+                view=edit_modal_view(
+                    thread_id=thread_id,
+                    channel_id=channel_id,
+                    proposed_draft=draft or "",
+                ),
+            )
+
+        @app.view(ACTION_EDIT_SUBMIT)
+        def _edit_submit(ack, body, client):  # noqa: ANN001
+            ack()
+            parsed = extract_edit_submission(body.get("view") or {})
+            if parsed is None:
+                return
+            thread_id, channel_id, text = parsed
+            result = self._resume(thread_id, "edited", text)
+            from ..orchestrator import apply_confirmation
+
+            if channel_id:
+                client.chat_postMessage(
+                    channel=channel_id, text=apply_confirmation("edited", result)
+                )
 
         @app.event("message")
         def _message(event, say):  # noqa: ANN001

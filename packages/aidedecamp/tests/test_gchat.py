@@ -161,6 +161,56 @@ def test_handle_unknown_action_returns_none():
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# Edit flow (prompt 02): dialog-open prefill + dialog-submit resume
+# ---------------------------------------------------------------------------
+
+
+def test_edit_click_returns_prefilled_dialog():
+    from aidedecamp.channels import ACTION_EDIT_SUBMIT, EDIT_DIALOG_FIELD
+
+    ch, resumes = _channel()
+    event = _click(ACTION_EDIT, "t-7")
+    # Chat echoes the clicked card in the event; the dialog prefills from it.
+    event["message"] = approval_card(
+        thread_id="t-7", domain="mail", proposed_draft="Original draft."
+    )
+    response = ch.handle_interaction(event)
+
+    assert resumes == []  # dialog-open never touches the graph
+    dialog = response["actionResponse"]["dialogAction"]["dialog"]
+    widgets = dialog["body"]["sections"][0]["widgets"]
+    text_input = widgets[0]["textInput"]
+    assert text_input["name"] == EDIT_DIALOG_FIELD
+    assert text_input["value"] == "Original draft."
+    submit = widgets[1]["buttonList"]["buttons"][0]["onClick"]["action"]
+    assert submit["function"] == ACTION_EDIT_SUBMIT
+    assert submit["parameters"] == [{"key": "thread_id", "value": "t-7"}]
+
+
+def test_edit_click_without_card_prefills_empty():
+    ch, _ = _channel()
+    response = ch.handle_interaction(_click(ACTION_EDIT, "t-7"))
+    dialog = response["actionResponse"]["dialogAction"]["dialog"]
+    assert dialog["body"]["sections"][0]["widgets"][0]["textInput"]["value"] == ""
+
+
+def test_edit_submit_resumes_edited_with_text():
+    from aidedecamp.channels import ACTION_EDIT_SUBMIT
+
+    ch, resumes = _channel()
+    event = _click(ACTION_EDIT_SUBMIT, "t-7")
+    event["common"] = {
+        "formInputs": {
+            "adc_edit_text": {"stringInputs": {"value": ["My rewrite."]}}
+        }
+    }
+    response = ch.handle_interaction(event)
+
+    assert resumes == [("t-7", "edited", "My rewrite.")]
+    assert "Edited" in response["text"]
+
+
 def test_handle_non_card_clicked_returns_none():
     ch, _ = _channel()
     result = ch.handle_interaction({"type": "MESSAGE", "text": "hello"})

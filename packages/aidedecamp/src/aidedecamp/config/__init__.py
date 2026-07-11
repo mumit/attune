@@ -55,9 +55,9 @@ class Settings:
     gmail_pubsub_subscription: str | None = None
     chat_pubsub_topic: str | None = None
     chat_pubsub_subscription: str | None = None
-    # Chat card-click interactions (approve/reject only — edit's dialog-open
-    # click is handled synchronously by the republisher and never reaches
-    # this topic) republished the same way Calendar's webhook is, since Chat
+    # Chat card-click interactions (approve/reject/edit-submit — the edit
+    # dialog's *open* click is handled synchronously by the republisher and
+    # never reaches this topic) republished the same way Calendar's webhook is, since Chat
     # interactivity also requires a synchronous HTTP response the credential-
     # holding process must never provide directly (rule 5).
     chat_interaction_pubsub_topic: str | None = None

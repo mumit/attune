@@ -121,22 +121,26 @@ class GoogleChatChannel:
         action = event.get("action", {})
         fn = action.get("actionMethodName", "")
 
-        if fn == ACTION_EDIT:  # pragma: no cover — dialog UI deferred
-            # The dialog submit will call self._resume(thread_id, "edited", text).
-            if not _get_param(action, "thread_id"):
+        if fn == ACTION_EDIT:
+            # Dialog-open never touches the graph: answer synchronously with
+            # the edit dialog, prefilled from the card echoed in the event.
+            thread_id = _get_param(action, "thread_id")
+            if not thread_id:
                 return None
-            return {
-                "actionResponse": {
-                    "type": "DIALOG",
-                    "dialogAction": {"dialog": {"body": {}}},
-                }
-            }
+            from .gchat_cards import edit_dialog, extract_draft_from_card_event
+
+            return edit_dialog(
+                thread_id=thread_id,
+                proposed_draft=extract_draft_from_card_event(event) or "",
+            )
 
         interaction = decode_chat_interaction(event)
         if interaction is None:
             return None
 
-        result = self._resume(interaction.thread_id, interaction.decision, None)
+        result = self._resume(
+            interaction.thread_id, interaction.decision, interaction.text
+        )
         from ..orchestrator import apply_confirmation
 
         return {"text": apply_confirmation(interaction.decision, result)}

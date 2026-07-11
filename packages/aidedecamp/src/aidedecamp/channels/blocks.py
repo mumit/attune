@@ -11,6 +11,7 @@ the click can be routed back to resume the exact paused workflow.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 # action_ids the app listens for. Centralized so the app wiring and the card
@@ -18,6 +19,22 @@ from typing import Any
 ACTION_APPROVE = "adc_approve"
 ACTION_EDIT = "adc_edit"
 ACTION_REJECT = "adc_reject"
+# The edit dialog/modal *submit* action — distinct from ACTION_EDIT (which
+# only opens the editor and never touches the graph). In Slack this is the
+# modal's callback_id; in Chat it's the dialog submit button's function name
+# (mirrored in ingestion/chat_interactions.py and deploy/republisher/,
+# kept in sync by tests).
+ACTION_EDIT_SUBMIT = "adc_edit_submit"
+
+# Slack modal internals: where the edited text lives in the view_submission
+# payload (view.state.values[<block_id>][<action_id>].value).
+EDIT_MODAL_BLOCK_ID = "adc_edit_block"
+EDIT_MODAL_INPUT_ID = "adc_edit_input"
+
+# The draft is rendered as a Slack blockquote inside the approval card; the
+# edit modal re-extracts it from there (the card itself is the single source
+# of what the user saw and chose to edit).
+_DRAFT_QUOTE_PREFIX = ">>> "
 
 
 def brief_blocks(*, summary: str, unread_count: int, event_count: int) -> list[dict[str, Any]]:
@@ -66,7 +83,10 @@ def approval_blocks(
         },
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f">>> {proposed_draft}"},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{_DRAFT_QUOTE_PREFIX}{proposed_draft}",
+            },
         },
     ]
     if why:
@@ -105,3 +125,71 @@ def approval_blocks(
         }
     )
     return blocks
+
+
+def edit_modal_view(
+    *, thread_id: str, channel_id: str, proposed_draft: str
+) -> dict[str, Any]:
+    """Render the edit modal (opened by the approval card's Edit button).
+
+    ``thread_id`` and ``channel_id`` ride in ``private_metadata`` so the
+    ``view_submission`` handler can resume the right paused workflow and post
+    its confirmation back where the card was. The draft prefills the input so
+    the user edits rather than retypes — the resulting diff is the correction
+    signal (design 2.2).
+    """
+    return {
+        "type": "modal",
+        "callback_id": ACTION_EDIT_SUBMIT,
+        "private_metadata": json.dumps(
+            {"thread_id": thread_id, "channel": channel_id}
+        ),
+        "title": {"type": "plain_text", "text": "Edit draft"},
+        "submit": {"type": "plain_text", "text": "Save & apply"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": EDIT_MODAL_BLOCK_ID,
+                "label": {"type": "plain_text", "text": "Your reply"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": EDIT_MODAL_INPUT_ID,
+                    "multiline": True,
+                    "initial_value": proposed_draft,
+                },
+            }
+        ],
+    }
+
+
+def extract_draft_from_blocks(blocks: list[dict[str, Any]]) -> str | None:
+    """Pull the proposed draft back out of an approval card's blocks.
+
+    The Edit button's click payload carries the original message; the draft
+    is the blockquoted section ``approval_blocks`` rendered. Returns ``None``
+    if no such section exists (not an approval card)."""
+    for block in blocks or []:
+        if block.get("type") != "section":
+            continue
+        text = (block.get("text") or {}).get("text", "")
+        if text.startswith(_DRAFT_QUOTE_PREFIX):
+            return text[len(_DRAFT_QUOTE_PREFIX):]
+    return None
+
+
+def extract_edit_submission(view: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Parse a ``view_submission`` payload's view into
+    ``(thread_id, channel_id, edited_text)``, or ``None`` if malformed."""
+    try:
+        meta = json.loads(view.get("private_metadata") or "{}")
+        text = view["state"]["values"][EDIT_MODAL_BLOCK_ID][EDIT_MODAL_INPUT_ID][
+            "value"
+        ]
+    except (KeyError, TypeError, ValueError):
+        return None
+    thread_id = meta.get("thread_id")
+    channel_id = meta.get("channel", "")
+    if not thread_id or not text:
+        return None
+    return thread_id, channel_id, text

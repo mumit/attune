@@ -168,9 +168,9 @@ class Runtime:
         )
 
     def process_chat_interaction(self, event: dict[str, Any]) -> None:
-        """Process one decoded Chat card-click event (approve/reject only —
-        edit's dialog-open click is handled synchronously by the republisher
-        and never reaches this path). This is the async half of Chat's
+        """Process one decoded Chat card-click event (approve/reject/edit-
+        submit — the edit dialog's *open* click is handled synchronously by
+        the republisher and never reaches this path). This is the async half of Chat's
         approval flow (see ``docs/decisions.md``): the public webhook
         endpoint never touches the checkpointer itself, it only forwards the
         verified, decoded click here over Pub/Sub."""

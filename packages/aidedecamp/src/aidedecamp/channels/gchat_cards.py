@@ -22,14 +22,23 @@ from typing import Any
 # doesn't branch on channel type. These become the 'function' field inside
 # onClick.action in Chat cards, and appear as action.actionMethodName in the
 # CARD_CLICKED interaction event.
-from .blocks import ACTION_APPROVE, ACTION_EDIT, ACTION_REJECT
+from .blocks import ACTION_APPROVE, ACTION_EDIT, ACTION_EDIT_SUBMIT, ACTION_REJECT
+
+# The dialog's text-input field name — where the edited draft comes back in
+# the dialog-submit event's common.formInputs. Mirrored (not imported) in
+# ingestion/chat_interactions.py and deploy/republisher/, pinned by tests.
+EDIT_DIALOG_FIELD = "adc_edit_text"
 
 __all__ = [
     "ACTION_APPROVE",
     "ACTION_EDIT",
+    "ACTION_EDIT_SUBMIT",
     "ACTION_REJECT",
+    "EDIT_DIALOG_FIELD",
     "brief_card",
     "approval_card",
+    "edit_dialog",
+    "extract_draft_from_card_event",
 ]
 
 
@@ -129,3 +138,80 @@ def approval_card(
             }
         ]
     }
+
+
+def edit_dialog(*, thread_id: str, proposed_draft: str) -> dict[str, Any]:
+    """The edit dialog (Chat's modal equivalent), returned synchronously as
+    the ``actionResponse`` to an Edit click.
+
+    The submit button's action carries ``thread_id`` and fires
+    ``ACTION_EDIT_SUBMIT`` — a real graph resume, so (unlike this dialog-open
+    response) it goes through the async republisher → Pub/Sub path like
+    approve/reject. The edited text comes back in the submit event's
+    ``common.formInputs[EDIT_DIALOG_FIELD]``.
+    """
+    return {
+        "actionResponse": {
+            "type": "DIALOG",
+            "dialogAction": {
+                "dialog": {
+                    "body": {
+                        "sections": [
+                            {
+                                "header": "Edit draft",
+                                "widgets": [
+                                    {
+                                        "textInput": {
+                                            "name": EDIT_DIALOG_FIELD,
+                                            "label": "Your reply",
+                                            "type": "MULTIPLE_LINE",
+                                            "value": proposed_draft,
+                                        }
+                                    },
+                                    {
+                                        "buttonList": {
+                                            "buttons": [
+                                                {
+                                                    "text": "Save & apply",
+                                                    "onClick": {
+                                                        "action": {
+                                                            "function": ACTION_EDIT_SUBMIT,
+                                                            "parameters": [
+                                                                {
+                                                                    "key": "thread_id",
+                                                                    "value": thread_id,
+                                                                }
+                                                            ],
+                                                        }
+                                                    },
+                                                }
+                                            ]
+                                        }
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    }
+
+
+def extract_draft_from_card_event(event: dict[str, Any]) -> str | None:
+    """Pull the proposed draft out of a CARD_CLICKED event's echoed message.
+
+    Chat includes the clicked card in ``event["message"]["cardsV2"]``; the
+    draft is the first ``textParagraph`` widget ``approval_card`` rendered.
+    Returns ``None`` when the event carries no recognizable approval card.
+    """
+    try:
+        cards = event["message"]["cardsV2"]
+        widgets = cards[0]["card"]["sections"][0]["widgets"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    for w in widgets:
+        text = (w.get("textParagraph") or {}).get("text")
+        if text:
+            return text
+    return None

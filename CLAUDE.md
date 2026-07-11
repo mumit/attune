@@ -85,7 +85,8 @@ and `credentials.py`).
   Pub/Sub notification reconciliation); `chat_events.py` (Workspace Events
   subscription lifecycle + message parsing); `chat_interactions.py`
   (`decode_chat_interaction` — parses a CARD_CLICKED event into
-  approve/reject only; edit is deliberately excluded, see module docstring);
+  approve/reject/edit-submit; the edit dialog's *open* click is deliberately
+  excluded, see module docstring);
   `calendar_watch.py` + `calendar_sync.py` (Calendar channel lifecycle +
   sync-token reconciliation); `state.py`
   (`JsonGmailWatchState`/`JsonChatSubscriptionState`/`JsonCalendarChannelState`/

@@ -241,25 +241,26 @@ def handle_chat_interaction(
     user_id: str,
     audit_log: AuditLog | None = None,
 ) -> None:
-    """Process a decoded Chat card-click event (approve/reject only).
+    """Process a decoded Chat card-click event (approve/reject/edit-submit).
 
     This is the async half of Chat's approval flow. The public webhook
     endpoint that received the original CARD_CLICKED event never resumes
     anything itself — it only verifies the request came from Google and
     forwards the decoded click here over Pub/Sub, having already returned an
-    immediate placeholder ack ("Processing..."). This function calls
-    ``resume_fn`` (the real ``Command(resume=...)`` invoke) and posts the
-    *actual* confirmation back to the space via ``post_text``.
+    immediate placeholder ack. This function calls ``resume_fn`` (the real
+    ``Command(resume=...)`` invoke) and posts the *actual* confirmation back
+    to the space via ``post_text``.
 
-    Events that don't decode to an approve/reject decision (edit, unknown
-    actions, malformed events) are silently ignored — edit's dialog-open
-    click never reaches this path at all (see ``ingestion/chat_interactions.py``).
+    Events that don't decode to a resume-able decision (the edit dialog's
+    *open* click, unknown actions, malformed events) are silently ignored —
+    dialog-open is answered synchronously by the republisher and never
+    reaches this path at all (see ``ingestion/chat_interactions.py``).
     """
     interaction = decode_chat_interaction(event)
     if interaction is None:
         return
 
-    result = resume_fn(interaction.thread_id, interaction.decision, None)
+    result = resume_fn(interaction.thread_id, interaction.decision, interaction.text)
 
     # The confirmation states what actually happened (a Gmail draft created,
     # or an apply failure) — never a claimed success the graph didn't produce.

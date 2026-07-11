@@ -52,12 +52,15 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Mirrors ingestion/chat_interactions.py's _ACTION_APPROVE/_ACTION_REJECT and
-# channels/blocks.py's ACTION_EDIT — duplicated rather than imported, since
-# this service deliberately has no dependency on the aidedecamp package.
+# Mirrors ingestion/chat_interactions.py's action names, channels/blocks.py's
+# ACTION_EDIT/ACTION_EDIT_SUBMIT, and gchat_cards.py's EDIT_DIALOG_FIELD —
+# duplicated rather than imported, since this service deliberately has no
+# dependency on the aidedecamp package. Kept in sync by tests on both sides.
 _ACTION_APPROVE = "adc_approve"
 _ACTION_REJECT = "adc_reject"
 _ACTION_EDIT = "adc_edit"
+_ACTION_EDIT_SUBMIT = "adc_edit_submit"
+_EDIT_DIALOG_FIELD = "adc_edit_text"
 
 # The email claim on the verified ID token — NOT the "iss" claim, which is
 # Google's own generic OIDC issuer, not the calling service account. See
@@ -171,23 +174,108 @@ def chat_interaction():
 
     if fn == _ACTION_EDIT:
         # Opening a dialog never touches the graph — answer immediately,
-        # synchronously, no Pub/Sub involved.
-        return jsonify({
-            "actionResponse": {
-                "type": "DIALOG",
-                "dialogAction": {"dialog": {"body": {}}},
-            }
-        })
+        # synchronously, no Pub/Sub involved. The dialog is prefilled from
+        # the card echoed in the event itself (this service is stateless and
+        # holds nothing to look a draft up in).
+        thread_id = _action_param(action, "thread_id")
+        if not thread_id:
+            return "", 200
+        return jsonify(
+            _edit_dialog(thread_id, _draft_from_event(event) or "")
+        )
 
-    if fn in (_ACTION_APPROVE, _ACTION_REJECT):
+    if fn in (_ACTION_APPROVE, _ACTION_REJECT, _ACTION_EDIT_SUBMIT):
         publisher = app.config.get("INTERACTION_PUBLISHER")
         if publisher is None:  # pragma: no cover - requires live GCP
             publisher = _default_publisher()
         topic = app.config.get("INTERACTION_TOPIC") or os.environ["CHAT_INTERACTION_PUBSUB_TOPIC"]
         publish(publisher, topic, event)
+        if fn == _ACTION_EDIT_SUBMIT:
+            # A dialog submit must be answered with an actionStatus (that's
+            # what closes the dialog); the real confirmation is posted async
+            # by the main process after it resumes the workflow.
+            return jsonify({
+                "actionResponse": {
+                    "type": "DIALOG",
+                    "dialogAction": {"actionStatus": {"statusCode": "OK"}},
+                }
+            })
         return jsonify({"text": "⏳ Processing your response..."})
 
     return "", 200
+
+
+def _action_param(action: dict, key: str) -> str | None:
+    for p in action.get("parameters", []):
+        if p.get("key") == key:
+            return p.get("value")
+    return None
+
+
+def _draft_from_event(event: dict) -> str | None:
+    """The proposed draft = the first textParagraph of the echoed card
+    (mirrors channels/gchat_cards.py's extract_draft_from_card_event)."""
+    try:
+        widgets = event["message"]["cardsV2"][0]["card"]["sections"][0]["widgets"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    for w in widgets:
+        text = (w.get("textParagraph") or {}).get("text")
+        if text:
+            return text
+    return None
+
+
+def _edit_dialog(thread_id: str, proposed_draft: str) -> dict:
+    """The edit dialog payload (mirrors channels/gchat_cards.py's
+    edit_dialog — same field name, same submit action, kept in sync by
+    tests on both sides)."""
+    return {
+        "actionResponse": {
+            "type": "DIALOG",
+            "dialogAction": {
+                "dialog": {
+                    "body": {
+                        "sections": [
+                            {
+                                "header": "Edit draft",
+                                "widgets": [
+                                    {
+                                        "textInput": {
+                                            "name": _EDIT_DIALOG_FIELD,
+                                            "label": "Your reply",
+                                            "type": "MULTIPLE_LINE",
+                                            "value": proposed_draft,
+                                        }
+                                    },
+                                    {
+                                        "buttonList": {
+                                            "buttons": [
+                                                {
+                                                    "text": "Save & apply",
+                                                    "onClick": {
+                                                        "action": {
+                                                            "function": _ACTION_EDIT_SUBMIT,
+                                                            "parameters": [
+                                                                {
+                                                                    "key": "thread_id",
+                                                                    "value": thread_id,
+                                                                }
+                                                            ],
+                                                        }
+                                                    },
+                                                }
+                                            ]
+                                        }
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    }
 
 
 if __name__ == "__main__":  # pragma: no cover - requires a live run

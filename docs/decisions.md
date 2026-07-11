@@ -3,6 +3,47 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Edit flow wired end to end on both channels (roadmap prompt 02)
+
+- **This closes the design's flagship learning-signal gap**: edit-before-send
+  is the richest capture signal in the design (§2.2, the correction diff),
+  and `capture_correction` was fully built and wired into the graph's
+  `capture` node — but no production surface could produce an `edited`
+  decision. Slack's Edit button was a literal `pass`; Chat's dialog submit
+  was an unwired stub. After this change, a real edit on either channel
+  fires `capture_correction`.
+- **Slack**: Edit opens a modal (`blocks.edit_modal_view`, pure builder)
+  prefilled with the draft **extracted from the approval card itself**
+  (`extract_draft_from_blocks` — the card is the single source of what the
+  user saw and chose to edit; no state lookup, no checkpointer read from the
+  channel layer). `thread_id` + originating channel ride in
+  `private_metadata`; the `view_submission` handler resumes
+  `("edited", text)` and posts prompt 01's honest confirmation via
+  `chat_postMessage`. The modal's `callback_id` is `ACTION_EDIT_SUBMIT`
+  (`adc_edit_submit`) — a new shared action name in `blocks.py`, distinct
+  from `ACTION_EDIT` (which only opens the editor and never touches the
+  graph).
+- **Chat**: the dialog-open click stays synchronous at the republisher
+  (unchanged trust model — opening a dialog touches no state), but now
+  returns a real dialog prefilled from the card echoed in the CARD_CLICKED
+  event (the republisher is stateless, so the event is the only possible
+  source). The dialog's **submit** is a real graph resume, so it rides the
+  existing async path: republisher verifies + publishes it to the same
+  interaction topic (sync response = an `actionStatus: OK` that closes the
+  dialog), and `decode_chat_interaction` now decodes it to
+  `ChatInteraction(decision="edited", text=…)` — dialog-open still
+  deliberately decodes to `None`, and an edit submit with no text is dropped
+  rather than resumed empty. `dispatcher.handle_chat_interaction` passes the
+  text through; **no new plumbing** — the third resume-able decision reuses
+  the approve/reject pipe wholesale.
+- **New mirrored strings**: `adc_edit_submit` and the dialog field name
+  `adc_edit_text` (`gchat_cards.EDIT_DIALOG_FIELD`) are duplicated (not
+  imported) in `ingestion/chat_interactions.py` and `deploy/republisher/`,
+  per the existing no-cross-dependency rule, pinned by equality tests on the
+  aidedecamp side and by literal-string assertions in the republisher's own
+  suite (22 tests, run separately with its own deps — verified in a scratch
+  venv).
+
 ## 2026-07 — Apply step: approvals materialize as Gmail drafts (roadmap prompt 01)
 
 - **The draft-approve graph gained the apply node its own docstring always

@@ -259,6 +259,61 @@ def test_chat_interaction_edit_returns_dialog_without_publishing(client):
     assert fake.calls == []
 
 
+def test_chat_interaction_edit_dialog_prefilled_from_echoed_card(client):
+    """The dialog prefills the draft from the card echoed in the event —
+    this service is stateless, so the event is the only source (prompt 02)."""
+    fake = _FakePublisher()
+    app.config["INTERACTION_PUBLISHER"] = fake
+    app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
+
+    event = _chat_click("adc_edit", "t-7")
+    event["message"] = {
+        "cardsV2": [
+            {
+                "card": {
+                    "sections": [
+                        {"widgets": [{"textParagraph": {"text": "Original draft."}}]}
+                    ]
+                }
+            }
+        ]
+    }
+    resp = client.post("/chat-interaction", json=event, headers=_authed())
+
+    dialog = resp.get_json()["actionResponse"]["dialogAction"]["dialog"]
+    widgets = dialog["body"]["sections"][0]["widgets"]
+    assert widgets[0]["textInput"]["name"] == "adc_edit_text"
+    assert widgets[0]["textInput"]["value"] == "Original draft."
+    submit_action = widgets[1]["buttonList"]["buttons"][0]["onClick"]["action"]
+    assert submit_action["function"] == "adc_edit_submit"
+    assert submit_action["parameters"] == [{"key": "thread_id", "value": "t-7"}]
+    assert fake.calls == []
+
+
+def test_chat_interaction_edit_submit_publishes_and_closes_dialog(client):
+    """The dialog's submit is a real graph resume, so it rides Pub/Sub like
+    approve/reject; the sync response just closes the dialog."""
+    fake = _FakePublisher()
+    app.config["INTERACTION_PUBLISHER"] = fake
+    app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(claims={"email": "chat@system.gserviceaccount.com"})
+
+    event = _chat_click("adc_edit_submit", "t-7")
+    event["common"] = {
+        "formInputs": {"adc_edit_text": {"stringInputs": {"value": ["My rewrite."]}}}
+    }
+    resp = client.post("/chat-interaction", json=event, headers=_authed())
+
+    assert resp.status_code == 200
+    action_response = resp.get_json()["actionResponse"]
+    assert action_response["type"] == "DIALOG"
+    assert action_response["dialogAction"]["actionStatus"]["statusCode"] == "OK"
+    assert len(fake.calls) == 1
+    _, data = fake.calls[0]
+    assert json.loads(data)["action"]["actionMethodName"] == "adc_edit_submit"
+
+
 def test_chat_interaction_approve_publishes_and_acks(client):
     fake = _FakePublisher()
     app.config["INTERACTION_PUBLISHER"] = fake

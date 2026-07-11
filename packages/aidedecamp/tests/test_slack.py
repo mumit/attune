@@ -12,19 +12,23 @@ from unittest.mock import patch
 from aidedecamp.channels import (
     ACTION_APPROVE,
     ACTION_EDIT,
+    ACTION_EDIT_SUBMIT,
     ACTION_REJECT,
     SlackChannel,
     approval_blocks,
     brief_blocks,
+    edit_modal_view,
+    extract_draft_from_blocks,
     make_slack_say,
 )
 
 
 class FakeApp:
-    """Captures @app.action and @app.event handlers by id/name."""
+    """Captures @app.action, @app.view, and @app.event handlers by id/name."""
 
     def __init__(self):
         self.handlers = {}
+        self.view_handlers = {}
         self.event_handlers = {}
 
     def action(self, action_id):
@@ -33,11 +37,31 @@ class FakeApp:
             return fn
         return deco
 
+    def view(self, callback_id):
+        def deco(fn):
+            self.view_handlers[callback_id] = fn
+            return fn
+        return deco
+
     def event(self, event_name):
         def deco(fn):
             self.event_handlers[event_name] = fn
             return fn
         return deco
+
+
+class FakeWebClient:
+    """Captures views_open / chat_postMessage calls (the Bolt ``client``)."""
+
+    def __init__(self):
+        self.views_opened = []
+        self.messages = []
+
+    def views_open(self, **kwargs):
+        self.views_opened.append(kwargs)
+
+    def chat_postMessage(self, **kwargs):
+        self.messages.append(kwargs)
 
 
 def _say_recorder():
@@ -127,6 +151,82 @@ def test_approve_confirmation_plain_when_nothing_materialized():
     )
     assert responded[0]["text"] == "✅ Approved."
     assert "sending" not in responded[0]["text"].lower()
+
+
+def test_edit_button_opens_prefilled_modal():
+    """Edit opens a modal prefilled with the draft extracted from the card
+    itself; thread_id + channel ride in private_metadata (prompt 02)."""
+    import json
+
+    ch = SlackChannel(resume_fn=lambda *a: None, app=FakeApp())
+    client = FakeWebClient()
+    blocks = approval_blocks(
+        thread_id="t-7", domain="mail", proposed_draft="Original draft text."
+    )
+    body = {
+        "actions": [{"value": "t-7"}],
+        "trigger_id": "trig-1",
+        "channel": {"id": "C123"},
+        "message": {"blocks": blocks},
+    }
+    ch._app.handlers[ACTION_EDIT](ack=lambda: None, body=body, client=client)
+
+    assert len(client.views_opened) == 1
+    view = client.views_opened[0]["view"]
+    assert client.views_opened[0]["trigger_id"] == "trig-1"
+    assert view["callback_id"] == ACTION_EDIT_SUBMIT
+    element = view["blocks"][0]["element"]
+    assert element["initial_value"] == "Original draft text."
+    meta = json.loads(view["private_metadata"])
+    assert meta == {"thread_id": "t-7", "channel": "C123"}
+
+
+def test_view_submission_resumes_edited_and_confirms():
+    resumes = []
+    ch = SlackChannel(
+        resume_fn=lambda tid, decision, text: resumes.append((tid, decision, text))
+        or {"applied_ref": "d-3"},
+        app=FakeApp(),
+    )
+    client = FakeWebClient()
+    view = edit_modal_view(
+        thread_id="t-7", channel_id="C123", proposed_draft="Original"
+    )
+    # Simulate the user's edit landing in the submitted view state.
+    view["state"] = {
+        "values": {"adc_edit_block": {"adc_edit_input": {"value": "My edit."}}}
+    }
+    ch._app.view_handlers[ACTION_EDIT_SUBMIT](
+        ack=lambda: None, body={"view": view}, client=client
+    )
+
+    assert resumes == [("t-7", "edited", "My edit.")]
+    assert client.messages == [
+        {"channel": "C123", "text": "✏️ Edited — draft created in Gmail."}
+    ]
+
+
+def test_view_submission_malformed_is_ignored():
+    resumes = []
+    ch = SlackChannel(
+        resume_fn=lambda *a: resumes.append(a), app=FakeApp()
+    )
+    client = FakeWebClient()
+    ch._app.view_handlers[ACTION_EDIT_SUBMIT](
+        ack=lambda: None, body={"view": {"private_metadata": "not json{"}},
+        client=client,
+    )
+    assert resumes == []
+    assert client.messages == []
+
+
+def test_extract_draft_from_blocks_round_trip():
+    blocks = approval_blocks(
+        thread_id="t-1", domain="mail", proposed_draft="Line one.\nLine two."
+    )
+    assert extract_draft_from_blocks(blocks) == "Line one.\nLine two."
+    assert extract_draft_from_blocks([]) is None
+    assert extract_draft_from_blocks([{"type": "divider"}]) is None
 
 
 def test_approve_confirmation_admits_apply_failure():

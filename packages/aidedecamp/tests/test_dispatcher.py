@@ -788,6 +788,30 @@ def test_chat_interaction_reject_resumes_and_posts_confirmation():
     assert "Rejected" in replies[0]
 
 
+def test_chat_interaction_edit_submit_resumes_with_text():
+    """The edit dialog's submit rides the same async path as approve/reject
+    (prompt 02) — resumed as 'edited' with the user's text, so
+    capture_correction fires in the graph."""
+    resumes = []
+    replies = []
+
+    event = _click("adc_edit_submit", "t-8")
+    event["common"] = {
+        "formInputs": {"adc_edit_text": {"stringInputs": {"value": ["Rewritten."]}}}
+    }
+    handle_chat_interaction(
+        _fake_app_ctx(),
+        event,
+        resume_fn=lambda tid, decision, text: resumes.append((tid, decision, text))
+        or {"applied_ref": "d-4"},
+        post_text=replies.append,
+        user_id="me@example.com",
+    )
+
+    assert resumes == [("t-8", "edited", "Rewritten.")]
+    assert replies == ["✏️ Edited — draft created in Gmail."]
+
+
 def test_chat_interaction_confirmation_reports_created_draft():
     """When the resumed graph materialized a Gmail draft (applied_ref set),
     the confirmation says so — and only then (prompt 01: honesty)."""
