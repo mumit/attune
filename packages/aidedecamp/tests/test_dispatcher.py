@@ -474,6 +474,30 @@ def test_gmail_notification_audit_skipped_for_failed_thread_fetch():
     assert audit_log.records[0]["workflow"] == "ops"
 
 
+def test_failed_thread_fetch_is_enqueued_after_cursor_advance():
+    class _Queue:
+        calls = []
+
+        def enqueue(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    queue = _Queue()
+    handle_gmail_notification(
+        _fake_app_ctx(graph=_FakeGraph()),
+        {"emailAddress": "me@example.com", "historyId": "602"},
+        gmail_service=_FakeGmail(["t1"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=_FakeConnector({}),
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        retry_queue=queue,
+    )
+
+    assert queue.calls[0][0] == (
+        "gmail_thread", "t1", {"history_id": "602"}
+    )
+
+
 # ---------------------------------------------------------------------------
 # handle_gmail_notification — triage gate
 # ---------------------------------------------------------------------------

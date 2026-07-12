@@ -131,6 +131,7 @@ class Settings:
     nudge_min_age_days: int = 4
     nudge_cooldown_days: int = 7
     nudge_state_path: str = "./nudge_state.json"
+    retry_queue_db_path: str = "./source_retries.db"
     # The single identity this deployment acts as (memory/audit user_id, and
     # the Gmail API "me" alias). One deployment = one identity, per design 4.6.
     user_id: str = "me"
@@ -211,6 +212,9 @@ class Settings:
             nudge_min_age_days=int(e.get("ADC_NUDGE_MIN_AGE_DAYS", "4")),
             nudge_cooldown_days=int(e.get("ADC_NUDGE_COOLDOWN_DAYS", "7")),
             nudge_state_path=_path("ADC_NUDGE_STATE_PATH", "nudge_state.json"),
+            retry_queue_db_path=_path(
+                "ADC_RETRY_QUEUE_DB_PATH", "source_retries.db"
+            ),
             user_id=e.get("ADC_USER_ID", "me"),
             slack_allowed_users=_id_set(e.get("ADC_SLACK_ALLOWED_USERS")),
             chat_allowed_users=_id_set(e.get("ADC_CHAT_ALLOWED_USERS")),

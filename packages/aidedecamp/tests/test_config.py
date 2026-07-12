@@ -16,6 +16,7 @@ def test_data_dir_derives_all_state_paths():
     assert s.calendar_sync_state_path == "/var/lib/adc/calendar_sync_state.json"
     assert s.pending_state_path == "/var/lib/adc/pending_approvals.json"
     assert s.conversation_state_path == "/var/lib/adc/conversation_state.json"
+    assert s.retry_queue_db_path == "/var/lib/adc/source_retries.db"
 
 
 def test_explicit_path_overrides_data_dir():

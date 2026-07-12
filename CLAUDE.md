@@ -125,7 +125,10 @@ and `credentials.py`).
   be polled); `state.py`
   (`JsonGmailWatchState`/`JsonChatSubscriptionState`/`JsonCalendarChannelState`/
   `JsonCalendarSyncState` — concrete, file-backed persistence for all four
-  protocols above). Calendar *and* Chat card-interactions are the two sources
+  protocols above); `retry_queue.py` is the SQLite WAL ledger for source work
+  whose cursor already advanced but whose thread/event fetch failed, drained
+  every five minutes by the runtime scheduler. Calendar *and* Chat card-
+  interactions are the two sources
   needing a real inbound webhook — see rule 5 below.
 - `dispatcher.py` — the routing seam: turns a decoded Gmail/Calendar
   notification, a Chat card-click, or a Chat/Slack message into a graph

@@ -48,6 +48,8 @@ from .dispatcher import (
     handle_chat_message,
     handle_gmail_notification,
     handle_slack_message,
+    submit_calendar_event,
+    submit_gmail_thread,
 )
 from .ingestion import (
     HistoryExpired,
@@ -56,6 +58,7 @@ from .ingestion import (
     JsonChatPollState,
     JsonChatSubscriptionState,
     JsonGmailWatchState,
+    SqliteRetryQueue,
     calendar_poll_notification,
     ensure_calendar_watch,
     ensure_subscription,
@@ -163,6 +166,7 @@ class Runtime:
     chat_poll_state: Any = None      # ingestion.state.JsonChatPollState
     memory_ui: dict = field(default_factory=dict)  # memory-command UI state
     nudge_state: Any = None          # orchestrator.followup.NudgeState
+    retry_queue: Any = None          # ingestion.retry_queue.SqliteRetryQueue
 
     # --- event processing (testable) ---------------------------------------
 
@@ -170,37 +174,18 @@ class Runtime:
         """Reconcile one decoded Gmail Pub/Sub notification and post any
         resulting approval cards to every configured channel."""
 
-        def _post_approval(
-            thread_id: str, draft: str, rationale: list[str] | None
-        ) -> None:
-            if self.slack is not None and self.slack_say is not None:
-                self.slack.post_approval(
-                    self.slack_say,
-                    thread_id=thread_id,
-                    domain="mail",
-                    proposed_draft=draft,
-                    rationale=rationale,
-                )
-            if self.gchat is not None and self.settings.chat_default_space:
-                self.gchat.post_approval(
-                    self.settings.chat_default_space,
-                    thread_id=thread_id,
-                    domain="mail",
-                    proposed_draft=draft,
-                    rationale=rationale,
-                )
-
         return handle_gmail_notification(
             self.app,
             notification,
             gmail_service=self.gmail_service,
             watch_state=self.watch_state,
             connector=self.connector,
-            post_approval=_post_approval,
+            post_approval=self._post_mail_approval,
             user_id=self.settings.user_id,
             audit_log=self.app.audit_log,
             pending=self.pending,
             notify=self._notify_all,
+            retry_queue=self.retry_queue,
         )
 
     def process_chat_event(self, event: dict[str, Any]) -> None:
@@ -242,19 +227,6 @@ class Runtime:
 
         _notify = self._notify_all
 
-        def _post_approval(thread_id, draft, rationale, *, title=None):  # noqa: ANN001
-            if self.slack is not None and self.slack_say is not None:
-                self.slack.post_approval(
-                    self.slack_say, thread_id=thread_id, domain="calendar",
-                    proposed_draft=draft, rationale=rationale, title=title,
-                )
-            if self.gchat is not None and self.settings.chat_default_space:
-                self.gchat.post_approval(
-                    self.settings.chat_default_space, thread_id=thread_id,
-                    domain="calendar", proposed_draft=draft,
-                    rationale=rationale, title=title,
-                )
-
         has_channel = (self.slack is not None and self.slack_say is not None) or (
             self.gchat is not None and self.settings.chat_default_space
         )
@@ -268,8 +240,9 @@ class Runtime:
             user_id=self.settings.user_id,
             calendar_id=self.settings.calendar_id,
             audit_log=self.app.audit_log,
-            post_approval=_post_approval if has_channel else None,
+            post_approval=self._post_calendar_approval if has_channel else None,
             pending=self.pending,
+            retry_queue=self.retry_queue,
         )
 
     def process_chat_interaction(self, event: dict[str, Any]) -> None:
@@ -314,6 +287,77 @@ class Runtime:
             self.slack_say(text=text)
         if self.gchat is not None and self.settings.chat_default_space:
             self.gchat.post_text(self.settings.chat_default_space, text)
+
+    def _post_mail_approval(
+        self, thread_id: str, draft: str, rationale: list[str] | None
+    ) -> None:
+        if self.slack is not None and self.slack_say is not None:
+            self.slack.post_approval(
+                self.slack_say, thread_id=thread_id, domain="mail",
+                proposed_draft=draft, rationale=rationale,
+            )
+        if self.gchat is not None and self.settings.chat_default_space:
+            self.gchat.post_approval(
+                self.settings.chat_default_space, thread_id=thread_id,
+                domain="mail", proposed_draft=draft, rationale=rationale,
+            )
+
+    def _post_calendar_approval(
+        self, thread_id: str, draft: str, rationale: list[str] | None, *,
+        title: str | None = None,
+    ) -> None:
+        if self.slack is not None and self.slack_say is not None:
+            self.slack.post_approval(
+                self.slack_say, thread_id=thread_id, domain="calendar",
+                proposed_draft=draft, rationale=rationale, title=title,
+            )
+        if self.gchat is not None and self.settings.chat_default_space:
+            self.gchat.post_approval(
+                self.settings.chat_default_space, thread_id=thread_id,
+                domain="calendar", proposed_draft=draft, rationale=rationale,
+                title=title,
+            )
+
+    def drain_source_retries(self, *, limit: int = 25) -> int:
+        """Replay cursor-consumed source work from the durable retry ledger."""
+        if self.retry_queue is None:
+            return 0
+        completed = 0
+        for item in self.retry_queue.pending(limit=limit):
+            try:
+                if item.kind == "gmail_thread":
+                    existing = (
+                        self.pending.get_pending_for_source(item.source_ref)
+                        if self.pending is not None else None
+                    )
+                    if existing is None:
+                        thread = self.connector.get_thread(item.source_ref)
+                        submit_gmail_thread(
+                            self.app, thread, gmail_tid=item.source_ref,
+                            history_id=item.payload["history_id"],
+                            post_approval=self._post_mail_approval,
+                            user_id=self.settings.user_id,
+                            audit_log=self.app.audit_log, pending=self.pending,
+                            notify=self._notify_all,
+                        )
+                elif item.kind == "calendar_event":
+                    event = self.connector.get_event(item.source_ref)
+                    submit_calendar_event(
+                        self.app, self.connector, event, notify=self._notify_all,
+                        user_id=self.settings.user_id,
+                        calendar_id=item.payload.get("calendar_id", "primary"),
+                        audit_log=self.app.audit_log,
+                        post_approval=self._post_calendar_approval,
+                        pending=self.pending,
+                    )
+                else:
+                    raise ValueError(f"unknown retry kind: {item.kind}")
+            except Exception as exc:  # noqa: BLE001 — stays queued
+                self.retry_queue.fail(item, error=type(exc).__name__)
+                continue
+            self.retry_queue.complete(item)
+            completed += 1
+        return completed
 
     def post_brief(self) -> Any:
         """Assemble one morning brief and post it to every configured channel
@@ -475,6 +519,10 @@ class Runtime:
         if self.pending is not None:
             scheduler.add(
                 Job("sweep_pending", every(hours=6), self.sweep_pending_ignored)
+            )
+        if self.retry_queue is not None:
+            scheduler.add(
+                Job("source_retries", every(minutes=5), self.drain_source_retries)
             )
         scheduler.add(
             Job(
@@ -865,6 +913,7 @@ def build_runtime(
     chat_service: Any = None,
     chat_poll_state: Any = None,
     nudge_state: Any = None,
+    retry_queue: Any = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -909,6 +958,9 @@ def build_runtime(
     resolved_pending = pending or JsonPendingApprovals(settings.pending_state_path)
     _memory_ui: dict = {}
     resolved_nudge_state = nudge_state or JsonNudgeState(settings.nudge_state_path)
+    resolved_retry_queue = retry_queue or SqliteRetryQueue(
+        settings.retry_queue_db_path
+    )
     resolved_conversation = conversation or JsonConversationLog(
         settings.conversation_state_path,
         max_turns=settings.converse_window_turns,
@@ -1057,4 +1109,5 @@ def build_runtime(
         chat_poll_state=resolved_chat_poll_state,
         memory_ui=_memory_ui,
         nudge_state=resolved_nudge_state,
+        retry_queue=resolved_retry_queue,
     )

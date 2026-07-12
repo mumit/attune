@@ -503,6 +503,23 @@ def test_process_gmail_notification_posts_to_both_channels():
     assert gchat.approvals[0]["space"] == "spaces/ABC"
 
 
+def test_drain_source_retries_replays_gmail_thread(tmp_path):
+    from aidedecamp.ingestion import SqliteRetryQueue
+
+    queue = SqliteRetryQueue(str(tmp_path / "retries.db"))
+    queue.enqueue(
+        "gmail_thread", "t1", {"history_id": "200"}, error="Timeout"
+    )
+    slack = _FakeSlackChannel()
+    runtime = _runtime(
+        retry_queue=queue, slack=slack, slack_say=lambda **kw: None
+    )
+
+    assert runtime.drain_source_retries() == 1
+    assert queue.pending() == []
+    assert slack.approvals[0]["thread_id"] == "gmail:t1:200"
+
+
 def test_process_gmail_notification_slack_only_when_no_gchat():
     slack = _FakeSlackChannel()
     runtime = _runtime(slack=slack, slack_say=lambda **kw: None, gchat=None)
@@ -1143,7 +1160,8 @@ def test_build_scheduler_assembles_expected_jobs():
     names = [j.name for j in runtime.build_scheduler().jobs]
     # default mode is poll -> no renew_watches job
     assert names == [
-        "daily_brief", "sweep_pending", "consolidate", "autonomy_digest",
+        "daily_brief", "sweep_pending", "source_retries", "consolidate",
+        "autonomy_digest",
     ]
 
     # push mode gets the daily renewal job
@@ -1151,8 +1169,8 @@ def test_build_scheduler_assembles_expected_jobs():
     push.settings = _settings(ADC_INGESTION_MODE="push")
     names = [j.name for j in push.build_scheduler().jobs]
     assert names == [
-        "daily_brief", "renew_watches", "sweep_pending", "consolidate",
-        "autonomy_digest",
+        "daily_brief", "renew_watches", "sweep_pending", "source_retries",
+        "consolidate", "autonomy_digest",
     ]
 
     # A real user address + nudge state -> the daily nudge job appears.

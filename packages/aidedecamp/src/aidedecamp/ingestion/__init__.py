@@ -56,6 +56,7 @@ from .state import (
     JsonChatSubscriptionState,
     JsonGmailWatchState,
 )
+from .retry_queue import RetryItem, SqliteRetryQueue
 
 __all__ = [
     "ensure_watch",
@@ -82,6 +83,8 @@ __all__ = [
     "process_calendar_notification",
     "JsonGmailWatchState",
     "JsonChatPollState",
+    "RetryItem",
+    "SqliteRetryQueue",
     "JsonChatSubscriptionState",
     "calendar_poll_notification",
     "poll_chat_step",

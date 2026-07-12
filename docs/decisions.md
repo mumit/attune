@@ -3,6 +3,20 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Durable source-work retry ledger
+
+- Cursor advancement and source processing remain separate, but a failed Gmail
+  thread or Calendar event fetch is now inserted into `source_retries.db`
+  before the handler returns. The scheduler drains the SQLite WAL queue every
+  five minutes through the same thread/event submission functions used live.
+- The queue is unique by `(kind, source_ref)`, so repeated failures update one
+  item rather than multiplying work. Successful replay removes it; failure
+  increments attempts and leaves it durable. A source with an existing pending
+  approval is considered complete, preserving card dedupe.
+- This is intentionally smaller than the full action kernel: it closes cursor-
+  consumed data loss without moving checkpoints, approvals, or outbox delivery
+  into a new ownership boundary.
+
 ## 2026-07 — Proactive destination confidentiality
 
 - Human allowlists authorize commands and clicks; they do not hide a brief or

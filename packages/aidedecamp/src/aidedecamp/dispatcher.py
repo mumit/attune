@@ -160,6 +160,7 @@ def handle_gmail_notification(
     triage_fn: Callable[[Any, str], TriageResult] | None = None,
     pending: Any = None,
     notify: Callable[[str], None] | None = None,
+    retry_queue: Any = None,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -237,101 +238,112 @@ def handle_gmail_notification(
                     domain="ops",
                     user_id=user_id,
                 )
-            continue
-
-        # Unique checkpoint id: prefix + Gmail thread id + notification epoch.
-        lg_tid = f"{thread_id_prefix}:{gmail_tid}:{changes.new_history_id}"
-
-        incoming_summary = (
-            f"From: {thread.from_addr}\nSubject: {thread.subject}\n\n{thread.body}"
-        )
-
-        if triage_fn is _default_triage:
-            triage = triage_thread(
-                app_ctx.client, incoming_summary,
-                store=app_ctx.store, sender=thread.from_addr, user_id=user_id,
-            )
-        else:
-            triage = triage_fn(app_ctx.client, incoming_summary)
-        if triage.priority == Priority.NOISE:
-            logger.info("gmail thread %s triaged NOISE — skipped", gmail_tid)
-            if audit_log is not None:
-                audit_log.record(
-                    thread_id=lg_tid,
-                    workflow="triage",
-                    events=[{
-                        "event": "triaged_noise",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "reason": triage.reason,
-                    }],
-                    domain="mail",
-                    user_id=user_id,
+            if retry_queue is not None:
+                retry_queue.enqueue(
+                    "gmail_thread",
+                    gmail_tid,
+                    {"history_id": changes.new_history_id},
+                    error=type(exc).__name__,
                 )
             continue
-
-        state: dict[str, Any] = {
-            "incoming_summary": incoming_summary,
-            # The Gmail thread id — what the apply step materializes the
-            # approved draft against (create_draft on this thread).
-            "incoming_ref": gmail_tid,
-            # Freshness precondition: apply refuses if the thread gains
-            # messages after this card was proposed (prompt 21).
-            "source_snapshot": (
-                thread.last_message_at.isoformat()
-                if getattr(thread, "last_message_at", None) is not None
-                else None
-            ),
-            "user_id": user_id,
-            "action": "draft_reply",
-            "domain": "mail",
-            "iteration_count": 0,
-            "audit_events": [],
-        }
-        config = {"configurable": {"thread_id": lg_tid}}
-
-        result = app_ctx.graph.invoke(state, config)
-
-        if audit_log is not None:
-            audit_log.record(
-                thread_id=lg_tid,
-                workflow="draft_approve",
-                events=result.get("audit_events", []),
-                domain="mail",
-                user_id=user_id,
+        try:
+            lg_tid = submit_gmail_thread(
+                app_ctx, thread, gmail_tid=gmail_tid,
+                history_id=changes.new_history_id,
+                post_approval=post_approval, user_id=user_id,
+                thread_id_prefix=thread_id_prefix, audit_log=audit_log,
+                triage_fn=triage_fn, pending=pending, notify=notify,
             )
-
-        proposed = result.get("proposed_draft") or ""
-        rationale: list[str] | None = result.get("retrieved_memories") or None
-
-        rung = _auto_rung(result)
-        if rung is not None:
-            # Auto-applied (ACT_NOTIFY+): no card, no pending entry — asking
-            # a human to approve something already done was finding #2.
-            _handle_auto_applied(
-                result, rung,
-                action="draft_reply", domain="mail",
-                describe=f'drafted a reply to "{thread.subject}"',
-                lg_tid=lg_tid, user_id=user_id,
-                notify=notify, audit_log=audit_log,
+        except Exception as exc:  # noqa: BLE001 — cursor already advanced
+            if retry_queue is None:
+                raise
+            retry_queue.enqueue(
+                "gmail_thread", gmail_tid,
+                {"history_id": changes.new_history_id},
+                error=type(exc).__name__,
             )
-            submitted.append(lg_tid)
             continue
-
-        logger.info(
-            "gmail thread %s (%s) drafted — approval card posted as %s",
-            gmail_tid, triage.priority.value, lg_tid,
-        )
-        post_approval(lg_tid, proposed, rationale)
-        if pending is not None:
-            pending.register(
-                lg_tid=lg_tid,
-                source_ref=gmail_tid,
-                domain="mail",
-                posted_at=datetime.now(timezone.utc),
-            )
-        submitted.append(lg_tid)
+        if lg_tid is not None:
+            submitted.append(lg_tid)
 
     return submitted
+
+
+def submit_gmail_thread(
+    app_ctx: AppContext,
+    thread: Any,
+    *,
+    gmail_tid: str,
+    history_id: str,
+    post_approval: Callable[[str, str, list[str] | None], None],
+    user_id: str,
+    thread_id_prefix: str = "gmail",
+    audit_log: AuditLog | None = None,
+    triage_fn: Callable[[Any, str], TriageResult] | None = None,
+    pending: Any = None,
+    notify: Callable[[str], None] | None = None,
+) -> str | None:
+    """Process one already-fetched thread, including durable retry replays."""
+    triage_fn = triage_fn or _default_triage
+    lg_tid = f"{thread_id_prefix}:{gmail_tid}:{history_id}"
+    incoming_summary = (
+        f"From: {thread.from_addr}\nSubject: {thread.subject}\n\n{thread.body}"
+    )
+    if triage_fn is _default_triage:
+        triage = triage_thread(
+            app_ctx.client, incoming_summary,
+            store=app_ctx.store, sender=thread.from_addr, user_id=user_id,
+        )
+    else:
+        triage = triage_fn(app_ctx.client, incoming_summary)
+    if triage.priority == Priority.NOISE:
+        if audit_log is not None:
+            audit_log.record(
+                thread_id=lg_tid, workflow="triage",
+                events=[{"event": "triaged_noise",
+                         "ts": datetime.now(timezone.utc).isoformat(),
+                         "reason": triage.reason}],
+                domain="mail", user_id=user_id,
+            )
+        return None
+
+    state: dict[str, Any] = {
+        "incoming_summary": incoming_summary,
+        "incoming_ref": gmail_tid,
+        "source_snapshot": (
+            thread.last_message_at.isoformat()
+            if getattr(thread, "last_message_at", None) is not None else None
+        ),
+        "user_id": user_id, "action": "draft_reply", "domain": "mail",
+        "iteration_count": 0, "audit_events": [],
+    }
+    result = app_ctx.graph.invoke(
+        state, {"configurable": {"thread_id": lg_tid}}
+    )
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=lg_tid, workflow="draft_approve",
+            events=result.get("audit_events", []), domain="mail", user_id=user_id,
+        )
+    rung = _auto_rung(result)
+    if rung is not None:
+        _handle_auto_applied(
+            result, rung, action="draft_reply", domain="mail",
+            describe=f'drafted a reply to "{thread.subject}"', lg_tid=lg_tid,
+            user_id=user_id, notify=notify, audit_log=audit_log,
+        )
+        return lg_tid
+
+    post_approval(
+        lg_tid, result.get("proposed_draft") or "",
+        result.get("retrieved_memories") or None,
+    )
+    if pending is not None:
+        pending.register(
+            lg_tid=lg_tid, source_ref=gmail_tid, domain="mail",
+            posted_at=datetime.now(timezone.utc),
+        )
+    return lg_tid
 
 
 def handle_calendar_notification(
@@ -347,6 +359,7 @@ def handle_calendar_notification(
     audit_log: AuditLog | None = None,
     post_approval: Callable[..., None] | None = None,
     pending: Any = None,
+    retry_queue: Any = None,
 ) -> list[ConflictResult]:
     """Process a decoded Calendar webhook notification (design 1.2, 1.4, 4.2).
 
@@ -419,48 +432,75 @@ def handle_calendar_notification(
                     domain="ops",
                     user_id=user_id,
                 )
-            continue
-
-        conflict = detect_conflict(connector, event)
-        if conflict is None:
-            continue
-
-        conflicts.append(conflict)
-        notify(
-            f'Scheduling conflict: "{event.summary}" overlaps with '
-            f'"{conflict.conflicting_with.summary}".'
-        )
-        if audit_log is not None:
-            audit_log.record(
-                thread_id=f"calendar:{calendar_id}:{event.event_id}",
-                workflow="scheduling",
-                events=[{
-                    "event": "conflict_detected",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "conflicting_event_id": conflict.conflicting_with.event_id,
-                }],
-                domain="calendar",
-                user_id=user_id,
-            )
-
-        if post_approval is not None:
-            if offers_made >= MAX_HOLD_OFFERS_PER_RUN:
-                # Detection + notify above still ran; only the CARD is
-                # capped — a wall of proposals is worse than none.
-                logger.info(
-                    "hold-offer cap reached; conflict on %s notified only",
-                    event.event_id,
+            if retry_queue is not None:
+                retry_queue.enqueue(
+                    "calendar_event",
+                    event_id,
+                    {"calendar_id": calendar_id},
+                    error=type(exc).__name__,
                 )
-                continue
-            offered = _offer_resolution_hold(
-                app_ctx, connector, conflict,
-                post_approval=post_approval, pending=pending,
-                audit_log=audit_log, user_id=user_id, notify=notify,
+            continue
+        try:
+            conflict, offered = submit_calendar_event(
+                app_ctx, connector, event,
+                notify=notify, user_id=user_id, calendar_id=calendar_id,
+                audit_log=audit_log, post_approval=post_approval,
+                pending=pending,
+                allow_offer=offers_made < MAX_HOLD_OFFERS_PER_RUN,
             )
-            if offered is not None:
-                offers_made += 1
+        except Exception as exc:  # noqa: BLE001 — sync token already advanced
+            if retry_queue is None:
+                raise
+            retry_queue.enqueue(
+                "calendar_event", event_id, {"calendar_id": calendar_id},
+                error=type(exc).__name__,
+            )
+            continue
+        if conflict is not None:
+            conflicts.append(conflict)
+        if offered:
+            offers_made += 1
 
     return conflicts
+
+
+def submit_calendar_event(
+    app_ctx: AppContext,
+    connector: WorkspaceConnector,
+    event: Any,
+    *,
+    notify: Callable[[str], None],
+    user_id: str,
+    calendar_id: str = "primary",
+    audit_log: AuditLog | None = None,
+    post_approval: Callable[..., None] | None = None,
+    pending: Any = None,
+    allow_offer: bool = True,
+) -> tuple[ConflictResult | None, bool]:
+    """Process one fetched event; shared by live ingestion and retry drain."""
+    conflict = detect_conflict(connector, event)
+    if conflict is None:
+        return None, False
+    notify(
+        f'Scheduling conflict: "{event.summary}" overlaps with '
+        f'"{conflict.conflicting_with.summary}".'
+    )
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=f"calendar:{calendar_id}:{event.event_id}",
+            workflow="scheduling",
+            events=[{"event": "conflict_detected",
+                     "ts": datetime.now(timezone.utc).isoformat(),
+                     "conflicting_event_id": conflict.conflicting_with.event_id}],
+            domain="calendar", user_id=user_id,
+        )
+    if post_approval is None or not allow_offer:
+        return conflict, False
+    offered = _offer_resolution_hold(
+        app_ctx, connector, conflict, post_approval=post_approval,
+        pending=pending, audit_log=audit_log, user_id=user_id, notify=notify,
+    )
+    return conflict, offered is not None
 
 
 def _offer_resolution_hold(
