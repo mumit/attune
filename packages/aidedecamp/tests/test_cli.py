@@ -31,9 +31,9 @@ def test_main_without_subcommand_prints_help_and_fails(capsys):
     assert "aidedecamp" in capsys.readouterr().out
 
 
-def test_autonomy_is_still_a_placeholder(capsys):
-    assert main(["autonomy"]) == 0
-    assert "M4" in capsys.readouterr().out
+def test_autonomy_without_subcommand_prints_help(capsys):
+    assert main(["autonomy"]) == 1
+    assert "grant" in capsys.readouterr().out
 
 
 def test_memory_without_subcommand_prints_help(capsys):

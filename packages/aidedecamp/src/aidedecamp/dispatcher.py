@@ -424,12 +424,14 @@ def _respond_to_message(
     conversation window, so "expand on the second item" works right after a
     brief the same way it works after a Q&A answer.
     """
-    response = _try_memory_command(
-        app_ctx, text, user_id,
-        channel=channel,
-        memory_ui=memory_ui if memory_ui is not None else _MEMORY_UI_STATE,
-        audit_log=audit_log,
-    )
+    response = _autonomy_status(app_ctx, text, audit_log=audit_log)
+    if response is None:
+        response = _try_memory_command(
+            app_ctx, text, user_id,
+            channel=channel,
+            memory_ui=memory_ui if memory_ui is not None else _MEMORY_UI_STATE,
+            audit_log=audit_log,
+        )
     if response is not None:
         if conversation is not None:
             conversation.append(
@@ -460,6 +462,29 @@ def _respond_to_message(
         )
 
     post_text(response)
+
+
+def _autonomy_status(
+    app_ctx: AppContext, text: str, *, audit_log: Any = None
+) -> str | None:
+    """The chat "autonomy" command: show the posture + any graduation
+    suggestions. **Show-only by design** — grant/revoke is CLI-only, because
+    a chat channel that relays untrusted content must never be able to
+    escalate autonomy (rule 3; see orchestrator/grants.py)."""
+    if text.strip().lower() != "autonomy":
+        return None
+
+    from .orchestrator import default_matrix, show_matrix, suggest_graduations
+
+    matrix = app_ctx.matrix or default_matrix()
+    lines = ["Current autonomy posture:", show_matrix(matrix)]
+    if audit_log is not None:
+        suggestions = suggest_graduations(audit_log, matrix)
+        if suggestions:
+            lines.append("")
+            lines.append("Earned-graduation suggestions (grants are CLI-only):")
+            lines.extend(f"- {s.render()}" for s in suggestions)
+    return "\n".join(lines)
 
 
 def _try_memory_command(

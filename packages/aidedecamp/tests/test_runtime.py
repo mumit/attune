@@ -1137,13 +1137,18 @@ def test_build_scheduler_assembles_expected_jobs():
     runtime = _runtime(slack=_FakeSlackChannel(), slack_say=lambda **kw: None)
     names = [j.name for j in runtime.build_scheduler().jobs]
     # default mode is poll -> no renew_watches job
-    assert names == ["daily_brief", "sweep_pending", "consolidate"]
+    assert names == [
+        "daily_brief", "sweep_pending", "consolidate", "autonomy_digest",
+    ]
 
     # push mode gets the daily renewal job
     push = _runtime(slack=_FakeSlackChannel(), slack_say=lambda **kw: None)
     push.settings = _settings(ADC_INGESTION_MODE="push")
     names = [j.name for j in push.build_scheduler().jobs]
-    assert names == ["daily_brief", "renew_watches", "sweep_pending", "consolidate"]
+    assert names == [
+        "daily_brief", "renew_watches", "sweep_pending", "consolidate",
+        "autonomy_digest",
+    ]
 
     # No channel configured -> no brief job (nowhere to post it).
     quiet = _runtime()
@@ -1228,6 +1233,58 @@ def test_run_consolidation_audits_report():
     rec = audit.records[0]
     assert rec["workflow"] == "ops"
     assert rec["events"][0]["event"] == "consolidation_ran"
+
+
+def test_weekly_autonomy_digest_posts_suggestions_to_channels():
+    """The digest posts earned-graduation suggestions (information only —
+    grants stay CLI-only, prompt 12) to every configured channel."""
+    from datetime import datetime, timezone as _tz
+
+    from aidedecamp.audit.log import JsonlAuditLog
+    import tempfile, os
+
+    with tempfile.TemporaryDirectory() as td:
+        log = JsonlAuditLog(os.path.join(td, "audit.jsonl"))
+        now = datetime.now(_tz.utc).isoformat()
+        for i in range(12):
+            tid = f"gmail:t{i}:100"
+            log.record(
+                thread_id=tid, workflow="draft_approve",
+                events=[{"event": "autonomy_gate", "ts": now,
+                         "action": "draft_reply", "domain": "mail",
+                         "routed_to": "approve"}],
+                domain="mail", user_id="u1",
+            )
+            log.record(
+                thread_id=tid, workflow="draft_approve",
+                events=[{"event": "human_decision", "ts": now,
+                         "decision": "approved"}],
+                domain="mail", user_id="u1",
+            )
+
+        said: list[dict] = []
+        gchat = _FakeGChatChannel()
+        runtime = _runtime(
+            app=_app_ctx(audit_log=log),
+            slack=_FakeSlackChannel(),
+            slack_say=lambda **kw: said.append(kw),
+            gchat=gchat,
+        )
+        runtime.settings = _settings(ADC_CHAT_SPACE="spaces/ABC")
+
+        suggestions = runtime.post_autonomy_digest()
+
+    assert len(suggestions) == 1
+    assert "12/12" in said[0]["text"]
+    assert "aidedecamp autonomy grant" in said[0]["text"]
+    assert len(gchat.texts) == 1
+
+
+def test_autonomy_digest_silent_when_nothing_earned():
+    said: list[dict] = []
+    runtime = _runtime(slack_say=lambda **kw: said.append(kw))
+    assert runtime.post_autonomy_digest() == []
+    assert said == []
 
 
 def test_gmail_notification_registers_pending_card():

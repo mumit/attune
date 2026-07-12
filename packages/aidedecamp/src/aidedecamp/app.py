@@ -42,6 +42,7 @@ class AppContext:
     store: MemoryStore
     settings: Settings
     audit_log: AuditLog
+    matrix: PermissionMatrix | None = None
     _db_conn: Any = field(default=None, repr=False)
 
     def close(self) -> None:
@@ -94,6 +95,17 @@ def build_app(
 
     resolved_client = client or make_client()
 
+    # Load the persisted autonomy posture unless a matrix is injected. The
+    # file is only ever written by explicit grant/revoke operations
+    # (orchestrator/grants.py); absent, the conservative default applies.
+    resolved_matrix = matrix
+    if resolved_matrix is None:
+        from .orchestrator.grants import JsonPermissionMatrixStore
+
+        resolved_matrix = JsonPermissionMatrixStore(
+            settings.autonomy_state_path
+        ).load()
+
     db_conn: Any = None
     if checkpointer is None:
         try:
@@ -116,10 +128,12 @@ def build_app(
     graph = build_draft_approve_graph(
         client=resolved_client,
         store=resolved_store,
-        matrix=matrix,
+        matrix=resolved_matrix,
         checkpointer=resolved_checkpointer,
         apply_fn=apply_fn,
     )
+
+    from .orchestrator import default_matrix as _default_matrix
 
     return AppContext(
         graph=graph,
@@ -127,5 +141,6 @@ def build_app(
         store=resolved_store,
         settings=settings,
         audit_log=resolved_audit_log,
+        matrix=resolved_matrix or _default_matrix(),
         _db_conn=db_conn,
     )

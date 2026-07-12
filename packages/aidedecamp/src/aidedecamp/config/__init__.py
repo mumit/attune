@@ -111,6 +111,9 @@ class Settings:
     poll_seconds: int = 120
     # Chat poll high-water mark (poll mode only).
     chat_poll_state_path: str = "./chat_poll_state.json"
+    # Persisted autonomy grants (the permission matrix). Written only by
+    # explicit grant/revoke operations, loaded by build_app.
+    autonomy_state_path: str = "./autonomy_grants.json"
     # The single identity this deployment acts as (memory/audit user_id, and
     # the Gmail API "me" alias). One deployment = one identity, per design 4.6.
     user_id: str = "me"
@@ -174,6 +177,9 @@ class Settings:
             poll_seconds=max(int(e.get("ADC_POLL_SECONDS", "120")), 30),
             chat_poll_state_path=_path(
                 "ADC_CHAT_POLL_STATE_PATH", "chat_poll_state.json"
+            ),
+            autonomy_state_path=_path(
+                "ADC_AUTONOMY_STATE_PATH", "autonomy_grants.json"
             ),
             user_id=e.get("ADC_USER_ID", "me"),
             slack_default_channel=e.get("ADC_SLACK_CHANNEL"),

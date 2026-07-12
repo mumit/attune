@@ -25,6 +25,16 @@ from .draft_approve import (
     make_connector_apply_fn,
     resume_workflow,
 )
+from .grants import (
+    GraduationSuggestion,
+    JsonPermissionMatrixStore,
+    TrackRecord,
+    grant,
+    revoke,
+    show_matrix,
+    suggest_graduations,
+    track_records,
+)
 from .pending import (
     JsonPendingApprovals,
     PendingApproval,
@@ -46,6 +56,14 @@ __all__ = [
     "make_connector_apply_fn",
     "resume_workflow",
     "MAX_ITERATIONS",
+    "GraduationSuggestion",
+    "JsonPermissionMatrixStore",
+    "TrackRecord",
+    "grant",
+    "revoke",
+    "show_matrix",
+    "suggest_graduations",
+    "track_records",
     "JsonPendingApprovals",
     "PendingApproval",
     "PendingApprovals",

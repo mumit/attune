@@ -71,6 +71,13 @@ class PermissionMatrix:
         new[(action, domain)] = rung
         return PermissionMatrix(new)
 
+    def revoke(self, action: Action, domain: Domain) -> "PermissionMatrix":
+        """Return a new matrix without this grant — the (action, domain)
+        falls back to the READ_ONLY floor (immutable update, like grant)."""
+        new = dict(self.grants)
+        new.pop((action, domain), None)
+        return PermissionMatrix(new)
+
 
 def default_matrix() -> PermissionMatrix:
     """The starting posture: everything read-only, drafting allowed everywhere,

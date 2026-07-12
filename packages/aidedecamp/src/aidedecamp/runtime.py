@@ -353,6 +353,25 @@ class Runtime:
         )
         return report
 
+    def post_autonomy_digest(self) -> list:
+        """Weekly: post track-record graduation suggestions to the default
+        channels (information only — a human makes any grant via the CLI,
+        rule 3). Returns the suggestions for tests/logging."""
+        from .orchestrator import default_matrix, suggest_graduations
+
+        matrix = self.app.matrix or default_matrix()
+        suggestions = suggest_graduations(self.app.audit_log, matrix)
+        if not suggestions:
+            return []
+        text = "Autonomy digest — earned-graduation suggestions:\n" + "\n".join(
+            f"- {s.render()}" for s in suggestions
+        )
+        if self.slack_say is not None:
+            self.slack_say(text=text)
+        if self.gchat is not None and self.settings.chat_default_space:
+            self.gchat.post_text(self.settings.chat_default_space, text)
+        return suggestions
+
     def build_scheduler(self) -> Any:
         """Assemble the standard job set from settings (roadmap prompt 05):
         daily brief at ``brief_time``, daily watch renewals, 6-hourly pending
@@ -383,6 +402,12 @@ class Runtime:
                 self.run_consolidation,
             )
         )
+        if (self.slack_say is not None) or (
+            self.gchat is not None and self.settings.chat_default_space
+        ):
+            scheduler.add(
+                Job("autonomy_digest", every(hours=24 * 7), self.post_autonomy_digest)
+            )
         return scheduler
 
     def sweep_pending_ignored(self, *, now: Any = None) -> int:

@@ -74,8 +74,28 @@ def build_parser() -> argparse.ArgumentParser:
     m_remember.set_defaults(func=_cmd_memory_remember)
     p_memory.set_defaults(func=_cmd_memory_help, parser=p_memory)
 
-    p_autonomy = sub.add_parser("autonomy", help="autonomy management (coming in M4)")
-    p_autonomy.set_defaults(func=_cmd_coming_soon, group="autonomy")
+    p_autonomy = sub.add_parser(
+        "autonomy", help="see and change the autonomy posture (grants are CLI-only)"
+    )
+    autonomy_sub = p_autonomy.add_subparsers(dest="autonomy_command")
+    a_show = autonomy_sub.add_parser("show", help="current grants + suggestions")
+    a_show.set_defaults(func=_cmd_autonomy_show)
+    a_grant = autonomy_sub.add_parser("grant", help="grant (action, domain) a rung")
+    a_grant.add_argument("action")
+    a_grant.add_argument("domain")
+    a_grant.add_argument("rung", help="e.g. propose, act_notify, or 3")
+    a_grant.set_defaults(func=_cmd_autonomy_grant)
+    a_revoke = autonomy_sub.add_parser("revoke", help="claw a grant back")
+    a_revoke.add_argument("action")
+    a_revoke.add_argument("domain")
+    a_revoke.set_defaults(func=_cmd_autonomy_revoke)
+    a_record = autonomy_sub.add_parser(
+        "record", help="track record of human decisions per (action, domain)"
+    )
+    a_record.add_argument("action", nargs="?", default=None)
+    a_record.add_argument("domain", nargs="?", default=None)
+    a_record.set_defaults(func=_cmd_autonomy_record)
+    p_autonomy.set_defaults(func=_cmd_autonomy_help, parser=p_autonomy)
 
     return parser
 
@@ -139,9 +159,30 @@ def _cmd_memory_help(args: Any) -> int:
     return 1
 
 
-def _cmd_coming_soon(args: Any) -> int:
-    print(
-        f"aidedecamp {args.group}: coming with roadmap milestone M4 "
-        f"(docs/roadmap.md — prompt 12)."
-    )
-    return 0
+def _cmd_autonomy_show(args: Any) -> int:
+    from .autonomy_cmd import run_autonomy_show
+
+    return run_autonomy_show()
+
+
+def _cmd_autonomy_grant(args: Any) -> int:
+    from .autonomy_cmd import run_autonomy_grant
+
+    return run_autonomy_grant(args.action, args.domain, args.rung)
+
+
+def _cmd_autonomy_revoke(args: Any) -> int:
+    from .autonomy_cmd import run_autonomy_revoke
+
+    return run_autonomy_revoke(args.action, args.domain)
+
+
+def _cmd_autonomy_record(args: Any) -> int:
+    from .autonomy_cmd import run_autonomy_record
+
+    return run_autonomy_record(args.action, args.domain)
+
+
+def _cmd_autonomy_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1

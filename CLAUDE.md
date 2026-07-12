@@ -51,7 +51,12 @@ and `credentials.py`).
   deployments, not in-code branches).
 - `credentials.py` — Google credential loading (service account / OAuth user /
   ADC), scoped for Gmail/Calendar/Chat.
-- `orchestrator/` — LangGraph. `autonomy.py` (permission matrix), `state.py`,
+- `orchestrator/` — LangGraph. `autonomy.py` (permission matrix; persisted
+  grants live in `grants.py`'s `JsonPermissionMatrixStore` — loaded by
+  `build_app`, written ONLY by explicit grant/revoke ops; `track_records`/
+  `suggest_graduations` compute the earned-graduation record from the audit
+  log — suggestions are information only, never auto-applied, and
+  grant/revoke is CLI-only, never chat), `state.py`,
   `draft_approve.py` (the canonical retrieve→draft→gate→approve→apply→capture
   loop; the apply node materializes approved/edited decisions through an
   injected `apply_fn` — `make_connector_apply_fn(connector)` is the production
@@ -136,7 +141,8 @@ and `credentials.py`).
   localhost listener during interactive setup, never `gmail.send` scope),
   `doctor` (injected PASS/FAIL/SKIP checks with fix hints; `FATAL_CHECKS`
   gate `run`), `brief` (connector+client only — works without Mem0), `run`,
-  and `memory`/`autonomy` placeholders for M4. `Settings.data_dir`
+  `memory` (list/forget/remember), and `autonomy` (show/grant/revoke/
+  record — the ONLY grant surface). `Settings.data_dir`
   (`ADC_DATA_DIR`) derives all state-file paths; explicit path vars win.
 - `scheduler.py` — hand-rolled in-process scheduler (injected clock,
   deterministic tests; deliberately not APScheduler). `Runtime.build_scheduler()`

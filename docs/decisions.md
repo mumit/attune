@@ -3,6 +3,41 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Autonomy: persistence, grant/revoke, earned graduation (roadmap prompt 12)
+
+- **The earning mechanism finally exists.** "Autonomy is earned, not
+  granted" (design pillar 2) had no persistence, no way to grant/revoke
+  without editing source, and nothing computing a track record.
+  `orchestrator/grants.py` adds all three over the raw material the audit
+  log already records (`autonomy_gate` + `human_decision` +
+  `approval_ignored` events, joined by workflow thread_id).
+- **Persistence**: `JsonPermissionMatrixStore` (`ADC_AUTONOMY_STATE_PATH`,
+  data-dir derived) stores `{"action|domain": rung}`. `build_app` loads it
+  (else `default_matrix()`); the file is written **only** by explicit
+  `grant`/`revoke` operations — the matrix object stays frozen. Loading is
+  strict: an unknown action/domain/rung in the file is a hard error, never
+  a silent skip — a corrupted autonomy file must not quietly change the
+  safety posture. `PermissionMatrix.revoke` added (immutable, like grant).
+  `AppContext` now carries the resolved matrix so surfaces can render it.
+- **Track record + suggestions**: `track_records` folds the audit log into
+  per-(action,domain) approved-unedited/edited/rejected/ignored counts
+  (auto-applied runs excluded — a track record measures human judgment on
+  proposals). `suggest_graduations` bar: ≥10 decisions, ≥95%
+  approved-unedited, zero rejections, currently below ACT_NOTIFY.
+  **Suggestions are information only — no code path may auto-apply one.**
+- **Surfaces**: CLI `aidedecamp autonomy show/grant/revoke/record` (strict
+  enum parsing — a typo exits 2 with the vocabulary, never defaults);
+  chat `autonomy` is **show-and-suggest only** — a channel that relays
+  untrusted content must not be able to escalate autonomy; a weekly
+  `autonomy_digest` scheduler job posts suggestions phrased as the CLI
+  command to run. Grants/revokes are audited under an `"autonomy"`
+  workflow — the most audit-worthy events in the system.
+- **Rule 4 pinned by test**: granting `SEND_REPLY` at any rung (even
+  AUTONOMOUS) leaves `DirectOAuthConnector.send_reply` raising
+  `SendNotPermitted` — the structural send gate is independent of the
+  matrix, the CLI warns so on any send_reply grant, and
+  `test_send_gate_survives_send_reply_grant` must never be deleted.
+
 ## 2026-07 — Memory transparency: see, correct, teach (roadmap prompt 11)
 
 - **Memory stops being write-only from the user's view.** `get_all`/`delete`
