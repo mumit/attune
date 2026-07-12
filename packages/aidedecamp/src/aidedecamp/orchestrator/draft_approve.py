@@ -317,12 +317,21 @@ def resume_workflow(
     """
     from langgraph.types import Command
 
+    if pending is not None and hasattr(pending, "claim"):
+        claimed = pending.claim(thread_id, actor=actor)
+        if claimed is False:
+            return {
+                "decision": decision,
+                "apply_error": "already_handled",
+                "approval_already_handled": True,
+            }
+
     cfg = {"configurable": {"thread_id": thread_id}}
     payload: dict[str, Any] = {"decision": decision}
     if text is not None:
         payload["text"] = text
     result = graph.invoke(Command(resume=payload), cfg)
-    if pending is not None:
+    if pending is not None and not hasattr(pending, "claim"):
         pending.resolve(thread_id)
 
     if audit_log is not None and isinstance(result, dict):
@@ -466,6 +475,8 @@ def apply_confirmation(decision: str, result: Any = None) -> str:
 
     prefix = "✏️ Edited" if decision == "edited" else "✅ Approved"
     state = result if isinstance(result, dict) else {}
+    if state.get("approval_already_handled"):
+        return "This approval was already handled; no second action was taken."
     is_calendar = state.get("domain") == "calendar"
     thing = "tentative calendar hold" if is_calendar else "Gmail draft"
     if state.get("apply_error") == "source_changed":

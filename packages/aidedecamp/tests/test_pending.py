@@ -77,6 +77,25 @@ def test_resolve_unknown_id_is_noop(tmp_path):
     _registry(tmp_path).resolve("never-registered")
 
 
+def test_claim_is_single_use_and_records_actor(tmp_path):
+    import json
+
+    path = tmp_path / "pending.json"
+    reg = JsonPendingApprovals(str(path))
+    reg.register(
+        lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0
+    )
+
+    assert reg.claim("gmail:t1:100", actor="U-OWNER") is True
+    assert reg.claim("gmail:t1:100", actor="U-OWNER") is False
+    raw = json.loads(path.read_text())["gmail:t1:100"]
+    assert raw["resolved_by"] == "U-OWNER"
+
+
+def test_claim_unknown_workflow_is_unmanaged(tmp_path):
+    assert _registry(tmp_path).claim("not-registered", actor="U1") is None
+
+
 def test_round_trips_through_file(tmp_path):
     path = str(tmp_path / "pending.json")
     JsonPendingApprovals(path).register(

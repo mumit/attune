@@ -8,6 +8,8 @@ capture.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from aidedecamp.memory.base import MemoryRecord, MemoryStore
@@ -695,3 +697,27 @@ def test_resume_workflow_omits_text_key_when_none():
     out = resume_workflow(graph, "t-resume-notext", "approved", None)
 
     assert out["final_text"] == proposed
+
+
+def test_resume_workflow_does_not_invoke_twice_after_claim(tmp_path):
+    from aidedecamp.orchestrator import JsonPendingApprovals
+
+    store = FakeStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store)
+    cfg = {"configurable": {"thread_id": "t-single-use"}}
+    graph.invoke(_base_state(), cfg)
+    pending = JsonPendingApprovals(str(tmp_path / "pending.json"))
+    pending.register(
+        lg_tid="t-single-use", source_ref="src", domain="mail",
+        posted_at=datetime.now(timezone.utc),
+    )
+
+    first = resume_workflow(
+        graph, "t-single-use", "approved", pending=pending, actor="U1"
+    )
+    second = resume_workflow(
+        graph, "t-single-use", "approved", pending=pending, actor="U1"
+    )
+
+    assert first["decision"] == "approved"
+    assert second["approval_already_handled"] is True

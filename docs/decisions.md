@@ -3,6 +3,20 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Single-use, actor-attributed approval claims
+
+- `resume_workflow` claims a managed pending approval before invoking the graph.
+  The JSON registry serializes claims under one process lock and persists
+  `resolved_by`/`resolved_at`; pending and ignored cards may be claimed once,
+  while later Slack/Chat clicks return an honest already-handled result without
+  reaching apply.
+- Unknown workflow ids remain unmanaged for direct/test graph use. Legacy fake
+  registries without `claim` retain the old resolve-after-resume contract.
+- Registry writes use replace-on-complete so readers never observe a partially
+  written JSON document. The claim is deliberately not released after an
+  execution exception: preventing a duplicate real-world action is safer than
+  automatic replay after an ambiguous outcome.
+
 ## 2026-07 — Durable source-work retry ledger
 
 - Cursor advancement and source processing remain separate, but a failed Gmail

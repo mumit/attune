@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -66,6 +67,10 @@ class PendingApprovals(Protocol):
         this unconditionally, including for workflows never registered)."""
         ...
 
+    def claim(self, lg_tid: str, *, actor: str | None = None) -> bool | None:
+        """Atomically claim a pending/ignored card. None means unmanaged."""
+        ...
+
     def pending(self) -> list[PendingApproval]:
         """All entries still pending."""
         ...
@@ -82,6 +87,7 @@ class JsonPendingApprovals:
 
     def __init__(self, path: str):
         self._path = path
+        self._lock = threading.RLock()
 
     def get_pending_for_source(self, source_ref: str) -> PendingApproval | None:
         for entry in self.pending():
@@ -92,29 +98,47 @@ class JsonPendingApprovals:
     def register(
         self, *, lg_tid: str, source_ref: str, domain: str, posted_at: datetime
     ) -> None:
-        data = self._load()
-        data[lg_tid] = {
-            "source_ref": source_ref,
-            "domain": domain,
-            "posted_at": posted_at.astimezone(timezone.utc).isoformat(),
-            "status": STATUS_PENDING,
-        }
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            data[lg_tid] = {
+                "source_ref": source_ref,
+                "domain": domain,
+                "posted_at": posted_at.astimezone(timezone.utc).isoformat(),
+                "status": STATUS_PENDING,
+            }
+            self._save(data)
 
     def resolve(self, lg_tid: str) -> None:
-        data = self._load()
-        if lg_tid in data:
-            data[lg_tid]["status"] = STATUS_RESOLVED
+        with self._lock:
+            data = self._load()
+            if lg_tid in data:
+                data[lg_tid]["status"] = STATUS_RESOLVED
+                self._save(data)
+
+    def claim(self, lg_tid: str, *, actor: str | None = None) -> bool | None:
+        """Single-process atomic claim shared by Slack and Chat callbacks."""
+        with self._lock:
+            data = self._load()
+            entry = data.get(lg_tid)
+            if entry is None:
+                return None
+            if entry.get("status") not in (STATUS_PENDING, STATUS_IGNORED):
+                return False
+            entry["status"] = STATUS_RESOLVED
+            entry["resolved_by"] = actor
+            entry["resolved_at"] = datetime.now(timezone.utc).isoformat()
             self._save(data)
+            return True
 
     def mark_ignored(self, lg_tid: str) -> None:
         """The sweep's honest label: expired unanswered, not human-resolved
         (prompt 21) — the workflow itself stays resumable, and a late click
         is protected by the apply-time freshness check, not by this flag."""
-        data = self._load()
-        if lg_tid in data:
-            data[lg_tid]["status"] = STATUS_IGNORED
-            self._save(data)
+        with self._lock:
+            data = self._load()
+            if lg_tid in data:
+                data[lg_tid]["status"] = STATUS_IGNORED
+                self._save(data)
 
     def pending(self) -> list[PendingApproval]:
         return [
@@ -139,8 +163,10 @@ class JsonPendingApprovals:
         parent = os.path.dirname(self._path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(self._path, "w") as fh:
+        temp = f"{self._path}.tmp"
+        with open(temp, "w") as fh:
             json.dump(data, fh)
+        os.replace(temp, self._path)
 
 
 def sweep_ignored(

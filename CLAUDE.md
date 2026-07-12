@@ -66,6 +66,8 @@ and `credentials.py`).
   `resume_workflow(graph, thread_id, decision, text)`, the one shared
   `Command(resume=...)` invoke used by Slack, Chat, and the async Chat-
   interaction path — don't reintroduce a fourth copy of this — and
+  atomically claims registered approvals before graph invocation, making cards
+  single-use across both channels while persisting the deciding actor; and
   `apply_confirmation(decision, result)`, the one honest post-decision
   confirmation text shared by every channel: it must never claim a send or a
   materialization that didn't happen), `pending.py` (pending-approvals
