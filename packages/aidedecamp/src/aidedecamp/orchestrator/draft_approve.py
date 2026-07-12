@@ -286,7 +286,9 @@ def resume_workflow(
     return result
 
 
-def make_connector_apply_fn(connector: Any) -> Callable[[dict[str, Any]], str | None]:
+def make_connector_apply_fn(
+    connector: Any, *, owner_email: str | None = None
+) -> Callable[[dict[str, Any]], str | None]:
     """Build the production ``apply_fn``: materialize a mail decision as a
     Gmail draft via ``connector.create_draft`` (the safe write path — never
     send, rule 4; the human sends from Gmail).
@@ -297,6 +299,12 @@ def make_connector_apply_fn(connector: Any) -> Callable[[dict[str, Any]], str | 
     ``dispatcher.handle_gmail_notification``); the recipient and subject are
     re-fetched from the thread rather than carried in checkpoint state, per
     the state discipline (pointers, not payloads).
+
+    Recipient resolution (review finding #3): the thread's ``reply_to`` —
+    the newest counterparty message's Reply-To/From — then
+    ``last_from_addr``, then ``from_addr``. A recipient that is empty or is
+    the owner refuses to materialize: the assistant never drafts to its own
+    principal.
     """
 
     def apply(state: dict[str, Any]) -> str | None:
@@ -309,11 +317,18 @@ def make_connector_apply_fn(connector: Any) -> Callable[[dict[str, Any]], str | 
         if not thread_ref or not final_text:
             return None
         thread = connector.get_thread(thread_ref)
+        to = (
+            getattr(thread, "reply_to", "")
+            or getattr(thread, "last_from_addr", "")
+            or thread.from_addr
+        )
+        if not to or (owner_email and owner_email.lower() in to.lower()):
+            return None  # nobody to draft to, or it would be the owner
         subject = thread.subject or ""
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}" if subject else "Re:"
         ref = connector.create_draft(
-            to=thread.from_addr,
+            to=to,
             subject=subject,
             body=final_text,
             thread_id=thread_ref,

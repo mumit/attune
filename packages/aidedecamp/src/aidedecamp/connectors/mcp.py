@@ -124,6 +124,7 @@ class McpWorkspaceConnector(WorkspaceConnector):
             labels=d.get("labels", []),
             last_from_addr=d.get("last_from", d.get("from", "")),
             last_message_at=last_at,
+            reply_to=d.get("reply_to", ""),
         )
 
     @staticmethod

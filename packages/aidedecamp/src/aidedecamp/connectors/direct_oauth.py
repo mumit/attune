@@ -56,11 +56,15 @@ class DirectOAuthConnector(WorkspaceConnector):
         gmail_service: Any = None,
         calendar_service: Any = None,
         send_enabled: bool = False,
+        owner_email: str | None = None,
     ):
         self._creds = credentials
         self._send_enabled = send_enabled
         self._gmail_svc = gmail_service
         self._cal_svc = calendar_service
+        # Lets the thread builders tell counterparty messages from the
+        # owner's own, so reply_to targets the right person (finding #3).
+        self._owner_email = owner_email
 
     # --- service accessors -------------------------------------------------
 
@@ -109,7 +113,7 @@ class DirectOAuthConnector(WorkspaceConnector):
                 .get(userId=_USER, id=item["id"], format="metadata")
                 .execute()
             )
-            threads.append(_thread_from_metadata(detail))
+            threads.append(_thread_from_metadata(detail, owner_email=self._owner_email))
         return threads
 
     def get_thread(self, thread_id: str) -> EmailThread:
@@ -120,7 +124,7 @@ class DirectOAuthConnector(WorkspaceConnector):
             .get(userId=_USER, id=thread_id, format="full")
             .execute()
         )
-        return _thread_from_full(detail)
+        return _thread_from_full(detail, owner_email=self._owner_email)
 
     # --- write: mail -------------------------------------------------------
 
@@ -262,7 +266,25 @@ def _received_at(message: dict[str, Any]) -> datetime | None:
     return None
 
 
-def _thread_from_metadata(data: dict[str, Any]) -> EmailThread:
+def _reply_target(messages: list[dict[str, Any]], owner_email: str | None) -> str:
+    """The newest message NOT authored by the owner, preferring Reply-To over
+    From. Empty when every message is the owner's (nobody to reply to). With
+    no owner known, fall back to the newest message's envelope."""
+    candidates = list(reversed(messages))
+    if owner_email:
+        candidates = [
+            m for m in candidates
+            if owner_email.lower() not in _header(m, "from").lower()
+        ]
+    if not candidates:
+        return ""
+    newest = candidates[0]
+    return _header(newest, "reply-to") or _header(newest, "from")
+
+
+def _thread_from_metadata(
+    data: dict[str, Any], *, owner_email: str | None = None
+) -> EmailThread:
     """Build an EmailThread from a threads.get(format='metadata') response.
 
     Uses the thread snippet from the first message; body is not fetched in
@@ -282,10 +304,13 @@ def _thread_from_metadata(data: dict[str, Any]) -> EmailThread:
         labels=first.get("labelIds", []),
         last_from_addr=_header(last, "from"),
         last_message_at=_received_at(last),
+        reply_to=_reply_target(messages, owner_email),
     )
 
 
-def _thread_from_full(data: dict[str, Any]) -> EmailThread:
+def _thread_from_full(
+    data: dict[str, Any], *, owner_email: str | None = None
+) -> EmailThread:
     """Build an EmailThread from a threads.get(format='full') response."""
     messages = data.get("messages") or []
     first = messages[0] if messages else {}
@@ -302,6 +327,7 @@ def _thread_from_full(data: dict[str, Any]) -> EmailThread:
         labels=first.get("labelIds", []),
         last_from_addr=_header(last, "from"),
         last_message_at=_received_at(last),
+        reply_to=_reply_target(messages, owner_email),
     )
 
 

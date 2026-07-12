@@ -3,6 +3,32 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Email-safe ingestion + correct reply envelope (roadmap prompt 18, review finding #3)
+
+- **The owner's own activity is no longer signal.** `gmail_history` skips
+  `messagesAdded` records labeled `SENT` or `DRAFT` — sending a mail or
+  saving a draft used to trigger triage and could produce a "reply" to
+  yourself. A thread now counts as changed only when at least one inbound
+  message arrived (a record with no `labelIds` is treated as inbound —
+  never silently dropped).
+- **`EmailThread.reply_to` is the correct reply target**: the newest message
+  NOT authored by the owner, preferring its `Reply-To` header over `From`;
+  empty when the thread has no counterparty. `DirectOAuthConnector` gains
+  `owner_email` (bound from `settings.user_id` by `make_connector` when
+  it's a real address) so the thread builders can tell counterparty
+  messages from the owner's own; MCP maps a loose `reply_to` key. Without a
+  known owner, the fallback is the newest message's envelope.
+- **Apply targeting fixed**: recipient = `reply_to` → `last_from_addr` →
+  `from_addr` (it was the FIRST message's sender — which, for M5 follow-ups
+  on threads the owner started, meant follow-up drafts addressed back to
+  the owner). **An empty or owner recipient refuses to materialize** — the
+  assistant never drafts to its own principal
+  (`make_connector_apply_fn(connector, owner_email=…)`, bound in
+  `build_runtime`).
+- **Follow-up candidates require a counterparty**: `find_nudge_candidates`
+  drops threads whose `reply_to` is empty or the owner — an owner-only sent
+  thread has nobody to nudge.
+
 ## 2026-07 — Principal allowlists: authenticate the human (roadmap prompt 17, review finding #1)
 
 - **New non-negotiable rule 7** (numbered after the existing six so no

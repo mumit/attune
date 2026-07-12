@@ -92,6 +92,11 @@ def find_nudge_candidates(
     for thread in find_quiet_threads(
         connector, user_email=user_email, now=now, min_age_days=min_age_days
     ):
+        # No counterparty (an owner-only sent thread) -> nobody to nudge; a
+        # follow-up draft would be addressed to the owner (finding #3).
+        reply_to = getattr(thread, "reply_to", "")
+        if not reply_to or user_email.lower() in reply_to.lower():
+            continue
         last = nudge_state.last_nudged(thread.thread_id)
         if last is not None and now - last < cooldown:
             continue

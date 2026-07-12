@@ -19,11 +19,13 @@ NOW = datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)
 ME = "me@example.com"
 
 
-def _quiet_thread(tid="t1", subject="Contract redline", days_quiet=5):
+def _quiet_thread(tid="t1", subject="Contract redline", days_quiet=5,
+                  reply_to="marcus@acme.com"):
     return EmailThread(
         thread_id=tid, subject=subject, snippet="any update on this?",
         from_addr=ME, body="...", provenance=Provenance.FETCHED,
         last_from_addr=ME, last_message_at=NOW - timedelta(days=days_quiet),
+        reply_to=reply_to,
     )
 
 
@@ -109,6 +111,19 @@ def test_daily_cap_is_hard(tmp_path):
     )
     candidates = find_nudge_candidates(conn, state, user_email=ME, now=NOW)
     assert len(candidates) == MAX_NUDGES_PER_RUN
+
+
+def test_owner_only_thread_never_nudged(tmp_path):
+    """Prompt 18: a sent thread with no counterparty has nobody to nudge —
+    a follow-up would be addressed back to the owner."""
+    state = JsonNudgeState(str(tmp_path / "nudges.json"))
+    conn = _FakeConnector(sent=[
+        _quiet_thread("t1", days_quiet=10, reply_to=""),        # no counterparty
+        _quiet_thread("t2", days_quiet=10, reply_to=ME),        # owner "counterparty"
+        _quiet_thread("t3", days_quiet=10),                     # real counterparty
+    ])
+    candidates = find_nudge_candidates(conn, state, user_email=ME, now=NOW)
+    assert [t.thread_id for t in candidates] == ["t3"]
 
 
 def test_cooldown_survives_restart(tmp_path):

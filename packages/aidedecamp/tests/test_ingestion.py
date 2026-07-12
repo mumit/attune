@@ -166,3 +166,66 @@ def test_no_baseline_requires_full_sync():
     state = MemState()
     with pytest.raises(HistoryExpired):
         process_notification(gmail, state, {"emailAddress": "new@x.com", "historyId": "9"})
+
+
+# --- email safety (prompt 18): the owner's own activity is not signal ------
+
+def test_sent_and_draft_messages_are_not_thread_changes():
+    """SENT/DRAFT-labeled additions are the owner acting (their reply, a
+    draft save) — reacting would mean triaging your own words."""
+    pages = [
+        {
+            "history": [
+                {"messagesAdded": [{"message": {
+                    "id": "m1", "threadId": "t1", "labelIds": ["SENT"]}}]},
+                {"messagesAdded": [{"message": {
+                    "id": "m2", "threadId": "t2", "labelIds": ["DRAFT"]}}]},
+                {"messagesAdded": [{"message": {
+                    "id": "m3", "threadId": "t3", "labelIds": ["INBOX", "UNREAD"]}}]},
+            ]
+        }
+    ]
+    gmail = FakeGmail(history=FakeHistory(pages))
+    state = MemState()
+    state.put("u@x.com", history_id="100", expiration=datetime.now(timezone.utc))
+    changes = process_notification(
+        gmail, state, {"emailAddress": "u@x.com", "historyId": "150"}
+    )
+    assert changes.thread_ids == ["t3"]
+
+
+def test_mixed_thread_counts_when_inbound_message_present():
+    """A thread with both a SENT add and an inbound add still counts —
+    something genuinely arrived."""
+    pages = [
+        {
+            "history": [
+                {"messagesAdded": [{"message": {
+                    "id": "m1", "threadId": "t1", "labelIds": ["SENT"]}}]},
+                {"messagesAdded": [{"message": {
+                    "id": "m2", "threadId": "t1", "labelIds": ["INBOX"]}}]},
+            ]
+        }
+    ]
+    gmail = FakeGmail(history=FakeHistory(pages))
+    state = MemState()
+    state.put("u@x.com", history_id="100", expiration=datetime.now(timezone.utc))
+    changes = process_notification(
+        gmail, state, {"emailAddress": "u@x.com", "historyId": "150"}
+    )
+    assert changes.thread_ids == ["t1"]
+
+
+def test_missing_label_ids_still_counts_as_inbound():
+    """No labelIds field (older API shapes) -> treated as inbound, never
+    silently dropped."""
+    pages = [
+        {"history": [{"messagesAdded": [{"message": {"id": "m1", "threadId": "t1"}}]}]}
+    ]
+    gmail = FakeGmail(history=FakeHistory(pages))
+    state = MemState()
+    state.put("u@x.com", history_id="100", expiration=datetime.now(timezone.utc))
+    changes = process_notification(
+        gmail, state, {"emailAddress": "u@x.com", "historyId": "150"}
+    )
+    assert changes.thread_ids == ["t1"]

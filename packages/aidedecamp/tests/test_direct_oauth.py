@@ -513,3 +513,54 @@ def test_event_from_google_all_day():
     ev = _event_from_google(data)
     assert ev.start.tzinfo is not None
     assert ev.summary == "Holiday"
+
+
+# --- reply envelope (prompt 18) --------------------------------------------
+
+def _msg(from_addr, *, reply_to=None, ts="1720000000000"):
+    headers = [{"name": "From", "value": from_addr}]
+    if reply_to:
+        headers.append({"name": "Reply-To", "value": reply_to})
+    headers.append({"name": "Subject", "value": "Thread subject"})
+    return {"snippet": "s", "internalDate": ts, "labelIds": [],
+            "payload": {"headers": headers}}
+
+
+def test_reply_to_targets_newest_counterparty():
+    """The owner started the thread, the counterparty replied twice: reply_to
+    is the NEWEST counterparty message's From — never the owner."""
+    data = {"id": "t1", "messages": [
+        _msg("Me <me@example.com>"),
+        _msg("Ann <ann@x.com>"),
+        _msg("Me <me@example.com>"),
+        _msg("Bob <bob@x.com>"),
+    ]}
+    thread = _thread_from_metadata(data, owner_email="me@example.com")
+    assert thread.reply_to == "Bob <bob@x.com>"
+
+
+def test_reply_to_prefers_reply_to_header():
+    data = {"id": "t1", "messages": [
+        _msg("Me <me@example.com>"),
+        _msg("noreply@corp.com", reply_to="support@corp.com"),
+    ]}
+    thread = _thread_from_metadata(data, owner_email="me@example.com")
+    assert thread.reply_to == "support@corp.com"
+
+
+def test_reply_to_empty_for_owner_only_thread():
+    data = {"id": "t1", "messages": [
+        _msg("Me <me@example.com>"),
+        _msg("me@example.com"),
+    ]}
+    thread = _thread_from_metadata(data, owner_email="me@example.com")
+    assert thread.reply_to == ""
+
+
+def test_reply_to_without_owner_falls_back_to_newest():
+    data = {"id": "t1", "messages": [
+        _msg("ann@x.com"),
+        _msg("bob@x.com"),
+    ]}
+    thread = _thread_from_metadata(data)  # no owner known
+    assert thread.reply_to == "bob@x.com"

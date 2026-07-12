@@ -64,6 +64,11 @@ class EmailThread:
     labels: list[str] = field(default_factory=list)
     last_from_addr: str = ""
     last_message_at: datetime | None = None
+    # The correct reply target (review finding #3): the newest message NOT
+    # authored by the owner, preferring its Reply-To header over From. Empty
+    # when the thread has no counterparty (owner-only sent thread) — in
+    # which case there is nobody to draft to.
+    reply_to: str = ""
 
 
 @dataclass

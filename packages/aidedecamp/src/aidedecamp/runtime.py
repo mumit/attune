@@ -880,8 +880,10 @@ def build_runtime(
         settings, credentials=resolved_credentials
     )
 
+    _owner = settings.user_id if "@" in settings.user_id else None
     resolved_app = app or build_app(
-        settings, apply_fn=make_connector_apply_fn(resolved_connector)
+        settings,
+        apply_fn=make_connector_apply_fn(resolved_connector, owner_email=_owner),
     )
 
     resolved_pending = pending or JsonPendingApprovals(settings.pending_state_path)

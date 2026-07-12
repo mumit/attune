@@ -38,11 +38,13 @@ def make_connector(settings, **kwargs) -> WorkspaceConnector:
         if mcp_call is None:
             raise ValueError("MCP connector requires an 'mcp_call' callable")
         return McpWorkspaceConnector(mcp_call)
+    user = getattr(settings, "user_id", "") or ""
     return DirectOAuthConnector(
         credentials=kwargs.get("credentials"),
         gmail_service=kwargs.get("gmail_service"),
         calendar_service=kwargs.get("calendar_service"),
         send_enabled=kwargs.get("send_enabled", False),
+        owner_email=user if "@" in user else None,
     )
 
 

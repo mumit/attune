@@ -331,6 +331,48 @@ def test_connector_apply_fn_preserves_existing_re_prefix():
     assert conn.drafts[0]["subject"] == "RE: Quarterly sync"
 
 
+def test_apply_targets_reply_to_over_first_sender():
+    """Prompt 18: the recipient is the newest counterparty (reply_to), not
+    the thread's first sender — the M5 follow-up case where they differ."""
+    conn = _FakeConnector()
+    conn.get_thread = lambda tid: type(
+        "T", (), {"subject": "Redline", "from_addr": "me@example.com",
+                  "last_from_addr": "me@example.com",
+                  "reply_to": "marcus@acme.com"}
+    )()
+    apply = make_connector_apply_fn(conn, owner_email="me@example.com")
+    ref = apply({"domain": "mail", "incoming_ref": "t1", "final_text": "ping"})
+
+    assert ref == "d-99"
+    assert conn.drafts[0]["to"] == "marcus@acme.com"
+
+
+def test_apply_refuses_to_draft_to_the_owner():
+    """An owner-only thread resolves the recipient to the owner: apply must
+    refuse — the assistant never drafts to its own principal."""
+    conn = _FakeConnector()
+    conn.get_thread = lambda tid: type(
+        "T", (), {"subject": "Note to self", "from_addr": "Me <me@example.com>",
+                  "last_from_addr": "Me <me@example.com>", "reply_to": ""}
+    )()
+    apply = make_connector_apply_fn(conn, owner_email="me@example.com")
+    ref = apply({"domain": "mail", "incoming_ref": "t1", "final_text": "hello me"})
+
+    assert ref is None
+    assert conn.drafts == []
+
+
+def test_apply_refuses_empty_recipient():
+    conn = _FakeConnector()
+    conn.get_thread = lambda tid: type(
+        "T", (), {"subject": "", "from_addr": "", "last_from_addr": "",
+                  "reply_to": ""}
+    )()
+    apply = make_connector_apply_fn(conn)
+    assert apply({"domain": "mail", "incoming_ref": "t1", "final_text": "x"}) is None
+    assert conn.drafts == []
+
+
 def test_connector_apply_fn_noop_outside_mail_or_without_ref():
     conn = _FakeConnector()
     apply = make_connector_apply_fn(conn)

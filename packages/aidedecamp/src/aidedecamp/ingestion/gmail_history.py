@@ -102,10 +102,18 @@ def process_notification(
     )
 
 
+# A messagesAdded record with any of these labels is the OWNER acting (their
+# own sent mail, or draft-save churn), not inbound signal (review finding #3):
+# reacting to it means triaging your own words and drafting replies to
+# yourself. Only genuinely inbound additions count as thread changes.
+_OWN_ACTIVITY_LABELS = frozenset({"SENT", "DRAFT"})
+
+
 def _collect_thread_ids(gmail: Any, email: str, start_history_id: str) -> list[str]:
     """Page through history.list, collecting changed threadIds, deduped, order-
-    preserving. Looks at messagesAdded (new mail); labelsAdded could be included
-    later for read/label-driven triggers."""
+    preserving. Looks at messagesAdded (new mail); SENT/DRAFT-labeled
+    additions — the owner's own activity — are excluded, so a thread counts
+    as changed only when at least one inbound message arrived."""
     seen: set[str] = set()
     ordered: list[str] = []
     page_token: str | None = None
@@ -121,6 +129,8 @@ def _collect_thread_ids(gmail: Any, email: str, start_history_id: str) -> list[s
         for record in resp.get("history", []):
             for added in record.get("messagesAdded", []):
                 msg = added.get("message", {})
+                if _OWN_ACTIVITY_LABELS & set(msg.get("labelIds") or ()):
+                    continue
                 tid = msg.get("threadId")
                 if tid and tid not in seen:
                     seen.add(tid)
