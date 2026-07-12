@@ -3,6 +3,15 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Autonomy persistence fails closed
+
+- Grant/revoke writes now flush and atomically replace the policy file. The
+  live provider treats deletion, unreadability, and parse failure as the
+  conservative default matrix, immediately removing every `ACT_NOTIFY` or
+  `AUTONOMOUS` grant instead of retaining cached authority.
+- A warning is emitted on parse/read failure and the provider retries on later
+  gates. Availability never outranks revocation safety at this boundary.
+
 ## 2026-07 — Compatibility is inspected, never inferred from execution errors
 
 - Actor-aware Chat resume and audit-aware consolidation support older injected

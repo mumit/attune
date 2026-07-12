@@ -53,8 +53,9 @@ and `credentials.py`).
   ADC), scoped for Gmail/Calendar/Chat.
 - `orchestrator/` — LangGraph. `autonomy.py` (permission matrix; persisted
   grants live in `grants.py`'s `JsonPermissionMatrixStore` — the gate reads
-  LIVE through `make_matrix_provider` (mtime-checked; corrupt file = last
-  good matrix), so grant/revoke bites without a restart; written ONLY by
+  LIVE through `make_matrix_provider` (mtime-checked; missing/corrupt file =
+  conservative default), so grant/revoke bites without a restart; atomically
+  written ONLY by
   explicit grant/revoke ops; `track_records`/
   `suggest_graduations` compute the earned-graduation record from the audit
   log — suggestions are information only, never auto-applied, and

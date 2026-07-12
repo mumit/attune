@@ -413,7 +413,7 @@ def test_provider_reloads_on_file_change(tmp_path):
     assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
 
 
-def test_provider_keeps_last_good_on_corrupt_file(tmp_path):
+def test_provider_fails_closed_on_corrupt_or_deleted_file(tmp_path):
     import os as _os
     import time as _time
 
@@ -425,9 +425,12 @@ def test_provider_keeps_last_good_on_corrupt_file(tmp_path):
 
     path.write_text('{"hack_the_planet|mail": 4}')
     _os.utime(str(path), (_time.time() + 2, _time.time() + 2))
-    # corrupt file -> last good matrix, never a different posture
-    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
+    # corrupt file -> conservative default, never cached autonomous authority
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
     assert provider().max_rung(Action.SEND_REPLY, Domain.MAIL) == Rung.READ_ONLY
+
+    path.unlink()
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
 
 
 def test_gate_honors_live_grant_and_revocation(tmp_path):

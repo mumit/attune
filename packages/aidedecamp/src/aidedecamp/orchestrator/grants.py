@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -75,8 +76,17 @@ class JsonPermissionMatrixStore:
             f"{action.value}|{domain.value}": int(rung)
             for (action, domain), rung in matrix.grants.items()
         }
-        with open(self._path, "w") as fh:
-            json.dump(data, fh, indent=2, sort_keys=True)
+        directory = parent or "."
+        fd, temp_path = tempfile.mkstemp(prefix=".autonomy-", dir=directory)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(data, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp_path, self._path)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
 
 
 def make_matrix_provider(
@@ -87,10 +97,9 @@ def make_matrix_provider(
     REVOCATIONS take effect on the next gate evaluation, not the next
     restart.
 
-    Failure posture: an unreadable/corrupt file falls back to the LAST GOOD
-    matrix (never to a more permissive default) and logs the failure; a file
-    that has never existed means "never saved" and yields the conservative
-    ``default_matrix()``.
+    Failure posture: an unreadable, corrupt, or deleted file fails closed to
+    ``default_matrix()`` and logs the failure. Atomic store writes make a
+    transient half-written file unnecessary for normal grant/revoke updates.
     """
     import logging
 
@@ -106,7 +115,9 @@ def make_matrix_provider(
             mtime = None  # never saved -> conservative default
 
         if mtime is None:
-            return cache["matrix"] if cache["matrix"] is not None else default_matrix()
+            cache["mtime"] = None
+            cache["matrix"] = default_matrix()
+            return cache["matrix"]
 
         if mtime != cache["mtime"]:
             try:
@@ -114,10 +125,11 @@ def make_matrix_provider(
             except (ValueError, KeyError, OSError) as exc:
                 logger.warning(
                     "autonomy grants file unreadable (%s: %s) — keeping the "
-                    "last good matrix", type(exc).__name__, exc,
+                    "conservative default matrix", type(exc).__name__, exc,
                 )
-                # poison the mtime so we retry next evaluation
-                return cache["matrix"] if cache["matrix"] is not None else default_matrix()
+                cache["mtime"] = None
+                cache["matrix"] = default_matrix()
+                return cache["matrix"]
             cache["mtime"] = mtime
             cache["matrix"] = loaded if loaded is not None else default_matrix()
         return cache["matrix"]
