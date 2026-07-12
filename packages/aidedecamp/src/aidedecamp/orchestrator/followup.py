@@ -125,6 +125,7 @@ def run_follow_up_nudges(
     now: datetime | None = None,
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
     cooldown_days: int = DEFAULT_COOLDOWN_DAYS,
+    notify: Callable[[str], None] | None = None,
 ) -> list[NudgeResult]:
     """One nudge run: start a FOLLOW_UP draft-approve workflow per candidate
     and post its card (titled as a nudge). The cooldown is recorded after a
@@ -180,17 +181,29 @@ def run_follow_up_nudges(
                 user_id=user_id,
             )
 
-        post_approval(
-            lg_tid,
-            result.get("proposed_draft") or "",
-            result.get("retrieved_memories") or None,
-            title=f"Follow-up nudge — no reply in {age_days}d: {thread.subject}",
-        )
-        if pending is not None:
-            pending.register(
-                lg_tid=lg_tid, source_ref=thread.thread_id,
-                domain="mail", posted_at=now,
+        from ..dispatcher import _auto_rung, _handle_auto_applied
+
+        rung = _auto_rung(result)
+        if rung is not None:
+            _handle_auto_applied(
+                result, rung,
+                action="follow_up", domain="mail",
+                describe=f'drafted a follow-up on "{thread.subject}"',
+                lg_tid=lg_tid, user_id=user_id,
+                notify=notify, audit_log=audit_log,
             )
+        else:
+            post_approval(
+                lg_tid,
+                result.get("proposed_draft") or "",
+                result.get("retrieved_memories") or None,
+                title=f"Follow-up nudge — no reply in {age_days}d: {thread.subject}",
+            )
+            if pending is not None:
+                pending.register(
+                    lg_tid=lg_tid, source_ref=thread.thread_id,
+                    domain="mail", posted_at=now,
+                )
         nudge_state.record_nudge(thread.thread_id, at=now)
         results.append(NudgeResult(thread=thread, lg_tid=lg_tid))
     return results

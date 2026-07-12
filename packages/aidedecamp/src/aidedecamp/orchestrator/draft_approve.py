@@ -59,6 +59,7 @@ def build_draft_approve_graph(
     checkpointer: Any = None,
     draft_fn: Callable[[Any, str, list[str], str], str] | None = None,
     apply_fn: Callable[[dict[str, Any]], str | None] | None = None,
+    matrix_provider: Callable[[], PermissionMatrix] | None = None,
 ):
     """Compile the draft-and-approve graph.
 
@@ -75,6 +76,10 @@ def build_draft_approve_graph(
             ref, e.g. a Gmail draft id, or None when there is nothing to
             materialize). Defaults to a no-op returning None; production binds
             ``make_connector_apply_fn(connector)`` at assembly time.
+        matrix_provider: a zero-arg callable the GATE consults per
+            evaluation (live policy — grants/revocations bite without a
+            restart; see grants.make_matrix_provider). Wins over ``matrix``;
+            absent, the static ``matrix`` is wrapped.
     """
     try:
         from langgraph.graph import END, START, StateGraph
@@ -86,7 +91,9 @@ def build_draft_approve_graph(
             "before building graphs."
         ) from exc
 
-    matrix = matrix or default_matrix()
+    if matrix_provider is None:
+        _static = matrix or default_matrix()
+        matrix_provider = lambda: _static  # noqa: E731
     checkpointer = checkpointer or InMemorySaver()
     draft_fn = draft_fn or _default_draft_fn
     apply_fn = apply_fn or _noop_apply_fn
@@ -126,7 +133,8 @@ def build_draft_approve_graph(
         human review, and it fails safe."""
         action = _as_action(state["action"])
         domain = _as_domain(state["domain"])
-        autonomous_ok = matrix.allows(action, domain, Rung.ACT_NOTIFY)
+        current = matrix_provider()  # live policy: re-evaluated per gate
+        autonomous_ok = current.allows(action, domain, Rung.ACT_NOTIFY)
         target = "auto_apply" if autonomous_ok else "approve"
         return Command(
             goto=target,
@@ -136,7 +144,7 @@ def build_draft_approve_graph(
                         "autonomy_gate",
                         action=action.value,
                         domain=domain.value,
-                        max_rung=int(matrix.max_rung(action, domain)),
+                        max_rung=int(current.max_rung(action, domain)),
                         routed_to=target,
                     )
                 ]

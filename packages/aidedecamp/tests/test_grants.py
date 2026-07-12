@@ -385,3 +385,103 @@ def test_send_gate_survives_send_reply_grant():
     connector = DirectOAuthConnector(gmail_service=object(), calendar_service=object())
     with pytest.raises(SendNotPermitted):
         connector.send_reply(draft_id="d-1")
+
+
+# ---------------------------------------------------------------------------
+# Live policy (prompt 19): the gate reads the CURRENT matrix, not a snapshot
+# ---------------------------------------------------------------------------
+
+from aidedecamp.orchestrator.grants import make_matrix_provider  # noqa: E402
+
+
+def test_provider_reloads_on_file_change(tmp_path):
+    import os as _os
+    import time as _time
+
+    store = JsonPermissionMatrixStore(str(tmp_path / "grants.json"))
+    provider = make_matrix_provider(store)
+
+    # never saved -> conservative default
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+
+    store.save(default_matrix().grant(Action.LABEL, Domain.MAIL, Rung.ACT_NOTIFY))
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
+
+    # revocation bites too (force a distinct mtime for coarse filesystems)
+    store.save(default_matrix())
+    _os.utime(store._path, (_time.time() + 2, _time.time() + 2))
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+
+
+def test_provider_keeps_last_good_on_corrupt_file(tmp_path):
+    import os as _os
+    import time as _time
+
+    path = tmp_path / "grants.json"
+    store = JsonPermissionMatrixStore(str(path))
+    store.save(default_matrix().grant(Action.LABEL, Domain.MAIL, Rung.ACT_NOTIFY))
+    provider = make_matrix_provider(store)
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
+
+    path.write_text('{"hack_the_planet|mail": 4}')
+    _os.utime(str(path), (_time.time() + 2, _time.time() + 2))
+    # corrupt file -> last good matrix, never a different posture
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
+    assert provider().max_rung(Action.SEND_REPLY, Domain.MAIL) == Rung.READ_ONLY
+
+
+def test_gate_honors_live_grant_and_revocation(tmp_path):
+    """End to end: the SAME compiled graph obeys a grant file edited on disk
+    — a revocation stops autonomous runs without a restart."""
+    import os as _os
+    import time as _time
+
+    langgraph = pytest.importorskip("langgraph")
+
+    class _Store:
+        def add(self, *a, **kw): return []
+        def search(self, *a, **kw): return []
+        def get_all(self, *a, **kw): return []
+        def delete(self, *a): pass
+
+    class _Client:
+        def chat_completions_create(self, **kw):
+            class _C:
+                class message:
+                    content = "draft"
+            class _R:
+                choices = [_C]
+            return _R()
+
+    from aidedecamp.orchestrator import build_draft_approve_graph
+
+    matrix_store = JsonPermissionMatrixStore(str(tmp_path / "grants.json"))
+    graph = build_draft_approve_graph(
+        client=_Client(), store=_Store(),
+        matrix_provider=make_matrix_provider(matrix_store),
+    )
+
+    def _run(tid):
+        return graph.invoke(
+            {"user_id": "u1", "domain": "mail", "action": "draft_reply",
+             "incoming_ref": "r1", "incoming_summary": "hello",
+             "audit_events": [], "iteration_count": 0},
+            {"configurable": {"thread_id": tid}},
+        )
+
+    # 1. default posture -> interrupt
+    assert "__interrupt__" in _run("t-live-1")
+
+    # 2. grant lands on disk -> the same graph auto-applies
+    matrix_store.save(
+        default_matrix().grant(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    )
+    out = _run("t-live-2")
+    assert "__interrupt__" not in out
+    assert out["decision"] == "approved"
+
+    # 3. REVOCATION lands on disk -> the same graph interrupts again,
+    #    with no rebuild and no restart
+    matrix_store.save(default_matrix())
+    _os.utime(matrix_store._path, (_time.time() + 2, _time.time() + 2))
+    assert "__interrupt__" in _run("t-live-3")

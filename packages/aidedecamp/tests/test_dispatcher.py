@@ -469,6 +469,90 @@ def test_gmail_notification_audit_skipped_for_failed_thread_fetch():
 # ---------------------------------------------------------------------------
 
 
+def _auto_graph(rung=3):
+    """A fake graph whose gate auto-applied at the given rung."""
+    return _FakeGraph(audit_events=[
+        {"event": "retrieved", "ts": "2026-07-10T00:00:00+00:00"},
+        {"event": "autonomy_gate", "ts": "2026-07-10T00:00:01+00:00",
+         "action": "draft_reply", "domain": "mail",
+         "max_rung": rung, "routed_to": "auto_apply"},
+        {"event": "auto_applied", "ts": "2026-07-10T00:00:02+00:00"},
+    ])
+
+
+def test_auto_applied_run_posts_no_card_and_registers_nothing():
+    """Prompt 19: an ACT_NOTIFY auto-applied run must not ask a human to
+    approve something already done (review finding #2's phantom card)."""
+    approvals = []
+    notices = []
+    registered = []
+
+    class _Pending:
+        def get_pending_for_source(self, ref):
+            return None
+
+        def register(self, **kw):
+            registered.append(kw)
+
+    result = handle_gmail_notification(
+        _fake_app_ctx(graph=_auto_graph(rung=3)),
+        {"emailAddress": "me@example.com", "historyId": "200"},
+        gmail_service=_FakeGmail(["t1"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=_FakeConnector({"t1": _FakeThread("t1", subject="Q3 numbers")}),
+        post_approval=lambda *a, **kw: approvals.append(a),
+        user_id="me@example.com",
+        pending=_Pending(),
+        notify=notices.append,
+    )
+
+    assert len(result) == 1     # the workflow still ran and is reported
+    assert approvals == []      # but no phantom card
+    assert registered == []     # and nothing pending to sweep as IGNORED
+    assert len(notices) == 1    # ACT_NOTIFY = act, then tell
+    assert "Acted autonomously" in notices[0]
+    assert "Q3 numbers" in notices[0]
+    assert "autonomy revoke" in notices[0]
+
+
+def test_autonomous_rung_is_silent():
+    notices = []
+    audit = _FakeAuditLog()
+
+    handle_gmail_notification(
+        _fake_app_ctx(graph=_auto_graph(rung=4)),
+        {"emailAddress": "me@example.com", "historyId": "200"},
+        gmail_service=_FakeGmail(["t1"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=_FakeConnector({"t1": _FakeThread("t1")}),
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        audit_log=audit,
+        notify=notices.append,
+    )
+
+    assert notices == []  # AUTONOMOUS: no notification...
+    events = [e["events"][0]["event"] for e in audit.records]
+    assert "auto_silent" in [ev for rec in audit.records
+                             for ev in [e["event"] for e in rec["events"]]]
+
+
+def test_interrupted_run_still_posts_card():
+    """Back-compat pin: a gate that routed to approve (or a result with no
+    gate event at all — fakes) posts the card exactly as before."""
+    approvals = []
+    handle_gmail_notification(
+        _fake_app_ctx(graph=_FakeGraph()),
+        {"emailAddress": "me@example.com", "historyId": "200"},
+        gmail_service=_FakeGmail(["t1"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=_FakeConnector({"t1": _FakeThread("t1")}),
+        post_approval=lambda *a, **kw: approvals.append(a),
+        user_id="me@example.com",
+    )
+    assert len(approvals) == 1
+
+
 def test_default_triage_gets_store_and_sender():
     """The default triage path is memory-informed (prompt 14): the store is
     searched for reactions to this thread's sender, under the deployment's

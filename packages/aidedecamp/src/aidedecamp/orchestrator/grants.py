@@ -79,6 +79,52 @@ class JsonPermissionMatrixStore:
             json.dump(data, fh, indent=2, sort_keys=True)
 
 
+def make_matrix_provider(
+    store: JsonPermissionMatrixStore,
+) -> Any:
+    """A live matrix source for the gate (review finding #2): stat the file
+    per evaluation, reload only on mtime change. Grants and — critically —
+    REVOCATIONS take effect on the next gate evaluation, not the next
+    restart.
+
+    Failure posture: an unreadable/corrupt file falls back to the LAST GOOD
+    matrix (never to a more permissive default) and logs the failure; a file
+    that has never existed means "never saved" and yields the conservative
+    ``default_matrix()``.
+    """
+    import logging
+
+    from .autonomy import default_matrix
+
+    logger = logging.getLogger(__name__)
+    cache: dict[str, Any] = {"mtime": None, "matrix": None}
+
+    def provider() -> PermissionMatrix:
+        try:
+            mtime = os.path.getmtime(store._path)
+        except OSError:
+            mtime = None  # never saved -> conservative default
+
+        if mtime is None:
+            return cache["matrix"] if cache["matrix"] is not None else default_matrix()
+
+        if mtime != cache["mtime"]:
+            try:
+                loaded = store.load()
+            except (ValueError, KeyError, OSError) as exc:
+                logger.warning(
+                    "autonomy grants file unreadable (%s: %s) — keeping the "
+                    "last good matrix", type(exc).__name__, exc,
+                )
+                # poison the mtime so we retry next evaluation
+                return cache["matrix"] if cache["matrix"] is not None else default_matrix()
+            cache["mtime"] = mtime
+            cache["matrix"] = loaded if loaded is not None else default_matrix()
+        return cache["matrix"]
+
+    return provider
+
+
 def grant(
     store: JsonPermissionMatrixStore,
     matrix: PermissionMatrix,

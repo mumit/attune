@@ -3,6 +3,33 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Live policy + real rung semantics (roadmap prompt 19, review finding #2)
+
+- **Revocations bite without a restart.** The gate no longer captures a
+  matrix at graph-compile time: it consults a `matrix_provider` per
+  evaluation. `grants.make_matrix_provider` stats the grants file on each
+  call and reloads only on mtime change — no polling thread, no staleness
+  window. Failure posture: an unreadable/corrupt file keeps the **last
+  good** matrix (never a different posture) and logs; a never-saved file
+  yields the conservative default. `AppContext.current_matrix()` gives
+  every posture surface (chat `autonomy`, the weekly digest) the live view;
+  an injected `matrix` (tests) stays static.
+- **Auto-applied runs no longer post phantom cards.** The dispatcher (and
+  the follow-up + hold-offer flows) now branch on the gate's own
+  `autonomy_gate` audit event (`routed_to == "auto_apply"` + `max_rung`) —
+  chosen over checking `__interrupt__` because it's the authoritative
+  record of which path ran and keeps every existing fake-graph test valid
+  (no gate event = treated as interrupted, the conservative reading).
+  Interrupted runs behave exactly as before.
+- **The rungs mean what the design says**: ACT_NOTIFY acts, then tells —
+  one honest after-the-fact notification ("Acted autonomously (…, act-notify
+  grant): drafted a reply to X — done. Revoke with `aidedecamp autonomy
+  revoke …`") via the runtime's shared `_notify_all`; AUTONOMOUS acts
+  silently. Both audit (`auto_notified`/`auto_silent`, with the rung and
+  the applied ref) — silence is a grant level, never an evidence gap.
+- No pending-registry entry for auto-applied runs — nothing for the
+  ignore-sweep to mislabel as IGNORED.
+
 ## 2026-07 — Email-safe ingestion + correct reply envelope (roadmap prompt 18, review finding #3)
 
 - **The owner's own activity is no longer signal.** `gmail_history` skips

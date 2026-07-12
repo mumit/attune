@@ -43,7 +43,18 @@ class AppContext:
     settings: Settings
     audit_log: AuditLog
     matrix: PermissionMatrix | None = None
+    # Live policy source (prompt 19): the gate and every posture surface
+    # read through this so grants/revocations bite without a restart.
+    matrix_provider: Any = None
     _db_conn: Any = field(default=None, repr=False)
+
+    def current_matrix(self) -> PermissionMatrix:
+        """The live autonomy posture (falls back to the boot snapshot)."""
+        if self.matrix_provider is not None:
+            return self.matrix_provider()
+        from .orchestrator import default_matrix
+
+        return self.matrix or default_matrix()
 
     def close(self) -> None:
         """Close the SQLite connection if one was opened by build_app."""
@@ -95,16 +106,21 @@ def build_app(
 
     resolved_client = client or make_client()
 
-    # Load the persisted autonomy posture unless a matrix is injected. The
-    # file is only ever written by explicit grant/revoke operations
-    # (orchestrator/grants.py); absent, the conservative default applies.
+    # Autonomy posture: an injected matrix (tests) is static; otherwise the
+    # gate reads LIVE through an mtime-checked provider over the persisted
+    # store, so grant/revoke operations bite without a restart (prompt 19).
     resolved_matrix = matrix
+    resolved_provider = None
     if resolved_matrix is None:
-        from .orchestrator.grants import JsonPermissionMatrixStore
+        from .orchestrator.grants import (
+            JsonPermissionMatrixStore,
+            make_matrix_provider,
+        )
 
-        resolved_matrix = JsonPermissionMatrixStore(
-            settings.autonomy_state_path
-        ).load()
+        resolved_provider = make_matrix_provider(
+            JsonPermissionMatrixStore(settings.autonomy_state_path)
+        )
+        resolved_matrix = resolved_provider()
 
     db_conn: Any = None
     if checkpointer is None:
@@ -135,6 +151,7 @@ def build_app(
         matrix=resolved_matrix,
         checkpointer=resolved_checkpointer,
         apply_fn=apply_fn,
+        matrix_provider=resolved_provider,
     )
 
     from .orchestrator import default_matrix as _default_matrix
@@ -146,5 +163,6 @@ def build_app(
         settings=settings,
         audit_log=resolved_audit_log,
         matrix=resolved_matrix or _default_matrix(),
+        matrix_provider=resolved_provider,
         _db_conn=db_conn,
     )

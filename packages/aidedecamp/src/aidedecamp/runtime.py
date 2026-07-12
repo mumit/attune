@@ -200,6 +200,7 @@ class Runtime:
             user_id=self.settings.user_id,
             audit_log=self.app.audit_log,
             pending=self.pending,
+            notify=self._notify_all,
         )
 
     def process_chat_event(self, event: dict[str, Any]) -> None:
@@ -239,11 +240,7 @@ class Runtime:
         docstring for why those differ) happens inside the dispatcher call.
         """
 
-        def _notify(text: str) -> None:
-            if self.slack_say is not None:
-                self.slack_say(text=text)
-            if self.gchat is not None and self.settings.chat_default_space:
-                self.gchat.post_text(self.settings.chat_default_space, text)
+        _notify = self._notify_all
 
         def _post_approval(thread_id, draft, rationale, *, title=None):  # noqa: ANN001
             if self.slack is not None and self.slack_say is not None:
@@ -302,6 +299,14 @@ class Runtime:
             audit_log=self.app.audit_log,
             allowed_actors=self.settings.chat_allowed_users,
         )
+
+    def _notify_all(self, text: str) -> None:
+        """Plain-text heads-up to every configured channel (used for
+        conflict notices and ACT_NOTIFY after-the-fact notifications)."""
+        if self.slack_say is not None:
+            self.slack_say(text=text)
+        if self.gchat is not None and self.settings.chat_default_space:
+            self.gchat.post_text(self.settings.chat_default_space, text)
 
     def post_brief(self) -> Any:
         """Assemble one morning brief and post it to every configured channel
@@ -413,15 +418,16 @@ class Runtime:
             now=now,
             min_age_days=self.settings.nudge_min_age_days,
             cooldown_days=self.settings.nudge_cooldown_days,
+            notify=self._notify_all,
         )
 
     def post_autonomy_digest(self) -> list:
         """Weekly: post track-record graduation suggestions to the default
         channels (information only — a human makes any grant via the CLI,
         rule 3). Returns the suggestions for tests/logging."""
-        from .orchestrator import default_matrix, suggest_graduations
+        from .orchestrator import suggest_graduations
 
-        matrix = self.app.matrix or default_matrix()
+        matrix = self.app.current_matrix()
         suggestions = suggest_graduations(self.app.audit_log, matrix)
         if not suggestions:
             return []

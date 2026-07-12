@@ -71,6 +71,63 @@ from .orchestrator.triage import Priority, TriageResult, triage_thread
 _default_triage = triage_thread
 
 
+def _auto_rung(result: dict[str, Any]) -> int | None:
+    """The rung the gate auto-applied at, or None if the run interrupted
+    for a human (or the result carries no gate event — fakes/back-compat:
+    treated as interrupted, the conservative reading)."""
+    for event in result.get("audit_events", []):
+        if (
+            event.get("event") == "autonomy_gate"
+            and event.get("routed_to") == "auto_apply"
+        ):
+            return event.get("max_rung")
+    return None
+
+
+def _handle_auto_applied(
+    result: dict[str, Any],
+    rung: int,
+    *,
+    action: str,
+    domain: str,
+    describe: str,
+    lg_tid: str,
+    user_id: str,
+    notify: Callable[[str], None] | None,
+    audit_log: AuditLog | None,
+) -> None:
+    """Real rung semantics (prompt 19): an auto-applied run posts NO
+    approval card and registers NOTHING pending. ACT_NOTIFY notifies after
+    the fact; AUTONOMOUS is silent. Both are audited either way."""
+    from .orchestrator.autonomy import Rung
+
+    silent = rung >= int(Rung.AUTONOMOUS)
+    if not silent and notify is not None:
+        outcome = (
+            "done" if result.get("applied_ref")
+            else f"decision recorded ({result.get('apply_error') or 'nothing to materialize'})"
+        )
+        notify(
+            f"🤖 Acted autonomously ({action} on {domain}, act-notify "
+            f"grant): {describe} — {outcome}. Review grants with "
+            f"`aidedecamp autonomy show`; revoke with "
+            f"`aidedecamp autonomy revoke {action} {domain}`."
+        )
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=lg_tid,
+            workflow="draft_approve",
+            events=[{
+                "event": "auto_silent" if silent else "auto_notified",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "rung": rung,
+                "applied_ref": result.get("applied_ref"),
+            }],
+            domain=domain,
+            user_id=user_id,
+        )
+
+
 def handle_gmail_notification(
     app_ctx: AppContext,
     notification: dict[str, Any],
@@ -84,6 +141,7 @@ def handle_gmail_notification(
     audit_log: AuditLog | None = None,
     triage_fn: Callable[[Any, str], TriageResult] | None = None,
     pending: Any = None,
+    notify: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -203,6 +261,20 @@ def handle_gmail_notification(
         proposed = result.get("proposed_draft") or ""
         rationale: list[str] | None = result.get("retrieved_memories") or None
 
+        rung = _auto_rung(result)
+        if rung is not None:
+            # Auto-applied (ACT_NOTIFY+): no card, no pending entry — asking
+            # a human to approve something already done was finding #2.
+            _handle_auto_applied(
+                result, rung,
+                action="draft_reply", domain="mail",
+                describe=f'drafted a reply to "{thread.subject}"',
+                lg_tid=lg_tid, user_id=user_id,
+                notify=notify, audit_log=audit_log,
+            )
+            submitted.append(lg_tid)
+            continue
+
         logger.info(
             "gmail thread %s (%s) drafted — approval card posted as %s",
             gmail_tid, triage.priority.value, lg_tid,
@@ -292,7 +364,7 @@ def handle_calendar_notification(
             _offer_resolution_hold(
                 app_ctx, connector, conflict,
                 post_approval=post_approval, pending=pending,
-                audit_log=audit_log, user_id=user_id,
+                audit_log=audit_log, user_id=user_id, notify=notify,
             )
 
     return conflicts
@@ -307,6 +379,7 @@ def _offer_resolution_hold(
     pending: Any,
     audit_log: AuditLog | None,
     user_id: str,
+    notify: Callable[[str], None] | None = None,
 ) -> str | None:
     """Offer one hold proposal for a detected conflict (prompt 16, phase 2).
 
@@ -361,6 +434,19 @@ def _offer_resolution_hold(
             domain="calendar",
             user_id=user_id,
         )
+
+    rung = _auto_rung(result)
+    if rung is not None:
+        _handle_auto_applied(
+            result, rung,
+            action="create_hold", domain="calendar",
+            describe=(
+                f'held {start:%H:%M}-{end:%H:%M} to rebook "{event.summary}"'
+            ),
+            lg_tid=lg_tid, user_id=user_id,
+            notify=notify, audit_log=audit_log,
+        )
+        return lg_tid
 
     post_approval(
         lg_tid,
@@ -634,9 +720,9 @@ def _autonomy_status(
     if text.strip().lower() != "autonomy":
         return None
 
-    from .orchestrator import default_matrix, show_matrix, suggest_graduations
+    from .orchestrator import show_matrix, suggest_graduations
 
-    matrix = app_ctx.matrix or default_matrix()
+    matrix = app_ctx.current_matrix()
     lines = ["Current autonomy posture:", show_matrix(matrix)]
     if audit_log is not None:
         suggestions = suggest_graduations(audit_log, matrix)
