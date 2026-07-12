@@ -3,6 +3,34 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Resume-time audit: the earning evidence gets written (roadmap prompt 20, review finding #4)
+
+- **The gap, honestly**: the graph produced `human_decision`/`applied`/
+  `signal_captured` on resume, but `resume_workflow` never wrote them to
+  the JSONL log — Slack resumes recorded nothing, Chat recorded only a
+  `chat_interaction_resumed` marker under domain `"chat"` even for
+  mail/calendar work. So `track_records()` could never observe a real human
+  decision and **graduation suggestions could never fire in production**.
+  Prompt 12's tests built audit files synthetically and certified the fold
+  while the pipeline silently wrote nothing — exactly the "validates the
+  algorithm, not the data path" failure the review named.
+- **The fix lives in the one shared resume path**: `resume_workflow` gains
+  `audit_log`/`user_id`/`actor` and records the post-resume events,
+  name-filtered by `POST_RESUME_EVENTS` (safe against double-recording:
+  dispatch-time records carry only pre-interrupt events, and auto-applied
+  runs never resume). Domain comes from the result state — never hardcoded
+  per channel — and the actor (prompt 17) is stamped onto `human_decision`.
+  Audit failures never break a resume. The runtime's `_bound_resume` and
+  the async Chat `_resume_fn` pass all three; `handle_chat_interaction`'s
+  own marker now records the workflow's domain and tolerates injected
+  3-arg resume fns via a TypeError fallback.
+- **`test_audit_pipeline.py` constructs zero audit entries by hand** —
+  every entry flows through the real compiled graph and real
+  `JsonlAuditLog`: track records count real decisions, graduation fires on
+  12 real unedited approvals, each event name appears exactly once per
+  workflow, actor/domain are verified on the file, and a calendar card
+  clicked in chat audits under `calendar`.
+
 ## 2026-07 — Live policy + real rung semantics (roadmap prompt 19, review finding #2)
 
 - **Revocations bite without a restart.** The gate no longer captures a

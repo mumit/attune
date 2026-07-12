@@ -261,6 +261,15 @@ def build_draft_approve_graph(
     return g.compile(checkpointer=checkpointer)
 
 
+# The events a resume produces (vs. the pre-interrupt events the dispatcher
+# already recorded at proposal time). Auto-applied runs never resume, so
+# name-filtering here cannot double-record anything.
+POST_RESUME_EVENTS = frozenset({
+    "human_decision", "applied", "apply_skipped", "apply_failed",
+    "signal_captured",
+})
+
+
 def resume_workflow(
     graph: Any,
     thread_id: str,
@@ -268,6 +277,9 @@ def resume_workflow(
     text: str | None = None,
     *,
     pending: Any = None,
+    audit_log: Any = None,
+    user_id: str | None = None,
+    actor: str | None = None,
 ) -> Any:
     """Resume a paused draft-approve workflow with a human decision.
 
@@ -281,6 +293,13 @@ def resume_workflow(
     registry; being the single resume path makes this the one place every
     decision marks its card resolved (so the ignore-sweep never fires on an
     answered card). ``resolve`` is a no-op for workflows never registered.
+
+    ``audit_log`` (with ``user_id``/``actor``) records the POST-RESUME events
+    (review finding #4: they used to live only in the checkpoint, so the
+    graduation track record could never see a real human decision). The
+    domain comes from the result state — never hardcoded per channel — and
+    ``actor`` (who clicked, prompt 17) is stamped onto ``human_decision``.
+    Audit failures never break a resume (best-effort, logged).
     """
     from langgraph.types import Command
 
@@ -291,6 +310,31 @@ def resume_workflow(
     result = graph.invoke(Command(resume=payload), cfg)
     if pending is not None:
         pending.resolve(thread_id)
+
+    if audit_log is not None and isinstance(result, dict):
+        events = []
+        for event in result.get("audit_events", []):
+            if event.get("event") not in POST_RESUME_EVENTS:
+                continue
+            enriched = dict(event)
+            if enriched["event"] == "human_decision" and actor:
+                enriched["actor"] = actor
+            events.append(enriched)
+        if events:
+            try:
+                audit_log.record(
+                    thread_id=thread_id,
+                    workflow="draft_approve",
+                    events=events,
+                    domain=result.get("domain"),
+                    user_id=user_id,
+                )
+            except Exception:  # noqa: BLE001 — audit must never break a resume
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "resume audit record failed for %s", thread_id, exc_info=True
+                )
     return result
 
 

@@ -519,13 +519,27 @@ def handle_chat_interaction(
             )
         return
 
-    result = resume_fn(interaction.thread_id, interaction.decision, interaction.text)
+    try:
+        result = resume_fn(
+            interaction.thread_id, interaction.decision, interaction.text,
+            actor=interaction.actor,
+        )
+    except TypeError:
+        # injected resume_fns with the plain 3-arg contract still work
+        result = resume_fn(
+            interaction.thread_id, interaction.decision, interaction.text
+        )
 
     # The confirmation states what actually happened (a Gmail draft created,
     # or an apply failure) — never a claimed success the graph didn't produce.
     post_text(apply_confirmation(interaction.decision, result))
 
     if audit_log is not None:
+        # The workflow's own domain (mail/calendar) — the CHANNEL was chat,
+        # but the work wasn't (review finding #4's mislabeling).
+        workflow_domain = (
+            result.get("domain") if isinstance(result, dict) else None
+        )
         audit_log.record(
             thread_id=interaction.thread_id,
             workflow="draft_approve",
@@ -533,8 +547,9 @@ def handle_chat_interaction(
                 "event": "chat_interaction_resumed",
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "decision": interaction.decision,
+                "actor": interaction.actor,
             }],
-            domain="chat",
+            domain=workflow_domain or "chat",
             user_id=user_id,
         )
 

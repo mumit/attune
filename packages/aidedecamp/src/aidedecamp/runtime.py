@@ -282,9 +282,16 @@ class Runtime:
         if self.gchat is None:
             return
 
-        def _resume_fn(thread_id: str, decision: str, text: str | None) -> Any:
+        def _resume_fn(
+            thread_id: str, decision: str, text: str | None, *,
+            actor: str | None = None,
+        ) -> Any:
             return resume_workflow(
-                self.app.graph, thread_id, decision, text, pending=self.pending
+                self.app.graph, thread_id, decision, text,
+                pending=self.pending,
+                audit_log=self.app.audit_log,
+                user_id=self.settings.user_id,
+                actor=actor,
             )
 
         def _post_text(text: str) -> None:
@@ -907,7 +914,11 @@ def build_runtime(
         thread_id: str, decision: str, text: str | None, *, actor: str | None = None
     ) -> Any:
         return resume_workflow(
-            resolved_app.graph, thread_id, decision, text, pending=resolved_pending
+            resolved_app.graph, thread_id, decision, text,
+            pending=resolved_pending,
+            audit_log=resolved_app.audit_log,
+            user_id=settings.user_id,
+            actor=actor,
         )
 
     resolved_gmail_service = gmail_service
