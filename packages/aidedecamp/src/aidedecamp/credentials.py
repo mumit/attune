@@ -22,7 +22,14 @@ from .config import Settings
 SCOPES_DEFAULT: tuple[str, ...] = (
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
-    "https://www.googleapis.com/auth/calendar.readonly",
+    # Approved conflict holds call events.insert; the permission matrix still
+    # keeps that write at PROPOSE until the operator explicitly grants more.
+    "https://www.googleapis.com/auth/calendar.events",
+)
+
+# Optional user-auth scopes for Chat polling and Workspace Events. Proactive
+# Cards v2 use a separate app-auth credential and chat.bot (not wired yet).
+SCOPES_CHAT: tuple[str, ...] = (
     "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces.readonly",
 )

@@ -59,6 +59,11 @@ def run_init(
     )
     os.makedirs(data_dir, exist_ok=True)
 
+    user_id = ask_default(
+        "Google mailbox email (also the single memory principal)", "me"
+    )
+    google_project = ask_default("Google Cloud project ID", "")
+
     fuelix_token = ask_secret("Fuel iX bearer token (hidden, blank to skip): ")
 
     google_creds = _google_credentials_step(
@@ -113,6 +118,7 @@ def run_init(
         f"ADC_DEPLOYMENT={deployment}",
         f"ADC_CONNECTOR_MODE={connector}",
         f"ADC_INGESTION_MODE={ingestion}",
+        f"ADC_USER_ID={user_id}",
         f"ADC_DATA_DIR={data_dir}",
         "",
         "# --- model gateway ---",
@@ -122,6 +128,8 @@ def run_init(
     else:
         lines.append("# FUELIX_TOKEN=  (required before anything hits Fuel iX)")
     lines += ["", "# --- google ---"]
+    if google_project:
+        lines.append(f"GOOGLE_PROJECT_ID={google_project}")
     if google_creds:
         lines.append(f"ADC_GOOGLE_CREDENTIALS_FILE={google_creds}")
     else:
@@ -225,8 +233,9 @@ def _run_oauth_flow(
 ) -> str:  # pragma: no cover - opens a browser + localhost listener
     """The real consent flow (google-auth-oauthlib, `[google]` extra).
 
-    Scopes are SCOPES_DEFAULT — read+compose for Gmail, read for Calendar,
-    Chat messaging. Never gmail.send (rule 4).
+    Scopes are SCOPES_DEFAULT — read+compose for Gmail and Calendar event
+    access. Optional Chat authorization is deferred until its separate app-auth
+    credential is production-wired. Never request gmail.send (rule 4).
     """
     from google_auth_oauthlib.flow import InstalledAppFlow
 

@@ -7,22 +7,21 @@ them, it doesn't relitigate them.
 
 There are two tracks:
 
-- **Track A — quickstart (poll mode, the default).** No GCP project, no
-  Pub/Sub, no republisher: the assistant polls Gmail/Calendar/Chat on a
-  timer, outbound-only. Anything that can run Docker + Python works (a
-  laptop, a home box, a VM). This is the day-one path and stays a perfectly
-  reasonable permanent posture for a personal deployment.
+- **Track A — quickstart (poll mode, the default).** No Pub/Sub, VM, Cloud
+  Run, or webhook infrastructure: the assistant polls Gmail and Calendar on
+  a timer, outbound-only. You still need a Google Cloud project to enable the
+  Workspace APIs and create an OAuth desktop client. Anything that can run
+  Docker + Python works. Start with Slack; Google Chat has additional app-auth
+  requirements described in §12.
 - **Track B — hardened push deployment (GCP).** Pub/Sub push ingestion fed
   by watches, the republisher on Cloud Run, Secret Manager, one GCP project
   per deployment. Lower latency, lower API-call volume, and the posture the
   TELUS deployment should use. Everything from §2 onward is Track B.
 
-**Status: unexercised.** Every step below is derived from the code and from
-Google's documented APIs, but nothing here has been run against a real GCP
-project or live account yet — in either track. Treat this as a detailed
-first draft to execute and correct against reality, not a verified runbook.
-Update it as you go — a deployment guide that drifts from what actually
-works is worse than none.
+**Status: code-verified, live-unexercised.** Commands, settings, and scopes
+below are reconciled with the implementation and current vendor docs, but no
+maintainer has completed either track against a live account. Treat every
+vendor-console step as needing confirmation during the first deployment.
 
 ---
 
@@ -34,7 +33,9 @@ The short version is the README quickstart; the operational notes:
    "packages/aidedecamp[orchestrator,memory,google,slack]"`.
 2. `docker compose -f packages/aidedecamp/deploy/compose.yml up -d` —
    Qdrant only; Mem0 runs in-process inside the assistant.
-3. `aidedecamp init` — writes `.env` (chmod 0600) and can run the Google
+3. Create the Google OAuth project/client in §4, then run `aidedecamp init`.
+   It writes `.env` (chmod 0600), which later CLI commands load automatically,
+   and can run the Google
    OAuth consent flow for a consumer Gmail account. Poll mode and a single
    `ADC_DATA_DIR` are the defaults it writes.
 4. `aidedecamp doctor` until everything relevant is PASS/SKIP, then
@@ -46,11 +47,11 @@ The short version is the README quickstart; the operational notes:
 
 What Track A gives up relative to Track B: event latency is the poll
 cadence (`ADC_POLL_SECONDS`, default 120s, floor 30s) instead of push; and
-**Google Chat approval buttons don't work without the republisher** (card
-clicks are POSTs from Google; there's nothing to poll) — use Slack for
-approvals in Track A, or deploy just the republisher + the Chat-interaction
-Pub/Sub pair (§8, §12) as a halfway step. Watch renewals, Pub/Sub quotas,
-and the republisher simply don't exist in this track.
+**Google Chat approval buttons don't work without the republisher**, and
+proactive Cards v2 currently need a separate Chat app-auth credential that the
+runtime does not yet configure (§12). Use Slack for the first deployment.
+Gmail and Calendar watch renewals, Pub/Sub quotas, and the republisher do not
+exist in a Slack-based Track A deployment.
 
 ---
 
@@ -71,12 +72,12 @@ Each deployment (personal, TELUS) is:
 
 - **One GCP project**, isolated from the other deployment's project. No
   shared Pub/Sub topics, no shared service accounts, no shared anything.
-- **One Compute Engine VM** running `python -m aidedecamp` (via systemd) plus
-  a local Qdrant container for memory (`deploy/mem0-compose.yml`).
-- **One thin, stateless Cloud Run service** — the Calendar webhook
-  republisher (the one source needing a real inbound HTTPS endpoint; rule 5
-  keeps that off the VM). Gmail and Chat don't need this — they deliver via
-  Pub/Sub directly.
+- **One Compute Engine VM** running `aidedecamp run` (via systemd) plus a local
+  Qdrant container for memory (`packages/aidedecamp/deploy/compose.yml`).
+- **One thin, stateless Cloud Run service** — the Calendar webhook and Chat
+  interaction republisher. Gmail notifications and Chat message events reach
+  Pub/Sub directly; Calendar notifications and card clicks require synchronous
+  HTTPS responses, so rule 5 keeps them off the VM.
 - **Secret Manager** for `FUELIX_TOKEN`, Google OAuth credentials, and Slack
   tokens.
 - **Pub/Sub topics + subscriptions** for Gmail, Chat, and (indirectly, via
@@ -133,68 +134,75 @@ gcloud services enable \
   iam.googleapis.com
 ```
 
+For Track A with Slack, enabling only Gmail, Calendar, and the service-usage
+dependencies is sufficient; the remaining APIs support Chat or Track B.
+
 `workspaceevents.googleapis.com` is what backs Chat's proactive message
 ingestion (`ingestion/chat_events.py`); `chat.googleapis.com` backs the Cards
 v2 send/receive path (`channels/gchat.py`).
 
 ---
 
-## 4. Google credentials — the one genuinely different step per deployment
+## 4. Google Workspace access and OAuth
 
-This is the step most likely to trip you up, because **personal Gmail and a
-TELUS Workspace account need different credential types**, and
-`credentials.py` supports both, but you have to pick correctly.
+### What is supported now
 
-### Personal (consumer Gmail account)
+The production-wired connector is `direct_oauth`, using one OAuth authorized-
+user credential for Gmail, Calendar, and read-side Chat APIs. The MCP adapter
+exists and is tested behind an injected transport, but `build_runtime()` does
+not construct that transport; do not set `ADC_CONNECTOR_MODE=mcp` in a live
+deployment yet.
 
-Consumer Gmail has no domain-wide delegation — a service account cannot be
-granted access to a personal `@gmail.com` inbox. You need a real **OAuth user
-credential**: a one-time human authorization that produces a refresh token.
+Service-account JSON can be parsed, but mailbox impersonation is not
+implemented: the loader never calls `with_subject(...)`. Likewise, the VM's
+Application Default Credentials identify the VM service account, not a human
+mailbox. Consumer Gmail and Workspace deployments should both use per-user
+OAuth today. Domain-wide delegation needs a code change and its own tests
+before this guide can recommend it.
 
-1. GCP Console → APIs & Services → OAuth consent screen. External, testing
-   mode is fine for a single-user personal deployment.
-2. Create an OAuth 2.0 Client ID (type: Desktop app, simplest for a one-time
-   local authorization flow).
-3. Run the authorization flow once (`google-auth-oauthlib`'s
-   `InstalledAppFlow`, or any standard OAuth helper script) against the
-   scopes in `credentials.py::SCOPES_DEFAULT`, producing a JSON file shaped
-   like:
-   ```json
-   {"type": "authorized_user", "client_id": "...", "client_secret": "...", "refresh_token": "..."}
-   ```
-   (`credentials.py` detects this via the absence of `"type":
-   "service_account"` and loads it through
-   `google.oauth2.credentials.Credentials.from_authorized_user_info`.)
-4. Store that JSON in Secret Manager (§6), never in the repo or on local disk
-   outside the secrets flow.
+### Create the OAuth client
 
-### TELUS (Workspace account)
+1. Create or select a Google Cloud project. Poll mode avoids GCP runtime
+   infrastructure, not this API/OAuth control plane.
+2. Enable Gmail API and Google Calendar API. Enable Google Chat API and Google
+   Workspace Events API only if you are evaluating Chat.
+3. In **Google Auth Platform**, configure Branding, Audience, and Data Access.
+   For a personal account choose External and add your Google account as a
+   test user. For Workspace, prefer Internal when the project belongs to the
+   same organization and ask the administrator to trust the app/scopes.
+4. Add the exact scopes below in Data Access, then create a **Desktop app**
+   OAuth client and download its client-secret JSON.
+5. Run `aidedecamp init`, point it at that downloaded JSON, and answer `y` when
+   it offers to run the browser consent flow. The resulting
+   `~/.aidedecamp/google_authorized_user.json` is the credential configured by
+   `ADC_GOOGLE_CREDENTIALS_FILE`.
+6. Set `ADC_USER_ID` to the authorized mailbox's full email address. This is
+   required for safe reply targeting and useful quiet-thread detection.
 
-Two paths, depending on what TELUS IT approves:
+The requested scopes are:
 
-- **Domain-wide delegation (preferred if approved)**: create a service
-  account, grant it domain-wide delegation in the Workspace Admin console for
-  exactly `SCOPES_DEFAULT`, and configure it to impersonate the specific
-  mailbox this deployment acts as. With this, the VM's attached service
-  account identity can resolve credentials via
-  `google.auth.default()` directly — no credentials file needed at all,
-  `google_credentials_file` stays unset.
-- **Per-user OAuth (if domain-wide delegation is refused)**: same flow as
-  personal above, just against the TELUS Workspace account instead of a
-  personal Gmail account. This is exactly why `connectors/base.py`'s
-  interface and `ConnectorMode` exist as a config choice — a TELUS "no" on
-  one auth path is a config change, not a redesign.
-
-Either way, confirm the actual scope list against current Google docs before
-requesting it — `SCOPES_DEFAULT` in `credentials.py` is:
-
-```
-gmail.readonly, gmail.compose, calendar.readonly, chat.messages, chat.spaces.readonly
+```text
+https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/gmail.compose
+https://www.googleapis.com/auth/calendar.events
 ```
 
-`gmail.send` is deliberately **not** in this list (rule 4 — send is refused
-structurally; only add it as a separate, reviewed change alongside
-`send_enabled=True` and an autonomy grant).
+`gmail.compose` is a Google **restricted** scope and technically authorizes
+both draft management and sending. Aide-de-camp still refuses send in its
+connector unless a separately reviewed `send_enabled` path is introduced;
+the current runtime only creates drafts. `calendar.events` is required because
+an approved conflict proposal creates a tentative hold with `events.insert`.
+
+An External app left in **Testing** receives refresh tokens that expire after
+seven days for these scopes. That is useful for a smoke test, not an always-on
+deployment. Before relying on it, move the OAuth app to the appropriate
+production/internal posture and satisfy Google's current verification,
+restricted-scope, data-use, and security-assessment requirements. For a
+corporate account, administrator policy can still block or limit the app.
+
+Authoritative references: [Google OAuth production readiness](https://developers.google.com/identity/protocols/oauth2/production-readiness/overview),
+[Gmail scope classifications](https://developers.google.com/workspace/gmail/api/auth/scopes),
+and [Google Chat authentication](https://developers.google.com/workspace/chat/authenticate-authorize).
 
 ---
 
@@ -218,8 +226,8 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-If using domain-wide delegation for TELUS (§4), this is also the service
-account you grant delegation to — one identity, not two.
+This infrastructure identity is deliberately separate from the authorized
+Workspace user credential in §4.
 
 ---
 
@@ -270,6 +278,15 @@ gcloud pubsub topics add-iam-policy-binding aidedecamp-gmail \
   --role="roles/pubsub.publisher"
 ```
 
+If evaluating Chat events, also grant Chat's delivery identity permission on
+the Chat topic:
+
+```bash
+gcloud pubsub topics add-iam-policy-binding aidedecamp-chat \
+  --member="serviceAccount:chat-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+```
+
 Map these to config:
 
 | Topic | Env var |
@@ -295,7 +312,7 @@ messages use. It holds no credentials, no memory, and no Fuel iX token.
 **Not part of the installable `aidedecamp` package** — it lives at
 `packages/aidedecamp/deploy/republisher/` (own `main.py`,
 `requirements.txt`, `Dockerfile`, `test_main.py`), deployed independently,
-the same way `deploy/mem0-compose.yml` is infrastructure rather than
+the same way `deploy/compose.yml` is infrastructure rather than
 application code.
 
 **`/calendar-webhook`** — design 4.6's flagged exception: Calendar push
@@ -364,9 +381,22 @@ must be that exact `<url>/chat-interaction` string — it has to match what
 you configure as the Chat app's Connection settings URL exactly, since that's
 the `aud` claim Google's ID token carries.
 
+Give the service its own identity and publisher access only to the two topics
+it writes:
+
+```bash
+gcloud iam service-accounts create aidedecamp-republisher
+for topic in aidedecamp-calendar aidedecamp-chat-interaction; do
+  gcloud pubsub topics add-iam-policy-binding "$topic" \
+    --member="serviceAccount:aidedecamp-republisher@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/pubsub.publisher"
+done
+```
+
 ```bash
 gcloud run deploy aidedecamp-republisher \
   --source=packages/aidedecamp/deploy/republisher \
+  --service-account="aidedecamp-republisher@${PROJECT_ID}.iam.gserviceaccount.com" \
   --set-env-vars="CALENDAR_PUBSUB_TOPIC=projects/${PROJECT_ID}/topics/aidedecamp-calendar,CHAT_INTERACTION_PUBSUB_TOPIC=projects/${PROJECT_ID}/topics/aidedecamp-chat-interaction,CHAT_APP_AUDIENCE=https://aidedecamp-republisher-xxxxx.run.app/chat-interaction" \
   --allow-unauthenticated \
   --region=us-central1
@@ -405,46 +435,50 @@ cd /opt/aidedecamp
 
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e "packages/bearer-openai[dev]"
+pip install -e "packages/bearer-openai"
 pip install -e "packages/aidedecamp[dev,memory,orchestrator,slack,google]"
 
 # Sanity check before proceeding — same invocation CI runs, entirely offline.
 pytest packages/aidedecamp packages/bearer-openai -q
 
 # Memory substrate (Qdrant)
-docker compose -f packages/aidedecamp/deploy/mem0-compose.yml up -d
+docker compose -f packages/aidedecamp/deploy/compose.yml up -d
 ```
 
-Pull secrets into environment at boot (a startup script, not committed env
-files):
+Materialize the authorized-user JSON and a root-readable `.env` on the VM.
+The service's working directory is `/opt/aidedecamp`, so `aidedecamp run`
+loads this file automatically:
 
 ```bash
-export FUELIX_TOKEN=$(gcloud secrets versions access latest --secret=fuelix-token)
-export SLACK_BOT_TOKEN=$(gcloud secrets versions access latest --secret=slack-bot-token)
-export SLACK_APP_TOKEN=$(gcloud secrets versions access latest --secret=slack-app-token)
 gcloud secrets versions access latest --secret=google-credentials > /opt/aidedecamp/google-credentials.json
+install -m 600 /dev/null /opt/aidedecamp/.env
+printf 'FUELIX_TOKEN=%s\n' "$(gcloud secrets versions access latest --secret=fuelix-token)" >> /opt/aidedecamp/.env
+printf 'SLACK_BOT_TOKEN=%s\n' "$(gcloud secrets versions access latest --secret=slack-bot-token)" >> /opt/aidedecamp/.env
+printf 'SLACK_APP_TOKEN=%s\n' "$(gcloud secrets versions access latest --secret=slack-app-token)" >> /opt/aidedecamp/.env
+# Append the non-secret ADC_* settings from §10, including the credential path.
 ```
 
 ---
 
-## 10. Environment variables — full reference
+## 10. Environment variables — deployment reference
 
-Set these (directly, or via the secret-pull script above feeding a
-`systemd` `EnvironmentFile`). Grouped by what they configure; `ADC_*` prefix
-is this project's own convention, distinct from Google's own env vars.
+Append these to the `.env` created above. They are grouped by purpose;
+`ADC_*` is this project's convention, distinct from Google's own env vars.
 
 **Core / identity**
 ```
 ADC_DEPLOYMENT=personal              # or telus
-ADC_CONNECTOR_MODE=direct_oauth      # or mcp, per §4's decision
-ADC_USER_ID=me                       # or an explicit email; also the Gmail API "me" alias
+ADC_CONNECTOR_MODE=direct_oauth      # the only production-wired mode today
+ADC_USER_ID=owner@example.com        # authorized mailbox + memory principal
 FUELIX_TOKEN=<from Secret Manager>
+ADC_INGESTION_MODE=poll              # push only after §§7–8 are complete
+ADC_DATA_DIR=/opt/aidedecamp/data
 ```
 
 **Memory**
 ```
-ADC_MEM0_URL=http://localhost:8000   # only used if running the standalone Mem0 server; the
-                                      # in-process library path (default) talks to Qdrant directly
+ADC_QDRANT_HOST=localhost
+ADC_QDRANT_PORT=6333
 ```
 
 **Audit + state (persisted to local disk on the boot persistent disk — back
@@ -461,8 +495,6 @@ ADC_CALENDAR_SYNC_STATE_PATH=/opt/aidedecamp/data/calendar_sync_state.json
 **Google credentials**
 ```
 ADC_GOOGLE_CREDENTIALS_FILE=/opt/aidedecamp/google-credentials.json
-# Omit entirely for TELUS-with-domain-wide-delegation — ADC via the VM's
-# service account resolves it instead (§4).
 GOOGLE_PROJECT_ID=<project id>
 ```
 
@@ -487,7 +519,9 @@ ADC_CALENDAR_ID=primary
 SLACK_APP_TOKEN=<from Secret Manager>       # xapp-...
 SLACK_BOT_TOKEN=<from Secret Manager>       # xoxb-...
 ADC_SLACK_CHANNEL=D0123456789               # owner-only DM preferred
+ADC_SLACK_ALLOWED_USERS=U0123456789          # empty means deny-all
 ADC_CHAT_SPACE=spaces/AAAAxxxxxxx           # where Chat briefs/approvals post proactively
+ADC_CHAT_ALLOWED_USERS=users/123456789       # empty means deny-all
 # Required for Chat, or for Slack C/G channels, after checking membership.
 ADC_ACK_DESTINATION_VISIBILITY=1
 ```
@@ -496,11 +530,19 @@ Leave `ADC_SLACK_CHANNEL`/`ADC_CHAT_SPACE` unset to run without that
 channel's proactive posting — `build_runtime()` only constructs a channel
 when its config is present (see `runtime.py`).
 
+`.env.example` is the exhaustive setting inventory, including cadence, logging,
+conversation, nudge, and per-file state overrides. Prefer `ADC_DATA_DIR` over
+setting each state path individually.
+
 ---
 
 ## 11. Slack app setup
 
-1. https://api.slack.com/apps → Create New App → From scratch.
+Slack is the recommended first channel because Socket Mode keeps both messages
+and approval interactions outbound-only and uses one bot credential.
+
+1. [Slack app management](https://api.slack.com/apps) → Create New App → From
+   scratch.
 2. **Socket Mode**: enable it, generate an app-level token with the
    `connections:write` scope → this is `SLACK_APP_TOKEN`.
 3. **OAuth & Permissions** → Bot Token Scopes: `chat:write`, `im:history`,
@@ -510,15 +552,51 @@ when its config is present (see `runtime.py`).
    `SLACK_BOT_TOKEN`.
 4. **Event Subscriptions** → Subscribe to bot events → `message.im` (matches
    the filter in `channels/slack.py`'s registered handler).
-5. **Interactivity & Shortcuts**: enable it (Socket Mode delivers these too;
+5. **App Home**: enable the Messages tab so the owner can DM the app.
+6. **Interactivity & Shortcuts**: enable it (Socket Mode delivers these too;
    no Request URL needed).
-6. Prefer the owner's DM conversation (`D...`) for `ADC_SLACK_CHANNEL`. If a
+7. Reinstall the app after changing scopes or event subscriptions. Copy the
+   bot token (`xoxb-...`) to `SLACK_BOT_TOKEN` and the app token (`xapp-...`)
+   to `SLACK_APP_TOKEN`.
+8. Copy the owner's member ID (`U...`) from **Profile → More → Copy member
+   ID** into `ADC_SLACK_ALLOWED_USERS`. Empty means deny-all.
+9. Prefer the owner's DM conversation (`D...`) for `ADC_SLACK_CHANNEL`. Open a
+   DM with the app, then use Slack's `conversations.open` API/tester with the
+   owner's `U...` id to obtain the returned `channel.id`. If a
    channel is used, verify membership and set
    `ADC_ACK_DESTINATION_VISIBILITY=1`; allowlists stop actions, not reading.
+
+The app-level token needs only `connections:write`. The bot scopes above are
+the current minimum used by this code. See Slack's
+[`connections:write` reference](https://docs.slack.dev/reference/scopes/connections.write/)
+and Socket Mode documentation when the console labels move.
 
 ---
 
 ## 12. Google Chat app setup
+
+### Current limitation
+
+Do not enable Google Chat for the first live deployment. The runtime currently
+uses the authorized-user credential from §4 for proactive `messages.create`.
+Google generally permits only text with user authentication; stable Cards v2
+and interactive widgets require Chat **app authentication** with a service
+account and the `chat.bot` scope. The configuration has no separate Chat app
+credential yet, so approval cards are not a supported live path even though
+their rendering, interaction decoding, and republisher flow are covered by
+offline tests.
+
+The remaining implementation work is explicit: add a dedicated
+`ADC_CHAT_APP_CREDENTIALS_FILE`, use it only for proactive Chat sends, retain
+the user credential for polling/Workspace Events, and validate the two-identity
+flow against a live Chat app. Do not reuse a Chat service-account credential
+for Gmail or Calendar user data.
+
+The user credential must then be reauthorized with the optional
+`chat.messages` and `chat.spaces.readonly` scopes in `SCOPES_CHAT`; the Chat app
+credential uses `chat.bot` separately.
+
+### Configuration to prepare after that gap closes
 
 1. GCP Console → APIs & Services → Google Chat API → Configuration.
 2. App name, avatar, description. Interactive features: **on**.
@@ -540,18 +618,23 @@ when its config is present (see `runtime.py`).
    the Chat API (`spaces.list`) or from the space's URL once the app is
    added to it.
 
+7. Create the Chat app's service account, authorize it with `chat.bot`, and add
+   the Chat app itself to the destination space. App membership and user
+   membership are distinct. This credential will belong in the dedicated
+   setting described above once implemented.
+
 `verify_chat_request`'s shape (audience = endpoint URL, check the `email`
 claim) is confirmed against
 [Google's current docs](https://developers.google.com/workspace/chat/verify-requests-from-chat)
-— what's still unverified is only whether it works against an actual live
-Chat app end to end (§15, step 7).
+but the entire dual-credential Chat path remains unverified end to end (§15).
 
 ---
 
-## 13. First-run bootstrap
+## 13. Watch bootstrap and renewal
 
-Before starting the long-running process, register the watches/subscriptions
-once (idempotent — safe to re-run):
+In push mode, `Runtime.run()` registers configured watches/subscriptions at
+startup and its scheduler renews them daily. No separate cron job is required.
+For diagnostics or a deliberate forced re-registration, run:
 
 ```python
 from aidedecamp.runtime import build_runtime
@@ -562,12 +645,9 @@ rt.renew_chat_subscription(force=True)   # only if ADC_CHAT_SPACE is set
 rt.renew_calendar_watch(force=True)      # only if ADC_CALENDAR_WEBHOOK_ADDRESS is set
 ```
 
-Schedule this to re-run daily (systemd timer or cron calling a tiny wrapper
-script) — Gmail/Chat/Calendar watches all expire and `ensure_*` renews
-proactively at <48h remaining, but only if something actually calls it on a
-schedule. This confirms `docs/decisions.md`'s existing note: missing this
-step is the single most common way this class of integration silently goes
-quiet.
+Poll mode creates none of these watches. Its persisted high-water marks are
+initialized on the first tick, so existing mailbox and calendar history is
+baselined rather than replayed.
 
 ---
 
@@ -583,8 +663,7 @@ After=network.target docker.service
 [Service]
 Type=simple
 WorkingDirectory=/opt/aidedecamp
-EnvironmentFile=/opt/aidedecamp/aidedecamp.env
-ExecStart=/opt/aidedecamp/.venv/bin/python -m aidedecamp
+ExecStart=/opt/aidedecamp/.venv/bin/aidedecamp run
 Restart=on-failure
 RestartSec=10
 
@@ -612,20 +691,22 @@ Rough end-to-end smoke test, in order:
 1. `journalctl -u aidedecamp -f` shows the process started without raising
    (a missing/invalid secret or scope typically fails loudly at `build_app`/
    `build_runtime` construction time).
-2. Send yourself a test email → confirm a Pub/Sub message lands (`gcloud
-   pubsub subscriptions pull aidedecamp-gmail-sub --auto-ack`) and a draft
-   approval card appears in Slack/Chat within the pull loop's poll window.
-3. DM the Slack bot / message the Chat space with something conversational →
-   confirm a reply comes back via `_converse`.
-4. Ask for "the morning brief" in either channel → confirm `assemble_brief`
-   output comes back.
-5. Create two overlapping calendar holds → confirm the republisher fires,
-   the Pub/Sub message lands on `aidedecamp-calendar-sub`, and a conflict
-   notification posts (`dispatcher.handle_calendar_notification`).
+2. Send yourself a test email. In Track A, wait one poll interval and confirm a
+   draft approval card appears in Slack. In Track B, inspect logs for the
+   Gmail pull loop; do not consume its subscription with an `--auto-ack` test
+   command while the runtime is processing it.
+3. DM the Slack bot with something conversational → confirm a reply comes back
+   via `_converse`.
+4. Ask for "the morning brief" in Slack → confirm `assemble_brief` output.
+5. Create two overlapping calendar events. Track A should detect them on a
+   poll tick. Track B should show the Calendar republisher publish and the
+   runtime reconcile. Confirm one conflict notification and at most one hold
+   approval card for the pair.
 6. Approve a drafted reply from **Slack** → confirm the capture-signal write
    lands in Mem0 (`memory/signals.py`), and that the audit log
    (`ADC_AUDIT_LOG_PATH`) has a matching `draft_approve` entry.
-7. Approve a drafted reply from **Chat** → click Approve, confirm the card
+7. **Deferred until §12's app-auth gap is implemented:** approve a drafted
+   reply from Chat → click Approve, confirm the card
    immediately shows "⏳ Processing your response...", then confirm the real
    "✅ Approved — draft accepted." follows within the pull loop's poll window
    — this is the async hand-off (`/chat-interaction` → Pub/Sub →
@@ -641,8 +722,9 @@ Rough end-to-end smoke test, in order:
 
 ## 16. Ongoing maintenance
 
-- **Watch/subscription renewal**: the daily cron/timer from §13. Missing this
-  is silent — no error, ingestion just stops.
+- **Watch/subscription renewal**: the built-in scheduler runs it daily in push
+  mode. Monitor `watch_renewed`/`watch_renew_failed` audit events and process
+  logs; a stopped runtime cannot renew its own watches.
 - **Secret rotation**: `gcloud secrets versions add <name> --data-file=-` +
   `systemctl restart aidedecamp`. `FUELIX_TOKEN` specifically: a 401 raises
   `TokenRejectedError` in logs rather than retrying — that's your signal to

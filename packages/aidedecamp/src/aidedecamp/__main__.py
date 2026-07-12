@@ -7,10 +7,13 @@ independently tested there. This file just configures logging (from
 
 import os
 
+from dotenv import load_dotenv
+
 from .logging_setup import configure
 from .runtime import build_runtime
 
 if __name__ == "__main__":  # pragma: no cover - requires live services
+    load_dotenv()
     configure(
         level=os.environ.get("ADC_LOG_LEVEL", "INFO"),
         json_mode=os.environ.get("ADC_LOG_JSON", "") == "1",

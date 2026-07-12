@@ -1,4 +1,10 @@
-# Build prompts
+# Build prompts (completed archive)
+
+Prompts 01–23 are historical implementation artifacts. They describe the
+repository state and test baseline that existed when each prompt was run; do
+not use their setup instructions as current deployment documentation. Use the
+root `README.md`, `.env.example`, and `docs/deployment.md` for the maintained
+operator path. The current core baseline is 565 passing tests.
 
 Self-contained prompts for implementing `docs/roadmap.md`, one per work item,
 written to be run with Claude Code (Sonnet) from the repo root:
@@ -41,7 +47,7 @@ House rules every prompt inherits (do not skip):
 
 1. Read `CLAUDE.md` and `docs/decisions.md` before changing anything; the
    non-negotiable rules are inviolable.
-2. `pytest` must pass before you start (312+ tests) and after you finish, with
+2. `pytest` must pass before you start and after you finish, with
    new offline tests (injected fakes, no credentials/network) for everything
    you add — match the style in `packages/aidedecamp/tests/`.
 3. Keep collaborators injected and optional heavy deps lazy-imported.

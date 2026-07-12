@@ -30,7 +30,7 @@ def test_client_resolves_token_from_fuelix_env(monkeypatch):
 def test_settings_from_env_defaults():
     s = Settings.from_env(env={})
     assert s.deployment == Deployment.PERSONAL
-    assert s.connector_mode == ConnectorMode.MCP
+    assert s.connector_mode == ConnectorMode.DIRECT_OAUTH
 
 
 def test_settings_telus_direct_oauth():

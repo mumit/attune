@@ -29,6 +29,11 @@ prompts in `docs/build-prompts/`.*
 > atomic single-use approvals, execution-safe compatibility checks, fail-closed
 > policy reloads, canonical cross-channel principal identity, and successful
 > apply evidence before graduation. The core suite now has 565 passing tests.
+>
+> **Deployment audit note:** completion here means offline implementation,
+> not live readiness for every surface. Slack + per-user Google OAuth is the
+> supported first deployment. Google Chat Cards v2 still need a separately
+> wired app-auth credential; see `docs/deployment.md` §12.
 
 ---
 

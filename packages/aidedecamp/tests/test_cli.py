@@ -64,6 +64,8 @@ def test_init_writes_env_from_scripted_answers(tmp_path):
         "",                # connector -> direct_oauth
         "poll",            # ingestion
         data_dir,          # data dir
+        "owner@example.com", # mailbox principal
+        "adc-project",     # Google Cloud project
         "",                # google credentials -> blank (ADC)
         "",                # chat space -> skip
         "America/Vancouver",
@@ -85,6 +87,8 @@ def test_init_writes_env_from_scripted_answers(tmp_path):
     assert "ADC_CONNECTOR_MODE=direct_oauth" in content
     assert "ADC_INGESTION_MODE=poll" in content
     assert f"ADC_DATA_DIR={data_dir}" in content
+    assert "ADC_USER_ID=owner@example.com" in content
+    assert "GOOGLE_PROJECT_ID=adc-project" in content
     assert "FUELIX_TOKEN=fuelix-secret-token" in content
     assert "ADC_TIMEZONE=America/Vancouver" in content
     assert "ADC_BRIEF_TIME=06:45" in content
@@ -118,7 +122,7 @@ def test_init_runs_oauth_flow_for_client_secret(tmp_path):
         return os.path.join(save_dir, "google_authorized_user.json")
 
     answers = [
-        "", "", "poll", data_dir,
+        "", "", "poll", data_dir, "owner@example.com", "adc-project",
         str(secret_file),  # google credentials -> client secret
         "y",               # run the consent flow
         "", "", "",        # chat space, tz, brief time defaults

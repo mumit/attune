@@ -4,9 +4,10 @@ Standing context for Claude Code. Read this and `docs/decisions.md` at the start
 of every session before making changes. `docs/design.md` is the deeper reference
 for architecture, memory model, autonomy ladder, and roadmap. `docs/deployment.md`
 covers the concrete GCP setup for personal and TELUS deployments.
-`docs/roadmap.md` is the current execution plan (2026-07 review findings +
-five prioritized milestones), with self-contained build prompts in
-`docs/build-prompts/` — if asked "what's next," start there.
+`docs/roadmap.md` records the completed roadmap and post-M6 hardening;
+`docs/build-prompts/` is a historical implementation archive. For current
+operator work and remaining gaps, use `docs/deployment.md` and "Next steps"
+below.
 
 ## What this is
 
@@ -272,7 +273,8 @@ Copy `.env.example` to `.env` — or run `aidedecamp init`, which writes it.
 `FUELIX_TOKEN` is needed for anything hitting Fuel iX; Slack
 (`SLACK_APP_TOKEN`/`SLACK_BOT_TOKEN`) and Google creds per channel/source.
 `ADC_DATA_DIR` derives all state paths; `ADC_INGESTION_MODE` defaults to
-`poll` (no GCP infra needed — push is the hardened posture). `.env` is
+`poll` (no GCP runtime infrastructure needed, though Google API/OAuth setup
+still requires a Cloud project). CLI entrypoints auto-load `.env`. `.env` is
 gitignored — never commit it. `deploy/compose.yml` is the canonical stack
 (Qdrant + optional `--profile assistant` container).
 
@@ -283,18 +285,8 @@ Fuel iX: `base_url = https://api.fuelix.ai`; models `claude-haiku-4-5`,
 
 ## Next steps (suggested order)
 
-`app.py`, `DirectOAuthConnector`, the Google Chat channel, `credentials.py`,
-Chat ingestion, `dispatcher.py`, the audit log, `runtime.py` (the entrypoint),
-Slack conversational Q&A, Calendar ingestion, the triage step, Calendar
-scheduling-conflict detection, `deploy/republisher/` (Calendar webhook +
-Chat interactions, both async), and the async Chat card-interaction flow are
-all done (see `docs/decisions.md`). **The full prioritized plan for what's
-left now lives in `docs/roadmap.md`** (a 2026-07 review found the interaction
-loop open at both ends — Approve never calls `create_draft`, Edit is a stub —
-plus no scheduler and silent pull-loop death; see the defect table there),
-with one ready-to-run build prompt per item in `docs/build-prompts/`. The two
-long-standing items below remain true and are folded into that plan (roadmap
-M2/M3 and prompt 16 respectively):
+The roadmap and post-M6 hardening are complete. Remaining work is live
+deployment and the deliberately deferred product tail:
 
 1. **Calendar write actions — the conflict-triggered slice is built** (see
    `docs/decisions.md`, "Calendar write actions"): a detected conflict now
@@ -305,7 +297,7 @@ M2/M3 and prompt 16 respectively):
    deferred**: invite accept/decline (needs a new RSVP connector verb),
    rescheduling, and negotiating times with counterparties — each needs its
    own decisions entry before code (rule 3).
-2. **Actually deploy it.** `runtime.py`'s wiring is tested, but `run()` and
+2. **Deploy Slack + Gmail + Calendar first.** `runtime.py`'s wiring is tested, but `run()` and
    the `run_*_pubsub_loop()` methods have never touched a real GCP project or
    Slack workspace. `deploy/republisher/`'s Chat-interaction JWT verification
    (`verify_chat_request`: "HTTP endpoint URL" audience mode, checks the
@@ -315,6 +307,10 @@ M2/M3 and prompt 16 respectively):
    app (`docs/deployment.md` §15, step 7, is the one thing that actually
    tests it). See `docs/deployment.md` for the concrete steps, configuration,
    and GCP resources this needs.
+3. **Finish Google Chat authentication.** Stable proactive Cards v2 require a
+   separate Chat app service-account credential (`chat.bot`) while Gmail,
+   Calendar, polling, and Workspace Events retain the authorized-user
+   credential. The runtime currently has only the latter.
 
 ## Still open (verify before relying on)
 

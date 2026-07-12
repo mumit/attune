@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "bearer-openai>=0.1,<0.2",
+    "python-dotenv>=1,<2",
     # Added as each phase comes online; kept minimal until then:
     # "slack-bolt>=1.20",
     # "google-api-python-client>=2",

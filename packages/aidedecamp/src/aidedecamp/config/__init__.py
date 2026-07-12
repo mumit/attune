@@ -42,10 +42,8 @@ class IngestionMode(str, Enum):
 
 
 class ConnectorMode(str, Enum):
-    """How Workspace is reached. Chosen per deployment (design doc 4.3, 4.7):
-    the personal side can default to Google's managed MCP servers; the TELUS
-    side uses whichever clears governance review. A 'no' from TELUS IT on MCP
-    is a config change here, not a redesign."""
+    """How Workspace is reached. Direct OAuth is the production-wired mode.
+    MCP remains an adapter boundary for a future injected transport."""
 
     MCP = "mcp"
     DIRECT_OAUTH = "direct_oauth"
@@ -167,7 +165,9 @@ class Settings:
 
         return cls(
             deployment=Deployment(e.get("ADC_DEPLOYMENT", "personal")),
-            connector_mode=ConnectorMode(e.get("ADC_CONNECTOR_MODE", "mcp")),
+            connector_mode=ConnectorMode(
+                e.get("ADC_CONNECTOR_MODE", "direct_oauth")
+            ),
             mem0_url=e.get("ADC_MEM0_URL", "http://localhost:8000"),
             data_dir=data_dir,
             audit_log_path=_path("ADC_AUDIT_LOG_PATH", "audit.log.jsonl"),

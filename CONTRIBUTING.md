@@ -29,7 +29,7 @@ These follow directly from the OpenClaw failures surveyed in `docs/design.md` §
    autonomous behaviors require an explicit grant and should start no higher than
    rung 2 (propose, wait for approval).
 3. **No inbound port on the credential-holding process.** Event ingestion is
-   pull/outbound (Pub/Sub, Socket Mode); the one unavoidable inbound webhook
-   (Calendar) is isolated behind a thin republisher.
+   pull/outbound (Pub/Sub, Socket Mode); Calendar notifications and Google
+   Chat interactions are isolated behind the credential-free republisher.
 4. **Secrets never in code or logs.** Tokens come from env / secrets store and
    are never logged, even on error.

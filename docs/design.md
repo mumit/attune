@@ -1,6 +1,8 @@
 # Aide-de-camp: Design, Architecture, and Roadmap
 
-*A self-learning assistant over Gmail, Calendar, Google Chat, and Slack, running on Fuel iX, reachable by text and voice.*
+*A self-learning assistant over Gmail, Calendar, Google Chat, and Slack,
+running on Fuel iX. Slack text is the first supported live surface; Google
+Chat app authentication and voice remain later work.*
 
 > **Name & license (settled):** Project name **Aide-de-camp**, PyPI package `aidedecamp`, licensed **MIT**. The metaphor — a trusted officer who acts on a principal's behalf within delegated authority — is a deliberate match for the earned-autonomy ladder in §3.2. Renamed from the earlier working title "Steward" to avoid collision with several existing near-identical GitHub projects (study8677/Steward, rcarmo/python-steward, googlicius/obsidian-steward). The Fuel iX bearer-token adapter (§4.5, §7) ships as a **separate, generically-named package** (candidate: `bearer-openai`) so the enterprises hitting the same gateway-auth problem can find it without knowing this project exists.
 
@@ -179,7 +181,10 @@ You want an orchestration layer that is (a) genuinely model-agnostic, since Fuel
 
 Model this as **several small graphs, not one giant one**: a triage graph (per incoming email/message), a draft-and-approve graph, a scheduling graph, and a daily-brief graph. Small, single-purpose graphs are easier to reason about, checkpoint, and hand off between channels.
 
-> **Built (2026-07):** the draft-and-approve graph is the only one that's actually a LangGraph graph. Triage (`orchestrator/triage.py`) and the daily brief (`brief.py`) turned out not to need one — neither has a human-in-the-loop interrupt to checkpoint around, so a plain function is the simplest thing that satisfies the intent here; see `docs/decisions.md`. The scheduling graph remains unbuilt — Calendar ingestion reconciles changed events but nothing acts on them yet.
+> **Built (2026-07):** the draft-and-approve graph is the only LangGraph
+> graph. Triage and the daily brief are plain functions. Calendar conflict
+> detection feeds the same approval graph to create a tentative hold at
+> PROPOSE; invite responses and rescheduling remain unbuilt.
 
 *Aside: this is a different shape than Stagecraft.* Stagecraft orchestrates coding tools as a team for a bounded, interactive session. This is a long-running, event-driven, always-on service reacting to the outside world at unpredictable times. Some of the model-agnostic-adapter thinking will transfer directly; the execution model (durable, resumable, triggered by webhooks) won't.
 
@@ -187,7 +192,12 @@ Model this as **several small graphs, not one giant one**: a triage graph (per i
 
 Google now ships **official, managed MCP servers** for Gmail, Calendar, Chat, People, and Drive (Developer Preview as of mid-2026) - remote MCP endpoints (e.g. `gmailmcp.googleapis.com`, `calendarmcp.googleapis.com`) that any MCP-speaking client can connect to with OAuth, inheriting your normal Workspace permissions. This is the right foundation to build on rather than hand-rolling OAuth + REST calls for each API, and it means your orchestrator's tool layer is just "an MCP client," regardless of which Google product it's calling. Community MCP servers (`google-workspace-mcp`, `mcp-google-workspace`) exist too and are worth a look if the managed ones prove too limited during preview, but prefer Google's own given the security/governance inheritance story.
 
-Since TELUS sign-off on MCP server access for the corporate account is genuinely uncertain (per §4.7), define a small internal interface (`list_events`, `send_draft`, `create_hold`, etc.) with two implementations behind it: one backed by Google's MCP servers, one backed by direct OAuth + `google-api-python-client` calls. The personal deployment can default to MCP; the TELUS deployment picks whichever one clears governance review, as a config value, not a code fork.
+Since TELUS sign-off on MCP server access for the corporate account is
+genuinely uncertain (per §4.7), the implementation defines a small internal
+interface with MCP and direct-OAuth adapters. **Current deployment reality:**
+`direct_oauth` is the only runtime-wired mode; the MCP adapter still requires
+an injected transport. See `docs/deployment.md` rather than treating this
+design preference as an operator instruction.
 
 For **event ingestion** (the thing that makes this feel alive rather than poll-based):
 - **Gmail**: push notifications route through **Cloud Pub/Sub**, not a direct webhook - you call `users.watch` with a Pub/Sub topic, Gmail publishes a `{emailAddress, historyId}` pointer on change, and you call `users.history.list` to fetch what actually changed. The watch **expires every 7 days and must be renewed** (renew daily as routine maintenance, don't wait for expiry).
@@ -257,7 +267,7 @@ Recommendation: build voice last, start with the cascaded approach, and only inv
 Each phase should produce something you actually use daily before moving to the next - this is the difference between a project that compounds and one that stalls at 80% forever.
 
 > **Implementation status (2026-07):** everything below marked ✅ is built and
-> covered by tests (169 passing) in `packages/aidedecamp/`; nothing has been
+> covered by the current offline suite (565 passing); nothing has been
 > deployed or run against real accounts yet, so no phase's "Done when" usage
 > bar is actually met — that requires the entrypoint work in `CLAUDE.md`'s
 > "Next steps." Details and rationale for each ✅ item live in
@@ -267,18 +277,24 @@ Each phase should produce something you actually use daily before moving to the 
 - ✅ Stand up the LangGraph orchestrator with a Fuel iX-backed model client (incl. token refresh handling)
 - ✅ Stand up Mem0 self-hosted as the memory store
 - ✅ Pick **one** channel (Slack - fastest to prototype with Bolt's Assistant template) and **one** data source (Gmail, read-only) — *note: implemented via a plain `@app.event("message")` handler rather than Bolt's `Assistant` class, which also offers suggested-prompts/streaming UI not yet used*
-- ✅ Ship a v0 "morning brief": pulls unread/important mail, summarizes (`brief.py`) — not yet posted anywhere automatically; posting is wired (`SlackChannel.post_brief`) but nothing schedules/calls it
+- ✅ Ship a v0 morning brief: pulls unread/important mail, summarizes it, and
+  posts on the configured daily scheduler.
 - ❌ **Done when:** you get a genuinely useful daily brief in Slack, generated from your real inbox, for a full week without babysitting it — blocked on the entrypoint, not the logic
 
 ### Phase 1 - Read-only assistant, both data sources, two channels
 - ✅ Add Calendar (read-only) — `list_events`/`create_hold` on the connector, plus push-notification ingestion (`ingestion/calendar_watch.py`/`calendar_sync.py`, design 4.6's one genuine webhook exception, handled via the same thin-republisher pattern as Gmail/Chat) — reconciliation stops at changed-event-ids; nothing reacts to them yet (see Phase 3's scheduling gap)
-- ✅ Add Google Chat as a second channel — Cards v2 + Workspace Events ingestion, both done
+- ⚠️ Add Google Chat as a second channel — Cards v2 rendering, Workspace
+  Events ingestion, and the interaction republisher are implemented offline;
+  a distinct Chat app-auth credential is not runtime-wired, so live cards are
+  not yet deployment-ready.
 - ✅ Add conversational Q&A backed by memory + live retrieval — both channels now share it: `dispatcher.handle_chat_message`/`handle_slack_message` route through the same `_respond_to_message` → `_converse`
 - ✅ Start correction/implicit-feedback capture (`memory/signals.py`, wired into the draft-approve graph's `capture` node) — already doing more than "start," see Phase 2
 - **Done when:** you trust the brief and Q&A enough to check them before checking your inbox directly — blocked on actual deployment, not on remaining code
 
 ### Phase 2 - Draft assistance (rung 2 autonomy)
-- ✅ Draft replies delivered as interactive cards (Slack + Chat) with Send / Edit / Discard — scheduling proposals specifically (a scheduling graph) not built; only a generic draft-reply workflow exists
+- ✅ Draft replies delivered as interactive Slack cards with Approve / Edit /
+  Reject. Chat uses the same graph but remains blocked on app authentication.
+  Calendar conflicts can propose tentative holds through that graph.
 - ✅ Wire up correction-diff capture properly: every edit-before-send becomes a structured preference signal (`capture_correction`)
 - **Done when:** more than half of routine replies start from an agent draft you only lightly edit — a usage claim, unverified with no deployment yet
 

@@ -1,7 +1,7 @@
 # Aide-de-camp
 
 A self-learning workspace assistant over Gmail, Calendar, Google Chat, and Slack,
-running on [Fuel iX](https://fuelix.ai), reachable by text and voice. It gets
+running on [Fuel iX](https://fuelix.ai), with a Slack text interface today. It gets
 better at being *your* assistant over time: it learns your preferences from the
 edits you make to its drafts, remembers who and what your projects are about, and
 earns autonomy one narrow, reversible action at a time rather than being handed
@@ -33,8 +33,9 @@ knows nothing about `aidedecamp` so it can leave home cleanly.
 
 ## Quickstart — first brief in about 15 minutes
 
-Prerequisites: Python 3.10+, Docker, a Google account, and a Fuel iX bearer
-token. The default **poll mode** needs no GCP project, no Pub/Sub, and no
+Prerequisites: Python 3.10+, Docker, a Google account, a Google Cloud project
+with Gmail and Calendar APIs enabled, an OAuth desktop-client JSON, and a Fuel
+iX bearer token. The default **poll mode** needs no Pub/Sub, VM, Cloud Run, or
 webhook infrastructure — everything is outbound-only.
 
 ```bash
@@ -47,7 +48,8 @@ pip install -e "packages/bearer-openai" \
 # 2. Start the memory substrate (Qdrant; Mem0 runs in-process)
 docker compose -f packages/aidedecamp/deploy/compose.yml up -d
 
-# 3. Interactive setup — writes .env, can run the Google OAuth consent flow
+# 3. Interactive setup — writes and subsequently auto-loads .env; point it at
+#    the OAuth client JSON and let it run the Google consent flow
 aidedecamp init
 
 # 4. Validate everything, then see your first brief in the terminal
@@ -62,9 +64,12 @@ unit in [`docs/deployment.md`](docs/deployment.md)) — or fully containerized:
 docker compose -f packages/aidedecamp/deploy/compose.yml --profile assistant up -d --build
 ```
 
-From there it polls your inbox, posts a morning brief at your configured
-time, and sends draft-approval cards to Slack/Chat; approving one creates
-the draft in Gmail for you to send. Never commit `.env`.
+From there it polls your inbox and calendar, posts a morning brief at your
+configured time, and sends draft-approval cards to Slack; approving one creates
+the draft in Gmail for you to send. Never commit `.env`. Follow the exact
+[Google OAuth](docs/deployment.md#4-google-workspace-access-and-oauth) and
+[Slack app](docs/deployment.md#11-slack-app-setup) steps before running the
+wizard.
 
 ### Dev setup
 
@@ -99,13 +104,15 @@ external review) is built and tested — 565 offline tests, no live
 credentials needed for the suite:
 
 - **The full interaction loop**: triage (memory-informed) → draft → approval
-  card (Slack + Google Chat) → approve/edit/reject — approving creates the
+  card → approve/edit/reject — approving creates the
   Gmail draft, editing captures the correction diff as a learning signal,
   ignoring decays into a signal too. Follow-up nudges for quiet threads and
-  conflict-triggered calendar hold proposals ride the same loop.
+  conflict-triggered calendar hold proposals ride the same loop. Slack is the
+  live-ready surface; Google Chat's equivalent is implemented and tested
+  offline but still needs a separate app-auth credential.
 - **It runs itself**: scheduler (brief, renewals, sweeps, consolidation,
   weekly autonomy digest), supervised ingestion loops with backoff and
-  heartbeats, structured logging. Poll mode (default) needs zero GCP
+  heartbeats, structured logging. Poll mode (default) needs no GCP runtime
   infrastructure; push mode is the hardened posture.
 - **Learning you can see and steer**: `aidedecamp memory list/forget/
   remember` (and the same in chat), a persisted autonomy matrix with
@@ -120,7 +127,8 @@ credentials needed for the suite:
   production-verified audit pipeline, staleness-refusing approvals,
   verified memory consolidation, and calendar bootstrap suppression.
 
-What's deliberately not built: invite accept/decline and rescheduling (each
+What's deliberately not built: a production-wired Google Chat app-auth
+credential (so live Cards v2 remain deferred), invite accept/decline and rescheduling (each
 needs its own decisions entry first — see `docs/decisions.md`, "Calendar
 write actions"), the Graphiti migration, the browser surface, and voice
 (design.md phases 4–7). **Nothing has run against a live account yet** —

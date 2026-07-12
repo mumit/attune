@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # `aidedecamp init` writes this file; every later CLI command must consume
+    # it without requiring the operator to source secrets into their shell.
+    from dotenv import load_dotenv
+
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "func"):

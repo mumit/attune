@@ -1,7 +1,8 @@
 # aidedecamp
 
 A self-learning workspace assistant over Gmail, Calendar, Google Chat, and Slack,
-running on Fuel iX and reachable by text and voice.
+running on Fuel iX. Slack is the supported first live text channel; voice is a
+future phase and Google Chat app authentication is not production-wired yet.
 
 This is the application package. The generic Fuel iX transport lives in the
 sibling [`bearer-openai`](../bearer-openai) package.
@@ -24,7 +25,8 @@ src/aidedecamp/
                   triage (plain fn, Task.CLASSIFY), scheduling conflict detection
                   (plain fn), the shared resume_workflow() Command(resume=...)
   memory/         substrate-agnostic MemoryStore, Mem0 impl, capture signals
-  connectors/     swappable Workspace access: managed MCP or direct OAuth
+  connectors/     Workspace boundary; direct OAuth is production-wired, while
+                  MCP currently requires an injected transport
   ingestion/      Gmail watch/history, Calendar watch/sync, Chat Workspace
                   Events + card-interaction decoding
   dispatcher.py   the routing seam: notification/event -> graph invocation,
@@ -37,7 +39,7 @@ src/aidedecamp/
   audit/          structured, queryable reason-for-action log (JsonlAuditLog)
 
 deploy/
-  mem0-compose.yml   local Qdrant + Mem0 for the memory substrate
+  compose.yml        canonical Qdrant + optional assistant stack
   republisher/       standalone Cloud Run service (own deps, own tests) —
                      the two webhook exceptions to "no inbound port": Calendar
                      push notifications and Chat card-interactions
@@ -51,12 +53,12 @@ routing, per-deployment config, the autonomy matrix, the LangGraph
 draft-and-approve graph, Mem0-backed memory, triage, Gmail + Calendar + Google
 Chat + Slack ingestion and channels (including Slack conversational Q&A and
 Google Chat's async card-interaction flow), Calendar scheduling-conflict
-detection (read-only by design), the audit log, and `runtime.py` wiring
+detection and approved tentative holds, the audit log, and `runtime.py` wiring
 everything into one process.
 
-Not built, deliberately: a Calendar write-action layer (no well-defined
-trigger yet, needs its own autonomy-ladder decision) and an actual live
-deployment (nothing has run against a real GCP project yet — see
+The conflict-triggered Calendar hold action is built at PROPOSE. Not built:
+invite responses, rescheduling, a production Chat app-auth credential, and an
+actual live deployment (nothing has run against a real account yet — see
 `../../docs/deployment.md`). See `../../CLAUDE.md`'s "Next steps" for the
 current, maintained list.
 

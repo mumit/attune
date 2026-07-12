@@ -134,19 +134,22 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         service.calendars().get(calendarId=settings.calendar_id).execute()
         return PASS, settings.calendar_id
 
-    def check_mem0() -> tuple[str, str]:
-        if not settings.mem0_url:
-            return SKIP, "ADC_MEM0_URL not set"
+    def check_qdrant() -> tuple[str, str]:
+        # Mem0 runs in-process. Its actual external dependency is Qdrant, not
+        # the obsolete standalone Mem0 REST endpoint represented by mem0_url.
+        host = os.environ.get("ADC_QDRANT_HOST", "localhost")
+        port = int(os.environ.get("ADC_QDRANT_PORT", "6333"))
+        url = f"http://{host}:{port}/readyz"
         import urllib.request
 
         try:
-            urllib.request.urlopen(settings.mem0_url, timeout=5)
+            urllib.request.urlopen(url, timeout=5)
         except Exception as exc:  # noqa: BLE001
             return FAIL, (
-                f"{settings.mem0_url} unreachable ({type(exc).__name__}) — "
-                "is the memory substrate running? (deploy/mem0-compose.yml)"
+                f"{host}:{port} unreachable ({type(exc).__name__}) — "
+                "start packages/aidedecamp/deploy/compose.yml"
             )
-        return PASS, settings.mem0_url
+        return PASS, f"{host}:{port}"
 
     def check_slack() -> tuple[str, str]:
         if not settings.slack_bot_token:
@@ -183,7 +186,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("google-credentials", check_google_credentials),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),
-        Check("mem0", check_mem0),
+        Check("qdrant", check_qdrant),
         Check("slack", check_slack),
         Check("pubsub", check_pubsub),
     ]

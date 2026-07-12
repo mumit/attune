@@ -3,6 +3,25 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Deployment documentation follows executable reality
+
+- CLI entrypoints now load the `.env` produced by `aidedecamp init`; the
+  wizard records the authorized mailbox principal and Google Cloud project.
+  Doctor checks Qdrant, the actual external memory dependency, instead of an
+  unused standalone Mem0 URL.
+- The direct OAuth scope set includes `calendar.events` because approved
+  conflict holds call `events.insert`. `gmail.compose` remains structurally
+  constrained to draft creation by the connector even though Google classifies
+  the scope as capable of sending. Chat user scopes are optional rather than
+  part of the Slack-first authorization.
+- Per-user OAuth is the only production-wired Workspace credential today.
+  Service-account domain-wide impersonation and the MCP transport are not
+  assembled by the runtime and are no longer presented as deployment options.
+- Slack is the supported first live channel. Stable proactive Google Chat
+  Cards v2 require app authentication (`chat.bot`) distinct from the user
+  credential used for Gmail, Calendar, polling, and Workspace Events. That
+  dual-credential path remains explicit follow-up work.
+
 ## 2026-07 — Graduation requires observed execution success
 
 - Track records now join each accepted human decision to its post-resume
