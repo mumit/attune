@@ -200,12 +200,15 @@ def _audit_file_with_decisions(tmp_path, decisions):
                 domain="mail", user_id="u1",
             )
         elif decision is not None:
+            events = [{
+                "event": "human_decision", "ts": NOW.isoformat(),
+                "decision": decision,
+            }]
+            if decision in ("approved", "edited"):
+                events.append({"event": "applied", "ts": NOW.isoformat()})
             log.record(
                 thread_id=tid, workflow="draft_approve",
-                events=[{
-                    "event": "human_decision", "ts": NOW.isoformat(),
-                    "decision": decision,
-                }],
+                events=events,
                 domain="mail", user_id="u1",
             )
     return log
@@ -222,6 +225,8 @@ def test_track_record_counts_by_outcome(tmp_path):
         2, 1, 1, 1,
     )
     assert record.total == 5  # the still-pending one doesn't count
+    assert record.applied == 3
+    assert record.apply_failed == 0
 
 
 def test_graduation_suggested_when_bar_met(tmp_path):
@@ -249,6 +254,26 @@ def test_no_suggestion_when_already_graduated(tmp_path):
     log = _audit_file_with_decisions(tmp_path, ["approved"] * 12)
     matrix = default_matrix().grant(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
     assert suggest_graduations(log, matrix, now=NOW) == []
+
+
+def test_no_suggestion_when_an_approved_apply_failed(tmp_path):
+    log = _audit_file_with_decisions(tmp_path, ["approved"] * 12)
+    tid = "gmail:t11:100"
+    path = tmp_path / "audit.jsonl"
+    lines = path.read_text().splitlines()
+    path.write_text(
+        "\n".join(
+            line.replace('"event": "applied"', '"event": "apply_failed"')
+            if tid in line
+            else line
+            for line in lines
+        )
+        + "\n"
+    )
+
+    assert suggest_graduations(log, default_matrix(), now=NOW) == []
+    record = track_records(log, now=NOW)[(Action.DRAFT_REPLY, Domain.MAIL)]
+    assert (record.applied, record.apply_failed) == (11, 1)
 
 
 # ---------------------------------------------------------------------------

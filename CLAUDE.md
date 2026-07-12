@@ -31,7 +31,7 @@ Dev setup and full test run:
 ```bash
 pip install -e "packages/bearer-openai[dev]"
 pip install -e "packages/aidedecamp[dev]"
-pytest        # 551 tests should pass as a baseline before you change anything
+pytest        # 565 tests should pass as a baseline before you change anything
               # (deploy/ is excluded from collection via norecursedirs in both
               # pytest.ini and pyproject.toml — deploy/republisher/ has its
               # own dependency set and its own separate test suite, run from
@@ -58,8 +58,9 @@ and `credentials.py`).
   written ONLY by
   explicit grant/revoke ops; `track_records`/
   `suggest_graduations` compute the earned-graduation record from the audit
-  log — suggestions are information only, never auto-applied, and
-  grant/revoke is CLI-only, never chat), `state.py`,
+  log and require successful apply evidence for every accepted proposal —
+  suggestions are information only, never auto-applied, and grant/revoke is
+  CLI-only, never chat), `state.py`,
   `draft_approve.py` (the canonical retrieve→draft→gate→approve→apply→capture
   loop; the apply node materializes approved/edited decisions through an
   injected `apply_fn` — `make_connector_apply_fn(connector)` is the production

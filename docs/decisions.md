@@ -3,6 +3,19 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Graduation requires observed execution success
+
+- Track records now join each accepted human decision to its post-resume
+  `applied`, `apply_failed`, or `apply_skipped` event by workflow thread id.
+  Graduation requires a successful apply for every approved or edited
+  proposal in the observation window, in addition to the existing volume,
+  approval-rate, and zero-rejection bars.
+- Missing apply evidence fails closed. Audit history created before apply
+  outcomes were recorded must age out and earn a complete observation window;
+  human intent alone is insufficient evidence for autonomous execution.
+- Rejected and ignored proposals do not require an apply event. They remain
+  judgment outcomes and retain their existing effect on graduation.
+
 ## 2026-07 — Channel actors authorize; the principal owns memory
 
 - Slack and Google Chat actor ids remain transport-specific authorization

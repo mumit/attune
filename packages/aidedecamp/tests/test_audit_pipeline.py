@@ -74,7 +74,9 @@ def _pipeline(tmp_path, decisions, *, actor="U-OWNER"):
     """Run N full proposal→resume cycles through the production path and
     return the (real, file-backed) audit log."""
     log = JsonlAuditLog(str(tmp_path / "audit.jsonl"))
-    graph = build_draft_approve_graph(client=_Client(), store=_Store())
+    graph = build_draft_approve_graph(
+        client=_Client(), store=_Store(), apply_fn=lambda state: "draft-1"
+    )
     for i, decision in enumerate(decisions):
         tid = f"gmail:t{i}:100"
         _dispatch(graph, log, tid)
@@ -108,6 +110,25 @@ def test_graduation_fires_on_real_approvals(tmp_path):
 
     assert len(suggestions) == 1
     assert "12/12" in suggestions[0].render()
+
+
+def test_graduation_does_not_fire_when_real_apply_fails(tmp_path):
+    log = JsonlAuditLog(str(tmp_path / "audit.jsonl"))
+    graph = build_draft_approve_graph(
+        client=_Client(),
+        store=_Store(),
+        apply_fn=lambda state: (_ for _ in ()).throw(RuntimeError("failed")),
+    )
+    for i in range(12):
+        tid = f"gmail:t{i}:100"
+        _dispatch(graph, log, tid)
+        resume_workflow(graph, tid, "approved", audit_log=log, user_id="u1")
+
+    from aidedecamp.orchestrator import default_matrix
+
+    assert suggest_graduations(log, default_matrix()) == []
+    record = track_records(log)[(Action.DRAFT_REPLY, Domain.MAIL)]
+    assert (record.applied, record.apply_failed) == (0, 12)
 
 
 def test_no_event_is_double_recorded(tmp_path):

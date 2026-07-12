@@ -196,6 +196,8 @@ class TrackRecord:
     edited: int = 0
     rejected: int = 0
     ignored: int = 0
+    applied: int = 0
+    apply_failed: int = 0
 
     @property
     def total(self) -> int:
@@ -206,7 +208,8 @@ class TrackRecord:
             f"{self.action.value} on {self.domain.value}: "
             f"{self.approved} approved unedited, {self.edited} edited, "
             f"{self.rejected} rejected, {self.ignored} ignored "
-            f"({self.total} total)"
+            f"({self.total} total); {self.applied} applied, "
+            f"{self.apply_failed} apply failures"
         )
 
 
@@ -235,7 +238,9 @@ def track_records(
 
     Attribution runs by workflow thread_id: the ``autonomy_gate`` event
     carries the (action, domain); ``human_decision`` carries what the human
-    did; ``approval_ignored`` (the pending-sweep) marks ignores.
+    did; ``approval_ignored`` (the pending-sweep) marks ignores. Successful
+    and failed/skipped apply events establish whether accepted proposals
+    actually reached the external system.
     ``auto_applied`` decisions are excluded — a track record measures human
     judgment on proposals, and autonomous runs aren't proposals.
     """
@@ -245,6 +250,7 @@ def track_records(
 
     scope: dict[str, tuple[Action, Domain]] = {}
     outcome: dict[str, str] = {}
+    execution: dict[str, str] = {}
     for entry in entries:
         if entry.event == "autonomy_gate":
             # The event's own "domain" field is absorbed into the entry-level
@@ -260,6 +266,10 @@ def track_records(
             outcome[entry.thread_id] = entry.fields.get("decision", "")
         elif entry.event == "approval_ignored":
             outcome.setdefault(entry.thread_id, "ignored")
+        elif entry.event == "applied":
+            execution[entry.thread_id] = "applied"
+        elif entry.event in ("apply_failed", "apply_skipped"):
+            execution.setdefault(entry.thread_id, "failed")
 
     records: dict[tuple[Action, Domain], TrackRecord] = {}
     for tid, key in scope.items():
@@ -268,6 +278,14 @@ def track_records(
             continue  # still pending, or auto_applied
         record = records.setdefault(key, TrackRecord(action=key[0], domain=key[1]))
         setattr(record, decision, getattr(record, decision) + 1)
+        if decision in ("approved", "edited"):
+            status = execution.get(tid)
+            if status == "applied":
+                record.applied += 1
+            else:
+                # Missing evidence is failure evidence for graduation. Older
+                # audit logs must earn a new, complete observation window.
+                record.apply_failed += 1
     return records
 
 
@@ -284,7 +302,8 @@ def suggest_graduations(
 
     Bar (per (action, domain), over the window): at least ``min_decisions``
     human decisions, an unedited-approval rate at or above
-    ``min_approval_rate``, zero rejections, and currently below ACT_NOTIFY.
+    ``min_approval_rate``, zero rejections, a successful apply for every
+    accepted proposal, and currently below ACT_NOTIFY.
     """
     suggestions: list[GraduationSuggestion] = []
     for key, record in track_records(
@@ -293,6 +312,9 @@ def suggest_graduations(
         if matrix.max_rung(*key) >= Rung.ACT_NOTIFY:
             continue
         if record.total < min_decisions or record.rejected > 0:
+            continue
+        accepted = record.approved + record.edited
+        if record.apply_failed > 0 or record.applied < accepted:
             continue
         if record.approved / record.total < min_approval_rate:
             continue

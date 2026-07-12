@@ -1331,8 +1331,11 @@ def test_weekly_autonomy_digest_posts_suggestions_to_channels():
             )
             log.record(
                 thread_id=tid, workflow="draft_approve",
-                events=[{"event": "human_decision", "ts": now,
-                         "decision": "approved"}],
+                events=[
+                    {"event": "human_decision", "ts": now,
+                     "decision": "approved"},
+                    {"event": "applied", "ts": now, "ref": f"d{i}"},
+                ],
                 domain="mail", user_id="u1",
             )
 

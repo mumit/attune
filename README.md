@@ -95,7 +95,7 @@ each step.
 
 Everything through the 2026-07 roadmap (`docs/roadmap.md`, all 23 build
 prompts — including the M6 stabilization milestone from an independent
-external review) is built and tested — 551 offline tests, no live
+external review) is built and tested — 565 offline tests, no live
 credentials needed for the suite:
 
 - **The full interaction loop**: triage (memory-informed) → draft → approval

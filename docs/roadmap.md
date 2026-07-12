@@ -23,6 +23,12 @@ prompts in `docs/build-prompts/`.*
 > grants off until the audit trail proves itself live. Next: deploy (Track A
 > in `docs/deployment.md`), hold the Phase-0 bar, then the design.md phase
 > 4–7 tail.
+>
+> **Post-M6 hardening is implemented** — seven follow-up architecture findings
+> now enforce private proactive destinations, durable cursor-consumed retries,
+> atomic single-use approvals, execution-safe compatibility checks, fail-closed
+> policy reloads, canonical cross-channel principal identity, and successful
+> apply evidence before graduation. The core suite now has 565 passing tests.
 
 ---
 
