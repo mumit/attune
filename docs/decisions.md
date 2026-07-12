@@ -3,6 +3,29 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Memory-informed triage (roadmap prompt 14)
+
+- **Closes the original triage entry's "fast-follow, not done" flag**:
+  design 1.2 lists "your past reactions" as a triage signal, and the system
+  now produces exactly that history (IGNORED sweeps, rejection captures,
+  consolidated preferences). `triage_thread` gains optional `store` +
+  `sender` (+ `user_id`): one narrow search (`"reactions to mail from
+  <sender>"`, limit 3) appends a `PAST REACTIONS` block to the
+  classification prompt — the user's own captured behavior, trusted
+  context, kept in the system prompt while the thread content stays in the
+  UNTRUSTED-framed user message. Still exactly one cheap CLASSIFY call.
+- **The failure defaults are untouchable and pinned by tests**: parse
+  failures still yield ROUTINE (memory input must never change that — a
+  dropped real email is worse than a spare draft), memory-retrieval
+  failures silently yield an empty block (garnish must never break
+  triage), and with no store the prompt is byte-identical to v1
+  (regression-pinned).
+- **The dispatcher's default path passes `app_ctx.store` + the thread's
+  `from_addr` + the deployment user_id** via a sentinel check — callers
+  that inject their own `triage_fn` keep the plain `(client, summary)`
+  contract unchanged, so every existing test and integration passed
+  unmodified.
+
 ## 2026-07 — Real consolidation pass + memory-quality regression set (roadmap prompt 13)
 
 - **`Mem0Store.consolidate` is no longer a no-op.** The scheduled deep pass

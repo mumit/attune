@@ -66,6 +66,11 @@ from .orchestrator.scheduling import ConflictResult, detect_conflict
 from .orchestrator.triage import Priority, TriageResult, triage_thread
 
 
+# Sentinel marking "use the real memory-informed triage": callers that inject
+# their own triage_fn keep the plain (client, summary) contract unchanged.
+_default_triage = triage_thread
+
+
 def handle_gmail_notification(
     app_ctx: AppContext,
     notification: dict[str, Any],
@@ -113,7 +118,7 @@ def handle_gmail_notification(
     :class:`~ingestion.HistoryExpired` when the stored historyId has expired;
     the caller must re-baseline the watch.
     """
-    triage_fn = triage_fn or triage_thread
+    triage_fn = triage_fn or _default_triage
     changes = process_notification(gmail_service, watch_state, notification)
 
     submitted: list[str] = []
@@ -148,7 +153,13 @@ def handle_gmail_notification(
             f"From: {thread.from_addr}\nSubject: {thread.subject}\n\n{thread.body}"
         )
 
-        triage = triage_fn(app_ctx.client, incoming_summary)
+        if triage_fn is _default_triage:
+            triage = triage_thread(
+                app_ctx.client, incoming_summary,
+                store=app_ctx.store, sender=thread.from_addr, user_id=user_id,
+            )
+        else:
+            triage = triage_fn(app_ctx.client, incoming_summary)
         if triage.priority == Priority.NOISE:
             logger.info("gmail thread %s triaged NOISE — skipped", gmail_tid)
             if audit_log is not None:

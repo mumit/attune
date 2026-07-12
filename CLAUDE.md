@@ -74,6 +74,9 @@ and `credentials.py`).
   (plain function, not a graph — one `Task.CLASSIFY` call deciding
   URGENT/ROUTINE/NOISE; see `dispatcher.py` below for where it gates drafting),
   `scheduling.py` (plain function — `detect_conflict`, read-only overlap check;
+  triage v2 is memory-informed: the dispatcher's default path feeds it the
+  store + sender so past reactions inform the call — parse failures still
+  default ROUTINE, never NOISE;
   no hold-creation/accept-decline action layer built, deliberately — see
   `docs/decisions.md`).
 - `memory/` — substrate-agnostic `MemoryStore` (`base.py`), Mem0 impl

@@ -469,6 +469,36 @@ def test_gmail_notification_audit_skipped_for_failed_thread_fetch():
 # ---------------------------------------------------------------------------
 
 
+def test_default_triage_gets_store_and_sender():
+    """The default triage path is memory-informed (prompt 14): the store is
+    searched for reactions to this thread's sender, under the deployment's
+    user_id. Injected triage_fns keep the plain contract."""
+
+    class _RecordingStore:
+        def __init__(self):
+            self.queries: list[tuple] = []
+
+        def search(self, query, *, user_id, limit=5, min_score=None):
+            self.queries.append((query, user_id))
+            return []
+
+        def add(self, *a, **kw):
+            return []
+
+    store = _RecordingStore()
+    app = _fake_app_ctx(graph=_FakeGraph(), store=store)
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "203"},
+        gmail_service=_FakeGmail(["t1"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=_FakeConnector({"t1": _FakeThread("t1", from_addr="vendor@x.com")}),
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+    )
+
+    assert ("reactions to mail from vendor@x.com", "me@example.com") in store.queries
+
+
 def test_noise_thread_skips_draft_and_post_approval():
     graph = _FakeGraph()
     app = _fake_app_ctx(graph=graph)
