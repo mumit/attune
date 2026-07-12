@@ -36,3 +36,30 @@ def test_no_data_dir_keeps_cwd_defaults():
     assert s.audit_log_path == "./audit.log.jsonl"
     assert s.checkpointer_db_path == "./aidedecamp.db"
     assert s.pending_state_path == "./pending_approvals.json"
+
+
+def test_owner_private_slack_dm_needs_no_visibility_ack():
+    Settings.from_env({"ADC_SLACK_CHANNEL": "D0123"}).validate_proactive_destinations()
+
+
+def test_shared_or_unverifiable_destinations_require_ack():
+    for env in (
+        {"ADC_SLACK_CHANNEL": "C0123"},
+        {"ADC_CHAT_SPACE": "spaces/AAAA"},
+    ):
+        s = Settings.from_env(env)
+        try:
+            s.validate_proactive_destinations()
+        except ValueError as exc:
+            assert "ADC_ACK_DESTINATION_VISIBILITY=1" in str(exc)
+        else:
+            raise AssertionError("destination should require visibility acknowledgment")
+
+
+def test_visibility_ack_allows_explicit_shared_destination():
+    s = Settings.from_env({
+        "ADC_SLACK_CHANNEL": "C0123",
+        "ADC_CHAT_SPACE": "spaces/AAAA",
+        "ADC_ACK_DESTINATION_VISIBILITY": "1",
+    })
+    s.validate_proactive_destinations()

@@ -94,6 +94,13 @@ def run_init(
         if chat_space
         else ""
     )
+    visibility_ack = ""
+    if (slack_channel and not slack_channel.startswith("D")) or chat_space:
+        visibility_ack = ask_default(
+            "I verified every proactive channel/space is owner-only, or accept "
+            "that its members can read briefs and drafts (yes/no)",
+            "no",
+        )
 
     tz = ask_default("Timezone (IANA name)", "UTC")
     brief_time = ask_default("Morning brief time (HH:MM, local)", "07:30")
@@ -139,6 +146,8 @@ def run_init(
             lines.append(f"ADC_CHAT_ALLOWED_USERS={chat_allowed}")
     else:
         lines.append("# ADC_CHAT_SPACE=")
+    if visibility_ack.strip().lower() in {"y", "yes", "1", "true"}:
+        lines.append("ADC_ACK_DESTINATION_VISIBILITY=1")
     lines += [
         "",
         "# --- cadence ---",

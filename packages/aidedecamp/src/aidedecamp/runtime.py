@@ -885,6 +885,7 @@ def build_runtime(
       present in ``settings``; a deployment need not run both channels
     """
     settings = settings or Settings.from_env()
+    settings.validate_proactive_destinations()
 
     # Credentials + connector are resolved BEFORE the app so the graph's apply
     # step can be bound to the real connector (approved drafts materialize as

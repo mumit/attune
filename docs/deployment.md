@@ -486,8 +486,10 @@ ADC_CALENDAR_ID=primary
 ```
 SLACK_APP_TOKEN=<from Secret Manager>       # xapp-...
 SLACK_BOT_TOKEN=<from Secret Manager>       # xoxb-...
-ADC_SLACK_CHANNEL=C0123456789               # where briefs/approvals post proactively
+ADC_SLACK_CHANNEL=D0123456789               # owner-only DM preferred
 ADC_CHAT_SPACE=spaces/AAAAxxxxxxx           # where Chat briefs/approvals post proactively
+# Required for Chat, or for Slack C/G channels, after checking membership.
+ADC_ACK_DESTINATION_VISIBILITY=1
 ```
 
 Leave `ADC_SLACK_CHANNEL`/`ADC_CHAT_SPACE` unset to run without that
@@ -510,8 +512,9 @@ when its config is present (see `runtime.py`).
    the filter in `channels/slack.py`'s registered handler).
 5. **Interactivity & Shortcuts**: enable it (Socket Mode delivers these too;
    no Request URL needed).
-6. Invite the bot to `ADC_SLACK_CHANNEL` if it's a channel (not needed for
-   DMs).
+6. Prefer the owner's DM conversation (`D...`) for `ADC_SLACK_CHANNEL`. If a
+   channel is used, verify membership and set
+   `ADC_ACK_DESTINATION_VISIBILITY=1`; allowlists stop actions, not reading.
 
 ---
 

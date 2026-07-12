@@ -231,6 +231,8 @@ def _settings(**overrides):
         "ADC_AUDIT_LOG_PATH": "",
         # allowlist the fixture actors (deny-by-default since prompt 17)
         "ADC_CHAT_ALLOWED_USERS": "users/U1,users/1,users/tester",
+        # Tests use synthetic channel/space ids; acknowledge their visibility.
+        "ADC_ACK_DESTINATION_VISIBILITY": "1",
     }
     base.update(overrides)
     return Settings.from_env(base)

@@ -230,6 +230,10 @@ safety posture; violating one is a bug, not a shortcut.
    checks the actor against `ADC_SLACK_ALLOWED_USERS`/
    `ADC_CHAT_ALLOWED_USERS` — **empty means deny-all**. Don't add a surface
    that skips this check, and never add an allow-all wildcard.
+8. **Proactive destination visibility is explicit.** Owner-only Slack DMs are
+   safe by construction. Slack channels and Google Chat spaces require
+   `ADC_ACK_DESTINATION_VISIBILITY=1` after membership is verified; allowlists
+   prevent actions, not reading.
 
 ## Conventions
 

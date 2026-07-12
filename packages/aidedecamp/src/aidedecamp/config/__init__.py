@@ -21,6 +21,10 @@ def _id_set(raw: str | None) -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _is_true(raw: str | None) -> bool:
+    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Deployment(str, Enum):
     PERSONAL = "personal"
     TELUS = "telus"
@@ -135,6 +139,10 @@ class Settings:
     # an unconfigured deployment refuses every actor, fail-safe.
     slack_allowed_users: frozenset[str] = frozenset()
     chat_allowed_users: frozenset[str] = frozenset()
+    # Slack DM ids (D...) are owner-private by construction. Slack channels
+    # and Google Chat space names do not prove who can read proactive posts;
+    # using either requires this explicit operator acknowledgement.
+    destination_visibility_acknowledged: bool = False
     # Where the assistant proactively posts (briefs, approval cards) absent a
     # live event context to reply into.
     slack_default_channel: str | None = None
@@ -206,6 +214,25 @@ class Settings:
             user_id=e.get("ADC_USER_ID", "me"),
             slack_allowed_users=_id_set(e.get("ADC_SLACK_ALLOWED_USERS")),
             chat_allowed_users=_id_set(e.get("ADC_CHAT_ALLOWED_USERS")),
+            destination_visibility_acknowledged=_is_true(
+                e.get("ADC_ACK_DESTINATION_VISIBILITY")
+            ),
             slack_default_channel=e.get("ADC_SLACK_CHANNEL"),
             chat_default_space=e.get("ADC_CHAT_SPACE"),
         )
+
+    def validate_proactive_destinations(self) -> None:
+        """Fail closed when proactive posts may be visible to other people."""
+        slack_needs_ack = bool(
+            self.slack_default_channel
+            and not self.slack_default_channel.startswith("D")
+        )
+        chat_needs_ack = bool(self.chat_default_space)
+        if (slack_needs_ack or chat_needs_ack) and not (
+            self.destination_visibility_acknowledged
+        ):
+            raise ValueError(
+                "proactive destination visibility is unverified; use an owner-only "
+                "Slack DM (D...) or, after checking channel/space membership, set "
+                "ADC_ACK_DESTINATION_VISIBILITY=1"
+            )

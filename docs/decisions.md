@@ -3,6 +3,18 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Proactive destination confidentiality
+
+- Human allowlists authorize commands and clicks; they do not hide a brief or
+  approval card from other members of its destination. Slack DM conversation
+  ids (`D...`) are accepted as owner-private. Slack channel ids and all Google
+  Chat space names require `ADC_ACK_DESTINATION_VISIBILITY=1`, set only after
+  checking membership or deliberately accepting the disclosure.
+- Validation runs before runtime assembly, so an unsafe destination fails before
+  credentials, channels, or ingestion loops start. The setup wizard and
+  deployment guide make the acknowledgment explicit rather than silently
+  treating an allowlist as a confidentiality boundary.
+
 ## 2026-07 — Calendar bootstrap suppression + hold-offer caps (roadmap prompt 23, review finding #8)
 
 - **Rebaseline without dispatching.** A missing or 410-expired sync token
