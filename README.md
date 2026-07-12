@@ -93,9 +93,10 @@ each step.
 
 ## Status
 
-Everything through the 2026-07 roadmap (`docs/roadmap.md`, all 16 build
-prompts) is built and tested — 504 offline tests, no live credentials needed
-for the suite:
+Everything through the 2026-07 roadmap (`docs/roadmap.md`, all 23 build
+prompts — including the M6 stabilization milestone from an independent
+external review) is built and tested — 551 offline tests, no live
+credentials needed for the suite:
 
 - **The full interaction loop**: triage (memory-informed) → draft → approval
   card (Slack + Google Chat) → approve/edit/reject — approving creates the
@@ -113,6 +114,11 @@ for the suite:
   regression set (design §2.4).
 - **Setup in ~15 minutes**: `aidedecamp init` wizard, `doctor` validation,
   the compose stack, and the quickstart above.
+- **Hardened for real accounts (M6)**: deny-by-default human allowlists on
+  every channel surface, email-safe ingestion and reply envelopes, live
+  policy (revocations bite without a restart) with real rung semantics, a
+  production-verified audit pipeline, staleness-refusing approvals,
+  verified memory consolidation, and calendar bootstrap suppression.
 
 What's deliberately not built: invite accept/decline and rescheduling (each
 needs its own decisions entry first — see `docs/decisions.md`, "Calendar

@@ -31,7 +31,7 @@ Dev setup and full test run:
 ```bash
 pip install -e "packages/bearer-openai[dev]"
 pip install -e "packages/aidedecamp[dev]"
-pytest        # 504 tests should pass as a baseline before you change anything
+pytest        # 551 tests should pass as a baseline before you change anything
               # (deploy/ is excluded from collection via norecursedirs in both
               # pytest.ini and pyproject.toml — deploy/republisher/ has its
               # own dependency set and its own separate test suite, run from

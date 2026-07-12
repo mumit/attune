@@ -13,11 +13,16 @@ prompts in `docs/build-prompts/`.*
 > **Then an independent review (GPT-5.6 Sol) found 8 cross-cutting defects**
 > the prompt-by-prompt strategy missed — production-path issues at the joints
 > between prompts (identity, rung semantics, the audit pipeline, email
-> envelopes). All 8 verified against this codebase. They are **M6 below
-> (prompts 17–23), and nothing beyond read-only + PROPOSE may run against a
-> real account until M6 lands.** After that: deploy (Track A in
-> `docs/deployment.md`), hold the Phase-0 bar, then the design.md phase 4–7
-> tail.
+> envelopes). All 8 verified against this codebase and mapped to **M6 below
+> (prompts 17–23)**.
+>
+> **M6 is implemented** — one commit per prompt, 551 tests passing, all 8
+> findings closed, decisions recorded per prompt. The
+> no-write-actions-before-M6 rule is therefore lifted; the shadow-deployment
+> sequence still applies: read-only first, then PROPOSE, and keep ACT_NOTIFY
+> grants off until the audit trail proves itself live. Next: deploy (Track A
+> in `docs/deployment.md`), hold the Phase-0 bar, then the design.md phase
+> 4–7 tail.
 
 ---
 
