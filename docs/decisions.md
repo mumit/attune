@@ -3,6 +3,33 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — Principal allowlists: authenticate the human (roadmap prompt 17, review finding #1)
+
+- **New non-negotiable rule 7** (numbered after the existing six so no
+  cross-reference shifts): every human entry point checks the actor against
+  `ADC_SLACK_ALLOWED_USERS` / `ADC_CHAT_ALLOWED_USERS`. Transport signatures
+  (Slack request signing, Google's Chat webhook JWT) prove the *platform*
+  called — they say nothing about which person typed or clicked. Before
+  this, any workspace member who DM'd the bot got the owner's brief, could
+  browse/teach/delete the owner's memories, and could approve the owner's
+  drafts, all under `settings.user_id`.
+- **Empty allowlist = deny-all**, fail-safe. There is deliberately no
+  allow-all wildcard. The refusal message echoes the refused actor's *own*
+  id (it's theirs; no owner data) so self-allowlisting is one copy-paste;
+  `aidedecamp init` asks for the ids when a channel is configured.
+- **Enforcement points**: Slack DM handler, approve/reject/edit action
+  handlers, and the edit-modal `view_submission` (an unauthorized click
+  gets an ephemeral refusal and does NOT replace the card — the owner can
+  still act on it); Chat message senders (`handle_chat_message
+  allowed_senders`) and card-click actors (`decode_chat_interaction` now
+  carries `actor`; `handle_chat_interaction allowed_actors`). `None` means
+  no-enforcement for direct/test use; the runtime always passes the
+  configured set. Refusals are logged (actor id only) and audited under
+  `"ops"` as `unauthorized_actor`.
+- **Actor now rides the resume path** (`SlackChannel._resume(..., actor=)`,
+  the runtime's `_bound_resume`) so prompt 20 can stamp who decided into
+  the audit trail.
+
 ## 2026-07 — Calendar write actions: the design decision (roadmap prompt 16, phase 1)
 
 Written *before* the implementation, per the build prompt's own rule: phase 2

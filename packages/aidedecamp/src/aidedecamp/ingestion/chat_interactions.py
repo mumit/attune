@@ -51,6 +51,7 @@ class ChatInteraction:
     thread_id: str
     decision: str  # "approved" | "rejected" | "edited"
     text: str | None = None  # the edited draft; only set for "edited"
+    actor: str = ""  # who clicked (users/N) — the allowlist checks this
 
 
 def decode_chat_interaction(event: dict[str, Any]) -> ChatInteraction | None:
@@ -84,7 +85,10 @@ def decode_chat_interaction(event: dict[str, Any]) -> ChatInteraction | None:
         if not text:
             return None
 
-    return ChatInteraction(thread_id=thread_id, decision=decision, text=text)
+    actor = (event.get("user") or {}).get("name", "")
+    return ChatInteraction(
+        thread_id=thread_id, decision=decision, text=text, actor=actor
+    )
 
 
 def _form_input(event: dict[str, Any], field: str) -> str | None:

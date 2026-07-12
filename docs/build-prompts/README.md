@@ -39,7 +39,7 @@ a milestone; cross-milestone dependencies are noted at the top of each file.
 
 House rules every prompt inherits (do not skip):
 
-1. Read `CLAUDE.md` and `docs/decisions.md` before changing anything; the six
+1. Read `CLAUDE.md` and `docs/decisions.md` before changing anything; the
    non-negotiable rules are inviolable.
 2. `pytest` must pass before you start (312+ tests) and after you finish, with
    new offline tests (injected fakes, no credentials/network) for everything

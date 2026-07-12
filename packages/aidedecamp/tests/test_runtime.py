@@ -229,6 +229,8 @@ def _settings(**overrides):
         "ADC_CONNECTOR_MODE": "mcp",
         "ADC_MEM0_URL": "",
         "ADC_AUDIT_LOG_PATH": "",
+        # allowlist the fixture actors (deny-by-default since prompt 17)
+        "ADC_CHAT_ALLOWED_USERS": "users/U1,users/1,users/tester",
     }
     base.update(overrides)
     return Settings.from_env(base)
@@ -848,6 +850,7 @@ def test_renew_calendar_watch_uses_settings_calendar_id_and_address():
 def _interaction_click(fn: str, thread_id: str = "t-1") -> dict:
     return {
         "type": "CARD_CLICKED",
+        "user": {"name": "users/tester"},
         "action": {
             "actionMethodName": fn,
             "parameters": [{"key": "thread_id", "value": thread_id}],

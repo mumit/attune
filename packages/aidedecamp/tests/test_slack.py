@@ -96,17 +96,27 @@ def test_approval_blocks_carry_thread_id():
 
 # --- button -> resume routing -------------------------------------------
 
+AUTHORIZED = {"U-OWNER"}
+
+
+def _body(thread_id, actor="U-OWNER"):
+    return {"actions": [{"value": thread_id}], "user": {"id": actor}}
+
+
 def _make_channel():
     resumes = []
-    ch = SlackChannel(resume_fn=lambda tid, decision, text: resumes.append(
-        (tid, decision, text)), app=FakeApp())
+    ch = SlackChannel(
+        resume_fn=lambda tid, decision, text, **kw: resumes.append(
+            (tid, decision, text)),
+        app=FakeApp(), allowed_users=AUTHORIZED,
+    )
     return ch, resumes
 
 
 def test_approve_button_resumes_graph_approved():
     ch, resumes = _make_channel()
     ack_called = []
-    body = {"actions": [{"value": "t-7"}]}
+    body = _body("t-7")
     ch._app.handlers[ACTION_APPROVE](
         ack=lambda: ack_called.append(True), body=body, respond=lambda **k: None
     )
@@ -116,7 +126,7 @@ def test_approve_button_resumes_graph_approved():
 
 def test_reject_button_resumes_graph_rejected():
     ch, resumes = _make_channel()
-    body = {"actions": [{"value": "t-9"}]}
+    body = _body("t-9")
     ch._app.handlers[ACTION_REJECT](
         ack=lambda: None, body=body, respond=lambda **k: None
     )
@@ -129,11 +139,12 @@ def test_approve_confirmation_is_honest_about_created_draft():
     and never the old false '— sending.' claim (rule 4: nothing can send)."""
     responded = []
     ch = SlackChannel(
-        resume_fn=lambda tid, decision, text: {"applied_ref": "d-1"}, app=FakeApp()
+        resume_fn=lambda tid, decision, text, **kw: {"applied_ref": "d-1"},
+        app=FakeApp(), allowed_users=AUTHORIZED,
     )
     ch._app.handlers[ACTION_APPROVE](
         ack=lambda: None,
-        body={"actions": [{"value": "t-7"}]},
+        body=_body("t-7"),
         respond=lambda **k: responded.append(k),
     )
     assert responded[0]["text"] == "✅ Approved — draft created in Gmail."
@@ -142,11 +153,12 @@ def test_approve_confirmation_is_honest_about_created_draft():
 def test_approve_confirmation_plain_when_nothing_materialized():
     responded = []
     ch = SlackChannel(
-        resume_fn=lambda tid, decision, text: {"applied_ref": None}, app=FakeApp()
+        resume_fn=lambda tid, decision, text, **kw: {"applied_ref": None},
+        app=FakeApp(), allowed_users=AUTHORIZED,
     )
     ch._app.handlers[ACTION_APPROVE](
         ack=lambda: None,
-        body={"actions": [{"value": "t-7"}]},
+        body=_body("t-7"),
         respond=lambda **k: responded.append(k),
     )
     assert responded[0]["text"] == "✅ Approved."
@@ -158,13 +170,15 @@ def test_edit_button_opens_prefilled_modal():
     itself; thread_id + channel ride in private_metadata (prompt 02)."""
     import json
 
-    ch = SlackChannel(resume_fn=lambda *a: None, app=FakeApp())
+    ch = SlackChannel(resume_fn=lambda *a, **kw: None, app=FakeApp(),
+                      allowed_users=AUTHORIZED)
     client = FakeWebClient()
     blocks = approval_blocks(
         thread_id="t-7", domain="mail", proposed_draft="Original draft text."
     )
     body = {
         "actions": [{"value": "t-7"}],
+        "user": {"id": "U-OWNER"},
         "trigger_id": "trig-1",
         "channel": {"id": "C123"},
         "message": {"blocks": blocks},
@@ -184,9 +198,9 @@ def test_edit_button_opens_prefilled_modal():
 def test_view_submission_resumes_edited_and_confirms():
     resumes = []
     ch = SlackChannel(
-        resume_fn=lambda tid, decision, text: resumes.append((tid, decision, text))
-        or {"applied_ref": "d-3"},
-        app=FakeApp(),
+        resume_fn=lambda tid, decision, text, **kw: resumes.append(
+            (tid, decision, text)) or {"applied_ref": "d-3"},
+        app=FakeApp(), allowed_users=AUTHORIZED,
     )
     client = FakeWebClient()
     view = edit_modal_view(
@@ -197,7 +211,9 @@ def test_view_submission_resumes_edited_and_confirms():
         "values": {"adc_edit_block": {"adc_edit_input": {"value": "My edit."}}}
     }
     ch._app.view_handlers[ACTION_EDIT_SUBMIT](
-        ack=lambda: None, body={"view": view}, client=client
+        ack=lambda: None,
+        body={"view": view, "user": {"id": "U-OWNER"}},
+        client=client,
     )
 
     assert resumes == [("t-7", "edited", "My edit.")]
@@ -209,11 +225,14 @@ def test_view_submission_resumes_edited_and_confirms():
 def test_view_submission_malformed_is_ignored():
     resumes = []
     ch = SlackChannel(
-        resume_fn=lambda *a: resumes.append(a), app=FakeApp()
+        resume_fn=lambda *a, **kw: resumes.append(a), app=FakeApp(),
+        allowed_users=AUTHORIZED,
     )
     client = FakeWebClient()
     ch._app.view_handlers[ACTION_EDIT_SUBMIT](
-        ack=lambda: None, body={"view": {"private_metadata": "not json{"}},
+        ack=lambda: None,
+        body={"view": {"private_metadata": "not json{"},
+              "user": {"id": "U-OWNER"}},
         client=client,
     )
     assert resumes == []
@@ -232,12 +251,12 @@ def test_extract_draft_from_blocks_round_trip():
 def test_approve_confirmation_admits_apply_failure():
     responded = []
     ch = SlackChannel(
-        resume_fn=lambda tid, decision, text: {"apply_error": "ConnectionError"},
-        app=FakeApp(),
+        resume_fn=lambda tid, decision, text, **kw: {"apply_error": "ConnectionError"},
+        app=FakeApp(), allowed_users=AUTHORIZED,
     )
     ch._app.handlers[ACTION_APPROVE](
         ack=lambda: None,
-        body={"actions": [{"value": "t-7"}]},
+        body=_body("t-7"),
         respond=lambda **k: responded.append(k),
     )
     assert "failed" in responded[0]["text"]
@@ -257,7 +276,7 @@ def test_message_handler_calls_message_fn_for_dm():
     calls = []
     app = FakeApp()
     ch = SlackChannel(
-        app=app,
+        app=app, allowed_users={"U1"},
         message_fn=lambda text, user, post_text: calls.append((text, user, post_text)),
     )
     say, say_calls = _say_recorder()
@@ -319,9 +338,80 @@ def test_message_handler_ignores_bot_message_subtype():
     assert calls == []
 
 
+def test_unauthorized_dm_refused_with_self_identifying_message():
+    """Deny-by-default (prompt 17): a stranger's DM is refused with their
+    own id so the owner can allowlist them — and message_fn never runs."""
+    calls = []
+    app = FakeApp()
+    SlackChannel(
+        app=app, allowed_users={"U-OWNER"},
+        message_fn=lambda text, user, post_text: calls.append(text),
+    )
+    say, say_calls = _say_recorder()
+
+    app.event_handlers["message"](event=_im_event(user="U-STRANGER"), say=say)
+
+    assert calls == []
+    assert "U-STRANGER" in say_calls[0]["text"]
+    assert "ADC_SLACK_ALLOWED_USERS" in say_calls[0]["text"]
+
+
+def test_empty_allowlist_denies_everyone():
+    calls = []
+    unauthorized = []
+    app = FakeApp()
+    SlackChannel(
+        app=app,  # no allowed_users at all
+        message_fn=lambda text, user, post_text: calls.append(text),
+        on_unauthorized=lambda actor, surface: unauthorized.append(
+            (actor, surface)),
+    )
+    say, _ = _say_recorder()
+    app.event_handlers["message"](event=_im_event(user="U1"), say=say)
+    assert calls == []
+    assert unauthorized == [("U1", "dm")]
+
+
+def test_unauthorized_click_does_not_resume():
+    resumes = []
+    responded = []
+    ch = SlackChannel(
+        resume_fn=lambda *a, **kw: resumes.append(a),
+        app=FakeApp(), allowed_users={"U-OWNER"},
+    )
+    for action in (ACTION_APPROVE, ACTION_REJECT):
+        ch._app.handlers[action](
+            ack=lambda: None,
+            body=_body("t-7", actor="U-STRANGER"),
+            respond=lambda **k: responded.append(k),
+        )
+    assert resumes == []
+    # the card is NOT replaced (replace_original=False) — the owner can
+    # still act on it
+    assert all(k.get("replace_original") is False for k in responded)
+
+
+def test_unauthorized_edit_submit_does_not_resume():
+    resumes = []
+    ch = SlackChannel(
+        resume_fn=lambda *a, **kw: resumes.append(a),
+        app=FakeApp(), allowed_users={"U-OWNER"},
+    )
+    view = edit_modal_view(thread_id="t-7", channel_id="C1", proposed_draft="x")
+    view["state"] = {
+        "values": {"adc_edit_block": {"adc_edit_input": {"value": "hijack"}}}
+    }
+    ch._app.view_handlers[ACTION_EDIT_SUBMIT](
+        ack=lambda: None,
+        body={"view": view, "user": {"id": "U-STRANGER"}},
+        client=FakeWebClient(),
+    )
+    assert resumes == []
+
+
 def test_unconfigured_message_fn_raises_on_dm():
     app = FakeApp()
-    ch = SlackChannel(app=app)  # no message_fn injected
+    ch = SlackChannel(app=app, allowed_users={"U1"})  # no message_fn injected
     say, _ = _say_recorder()
 
     import pytest

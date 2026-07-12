@@ -77,7 +77,23 @@ def run_init(
         if slack_bot
         else ""
     )
+    slack_allowed = (
+        ask_default(
+            "Your Slack user ID (allowlist — only these IDs may command the "
+            "assistant; comma-separated)",
+            "",
+        )
+        if slack_bot
+        else ""
+    )
     chat_space = ask_default("Google Chat space (spaces/..., blank to skip)", "")
+    chat_allowed = (
+        ask_default(
+            "Your Chat user ID (users/..., allowlist; comma-separated)", ""
+        )
+        if chat_space
+        else ""
+    )
 
     tz = ask_default("Timezone (IANA name)", "UTC")
     brief_time = ask_default("Morning brief time (HH:MM, local)", "07:30")
@@ -113,10 +129,14 @@ def run_init(
             lines.append(f"SLACK_APP_TOKEN={slack_app}")
         if slack_channel:
             lines.append(f"ADC_SLACK_CHANNEL={slack_channel}")
+        if slack_allowed:
+            lines.append(f"ADC_SLACK_ALLOWED_USERS={slack_allowed}")
     else:
         lines.append("# SLACK_BOT_TOKEN= / SLACK_APP_TOKEN= / ADC_SLACK_CHANNEL=")
     if chat_space:
         lines.append(f"ADC_CHAT_SPACE={chat_space}")
+        if chat_allowed:
+            lines.append(f"ADC_CHAT_ALLOWED_USERS={chat_allowed}")
     else:
         lines.append("# ADC_CHAT_SPACE=")
     lines += [

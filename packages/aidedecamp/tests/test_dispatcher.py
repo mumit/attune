@@ -1011,6 +1011,75 @@ def test_chat_interaction_reject_resumes_and_posts_confirmation():
     assert "Rejected" in replies[0]
 
 
+def test_chat_interaction_unauthorized_actor_refused():
+    """Prompt 17: webhook verification proves Google called; the allowlist
+    proves WHO clicked. A non-allowlisted actor cannot resume anything."""
+    resumes = []
+    replies = []
+    audit = _FakeAuditLog()
+
+    event = _click("adc_approve", "t-42")
+    event["user"] = {"name": "users/stranger"}
+    handle_chat_interaction(
+        _fake_app_ctx(),
+        event,
+        resume_fn=lambda tid, decision, text: resumes.append(tid),
+        post_text=replies.append,
+        user_id="me@example.com",
+        audit_log=audit,
+        allowed_actors=frozenset({"users/owner"}),
+    )
+
+    assert resumes == []
+    assert "users/stranger" in replies[0]
+    assert "ADC_CHAT_ALLOWED_USERS" in replies[0]
+    assert audit.records[0]["events"][0]["event"] == "unauthorized_actor"
+
+
+def test_chat_interaction_empty_allowlist_denies_all():
+    resumes = []
+    event = _click("adc_approve", "t-1")
+    event["user"] = {"name": "users/anyone"}
+    handle_chat_interaction(
+        _fake_app_ctx(), event,
+        resume_fn=lambda *a: resumes.append(a),
+        post_text=lambda t: None,
+        user_id="me@example.com",
+        allowed_actors=frozenset(),
+    )
+    assert resumes == []
+
+
+def test_chat_interaction_authorized_actor_passes():
+    resumes = []
+    event = _click("adc_approve", "t-42")
+    event["user"] = {"name": "users/owner"}
+    handle_chat_interaction(
+        _fake_app_ctx(), event,
+        resume_fn=lambda tid, decision, text: resumes.append(tid) or {},
+        post_text=lambda t: None,
+        user_id="me@example.com",
+        allowed_actors=frozenset({"users/owner"}),
+    )
+    assert resumes == ["t-42"]
+
+
+def test_chat_message_unauthorized_sender_refused():
+    replies = []
+    client = _FakeClient()
+    app = _fake_app_ctx(client=client)
+
+    handle_chat_message(
+        app, _chat_event("what do you know about me?"),
+        post_text=replies.append, user_id="me@example.com",
+        allowed_senders=frozenset({"users/owner"}),
+    )
+
+    # no memory access, no model call — just the refusal
+    assert client.calls == []
+    assert "ADC_CHAT_ALLOWED_USERS" in replies[0]
+
+
 def test_chat_interaction_edit_submit_resumes_with_text():
     """The edit dialog's submit rides the same async path as approve/reject
     (prompt 02) — resumed as 'edited' with the user's text, so

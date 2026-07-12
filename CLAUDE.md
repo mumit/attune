@@ -218,6 +218,12 @@ safety posture; violating one is a bug, not a shortcut.
 6. **Secrets from env / secrets store, never in code or logs.** A rejected Fuel
    iX token raises `TokenRejectedError` ("needs manual rotation"); don't swallow
    it into a retry loop.
+7. **Authenticate the human, not just the transport.** Slack/Google sign
+   their webhooks; that proves the platform called, never which person
+   acted. Every human entry point (DMs, card clicks, memory commands)
+   checks the actor against `ADC_SLACK_ALLOWED_USERS`/
+   `ADC_CHAT_ALLOWED_USERS` — **empty means deny-all**. Don't add a surface
+   that skips this check, and never add an allow-all wildcard.
 
 ## Conventions
 

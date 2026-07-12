@@ -387,6 +387,7 @@ def handle_chat_interaction(
     post_text: Callable[[str], None],
     user_id: str,
     audit_log: AuditLog | None = None,
+    allowed_actors: frozenset[str] | set[str] | None = None,
 ) -> None:
     """Process a decoded Chat card-click event (approve/reject/edit-submit).
 
@@ -405,6 +406,31 @@ def handle_chat_interaction(
     """
     interaction = decode_chat_interaction(event)
     if interaction is None:
+        return
+
+    # Authenticate the human, not just the transport (review finding #1):
+    # webhook verification proves Google Chat called; only this list proves
+    # WHO clicked. None = no enforcement (direct/test use); the runtime
+    # always passes the configured set, and an empty set denies everyone.
+    if allowed_actors is not None and interaction.actor not in allowed_actors:
+        logger.warning(
+            "chat: unauthorized actor %s on %s — refused",
+            interaction.actor or "<none>", interaction.decision,
+        )
+        post_text(_chat_refusal(interaction.actor))
+        if audit_log is not None:
+            audit_log.record(
+                thread_id=interaction.thread_id,
+                workflow="ops",
+                events=[{
+                    "event": "unauthorized_actor",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "actor": interaction.actor,
+                    "surface": f"chat:{interaction.decision}",
+                }],
+                domain="ops",
+                user_id=user_id,
+            )
         return
 
     result = resume_fn(interaction.thread_id, interaction.decision, interaction.text)
@@ -437,6 +463,7 @@ def handle_chat_message(
     conversation: Any = None,
     memory_ui: dict | None = None,
     audit_log: AuditLog | None = None,
+    allowed_senders: frozenset[str] | set[str] | None = None,
 ) -> None:
     """Process a decoded Chat space event.
 
@@ -453,6 +480,26 @@ def handle_chat_message(
     """
     chat_msg: ChatMessage | None = process_chat_event(event)
     if chat_msg is None:
+        return
+
+    if allowed_senders is not None and chat_msg.sender not in allowed_senders:
+        logger.warning(
+            "chat: unauthorized sender %s — refused", chat_msg.sender or "<none>"
+        )
+        post_text(_chat_refusal(chat_msg.sender))
+        if audit_log is not None:
+            audit_log.record(
+                thread_id="ops:chat",
+                workflow="ops",
+                events=[{
+                    "event": "unauthorized_actor",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "actor": chat_msg.sender,
+                    "surface": "chat:message",
+                }],
+                domain="ops",
+                user_id=user_id,
+            )
         return
 
     _respond_to_message(
@@ -567,6 +614,14 @@ def _respond_to_message(
         )
 
     post_text(response)
+
+
+def _chat_refusal(actor: str) -> str:
+    return (
+        f"⛔ I don't recognize you ({actor or 'unknown sender'}). This "
+        "assistant acts for one person; ask the owner to add you to "
+        "ADC_CHAT_ALLOWED_USERS if this is a mistake."
+    )
 
 
 def _autonomy_status(

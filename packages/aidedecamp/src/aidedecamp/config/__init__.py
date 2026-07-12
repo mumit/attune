@@ -14,6 +14,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+def _id_set(raw: str | None) -> frozenset[str]:
+    """Parse a comma-separated allowlist; empty/None -> deny-all frozenset."""
+    if not raw:
+        return frozenset()
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 class Deployment(str, Enum):
     PERSONAL = "personal"
     TELUS = "telus"
@@ -123,6 +130,11 @@ class Settings:
     # The single identity this deployment acts as (memory/audit user_id, and
     # the Gmail API "me" alias). One deployment = one identity, per design 4.6.
     user_id: str = "me"
+    # WHO may talk to that identity (review finding #1): transport signatures
+    # prove Slack/Google called, not which human acted. Empty = deny all —
+    # an unconfigured deployment refuses every actor, fail-safe.
+    slack_allowed_users: frozenset[str] = frozenset()
+    chat_allowed_users: frozenset[str] = frozenset()
     # Where the assistant proactively posts (briefs, approval cards) absent a
     # live event context to reply into.
     slack_default_channel: str | None = None
@@ -192,6 +204,8 @@ class Settings:
             nudge_cooldown_days=int(e.get("ADC_NUDGE_COOLDOWN_DAYS", "7")),
             nudge_state_path=_path("ADC_NUDGE_STATE_PATH", "nudge_state.json"),
             user_id=e.get("ADC_USER_ID", "me"),
+            slack_allowed_users=_id_set(e.get("ADC_SLACK_ALLOWED_USERS")),
+            chat_allowed_users=_id_set(e.get("ADC_CHAT_ALLOWED_USERS")),
             slack_default_channel=e.get("ADC_SLACK_CHANNEL"),
             chat_default_space=e.get("ADC_CHAT_SPACE"),
         )

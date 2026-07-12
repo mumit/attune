@@ -57,16 +57,34 @@ class SlackChannel:
         self,
         *,
         graph: Any = None,
-        resume_fn: Callable[[str, str, str | None], Any] | None = None,
+        resume_fn: Callable[..., Any] | None = None,
         message_fn: Callable[[str, str, Callable[[str], None]], None] | None = None,
         app: Any = None,
+        allowed_users: frozenset[str] | set[str] | None = None,
+        on_unauthorized: Callable[[str, str], None] | None = None,
     ):
         self._graph = graph
         self._app = app
         self._resume = resume_fn or self._default_resume
         self._message = message_fn or _no_message_fn
+        # Deny-by-default (review finding #1): None/empty refuses every actor.
+        # Slack signs the request; only this list authenticates the human.
+        self._allowed_users = frozenset(allowed_users or ())
+        self._on_unauthorized = on_unauthorized
         if app is not None:
             self._register(app)
+
+    def _authorized(self, actor: str, surface: str) -> bool:
+        if actor and actor in self._allowed_users:
+            return True
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "slack: unauthorized actor %s on %s — refused", actor or "<none>", surface
+        )
+        if self._on_unauthorized is not None:
+            self._on_unauthorized(actor, surface)
+        return False
 
     # --- public surface ---------------------------------------------------
 
@@ -108,7 +126,9 @@ class SlackChannel:
 
     # --- internals --------------------------------------------------------
 
-    def _default_resume(self, thread_id: str, decision: str, text: str | None):
+    def _default_resume(
+        self, thread_id: str, decision: str, text: str | None, *, actor: str | None = None
+    ):
         from ..orchestrator import resume_workflow
 
         return resume_workflow(self._graph, thread_id, decision, text)
@@ -130,11 +150,18 @@ class SlackChannel:
         decision. Edit opens a modal in the real app; here it resumes with an
         'edited' decision whose text the modal supplies."""
 
+        def _actor(body):  # noqa: ANN001
+            return (body.get("user") or {}).get("id", "")
+
         @app.action(ACTION_APPROVE)
         def _approve(ack, body, respond):  # noqa: ANN001
             ack()
+            actor = _actor(body)
+            if not self._authorized(actor, "approve"):
+                respond(text=_REFUSAL.format(actor=actor), replace_original=False)
+                return
             thread_id = body["actions"][0]["value"]
-            result = self._resume(thread_id, "approved", None)
+            result = self._resume(thread_id, "approved", None, actor=actor)
             from ..orchestrator import apply_confirmation
 
             respond(
@@ -144,8 +171,12 @@ class SlackChannel:
         @app.action(ACTION_REJECT)
         def _reject(ack, body, respond):  # noqa: ANN001
             ack()
+            actor = _actor(body)
+            if not self._authorized(actor, "reject"):
+                respond(text=_REFUSAL.format(actor=actor), replace_original=False)
+                return
             thread_id = body["actions"][0]["value"]
-            result = self._resume(thread_id, "rejected", None)
+            result = self._resume(thread_id, "rejected", None, actor=actor)
             from ..orchestrator import apply_confirmation
 
             respond(
@@ -155,6 +186,9 @@ class SlackChannel:
         @app.action(ACTION_EDIT)
         def _edit(ack, body, client):  # noqa: ANN001
             ack()
+            actor = _actor(body)
+            if not self._authorized(actor, "edit"):
+                return
             thread_id = body["actions"][0]["value"]
             draft = extract_draft_from_blocks(
                 (body.get("message") or {}).get("blocks") or []
@@ -172,11 +206,14 @@ class SlackChannel:
         @app.view(ACTION_EDIT_SUBMIT)
         def _edit_submit(ack, body, client):  # noqa: ANN001
             ack()
+            actor = _actor(body)
+            if not self._authorized(actor, "edit-submit"):
+                return
             parsed = extract_edit_submission(body.get("view") or {})
             if parsed is None:
                 return
             thread_id, channel_id, text = parsed
-            result = self._resume(thread_id, "edited", text)
+            result = self._resume(thread_id, "edited", text, actor=actor)
             from ..orchestrator import apply_confirmation
 
             if channel_id:
@@ -196,11 +233,21 @@ class SlackChannel:
 
             text = event.get("text", "")
             user = event.get("user", "")
+            if not self._authorized(user, "dm"):
+                say(text=_REFUSAL.format(actor=user))
+                return
 
             def _post_text(response: str) -> None:
                 say(text=response)
 
             self._message(text, user, _post_text)
+
+
+_REFUSAL = (
+    "⛔ I don't recognize you (your Slack id is {actor}). This assistant "
+    "acts for one person; ask the owner to add your id to "
+    "ADC_SLACK_ALLOWED_USERS if this is a mistake."
+)
 
 
 def _no_message_fn(text: str, user_id: str, post_text: Callable[[str], Any]) -> None:

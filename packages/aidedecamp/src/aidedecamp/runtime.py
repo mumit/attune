@@ -224,6 +224,7 @@ class Runtime:
             conversation=self.conversation,
             memory_ui=self.memory_ui,
             audit_log=self.app.audit_log,
+            allowed_senders=self.settings.chat_allowed_users,
         )
 
     def process_calendar_notification(self, notification: dict[str, Any]):
@@ -299,6 +300,7 @@ class Runtime:
             post_text=_post_text,
             user_id=self.settings.user_id,
             audit_log=self.app.audit_log,
+            allowed_actors=self.settings.chat_allowed_users,
         )
 
     def post_brief(self) -> Any:
@@ -893,7 +895,9 @@ def build_runtime(
 
     # The one shared resume path, bound to the pending registry so every
     # decision — whichever channel it arrives on — marks its card resolved.
-    def _bound_resume(thread_id: str, decision: str, text: str | None) -> Any:
+    def _bound_resume(
+        thread_id: str, decision: str, text: str | None, *, actor: str | None = None
+    ) -> Any:
         return resume_workflow(
             resolved_app.graph, thread_id, decision, text, pending=resolved_pending
         )
@@ -946,10 +950,26 @@ def build_runtime(
                 audit_log=resolved_app.audit_log,
             )
 
+        def _audit_unauthorized(actor: str, surface: str) -> None:
+            resolved_app.audit_log.record(
+                thread_id="ops:slack",
+                workflow="ops",
+                events=[{
+                    "event": "unauthorized_actor",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "actor": actor,
+                    "surface": f"slack:{surface}",
+                }],
+                domain="ops",
+                user_id=settings.user_id,
+            )
+
         resolved_slack = SlackChannel(
             graph=resolved_app.graph,
             resume_fn=_bound_resume,
             message_fn=_slack_message_fn,
+            allowed_users=settings.slack_allowed_users,
+            on_unauthorized=_audit_unauthorized,
         )
         if settings.slack_default_channel:
             resolved_slack_say = make_slack_say(
