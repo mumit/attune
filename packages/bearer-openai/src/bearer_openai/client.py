@@ -90,7 +90,7 @@ def _is_401(exc: Exception) -> bool:
 class _BearerMixin:
     """Shared construction + 401-translation logic for sync/async clients."""
 
-    _base_url: str
+    _gateway_url: str
 
     @staticmethod
     def _build_kwargs(
@@ -141,7 +141,9 @@ class BearerClient(_BearerMixin, OpenAI):
             base_url, token, env_var, fallback_env_var, openai_kwargs
         )
         super().__init__(**kwargs)
-        self._base_url = base_url
+        # OpenAI owns `_base_url` and stores an httpx.URL there. Overwriting it
+        # with a string breaks request construction in current SDK releases.
+        self._gateway_url = base_url
 
     def chat_completions_create(self, **kwargs: Any) -> Any:
         """``chat.completions.create`` with a loud, specific 401 translation."""
@@ -149,7 +151,7 @@ class BearerClient(_BearerMixin, OpenAI):
             return self.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001 - re-raised, not swallowed
             if _is_401(exc):
-                raise TokenRejectedError(base_url=self._base_url) from exc
+                raise TokenRejectedError(base_url=self._gateway_url) from exc
             raise
 
 
@@ -169,7 +171,7 @@ class AsyncBearerClient(_BearerMixin, AsyncOpenAI):
             base_url, token, env_var, fallback_env_var, openai_kwargs
         )
         super().__init__(**kwargs)
-        self._base_url = base_url
+        self._gateway_url = base_url
 
     async def chat_completions_create(self, **kwargs: Any) -> Any:
         """Async ``chat.completions.create`` with loud 401 translation."""
@@ -177,5 +179,5 @@ class AsyncBearerClient(_BearerMixin, AsyncOpenAI):
             return await self.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001 - re-raised, not swallowed
             if _is_401(exc):
-                raise TokenRejectedError(base_url=self._base_url) from exc
+                raise TokenRejectedError(base_url=self._gateway_url) from exc
             raise

@@ -3,6 +3,24 @@
 A running log of settled architectural decisions, so the reasoning survives even
 when the design doc gets long. Newest first.
 
+## 2026-07 — First personal setup closes the runbook-to-runtime gap
+
+- The first live setup exposed an editable install pointing at a sibling
+  checkout. Doctor now reports the imported package path and fails when the
+  current checkout is using another source tree.
+- `bearer-openai` no longer overwrites OpenAI's private `_base_url` URL object;
+  a transport-level regression test exercises real SDK request construction.
+- Doctor validates Calendar with `events.list`, matching the granted
+  `calendar.events` capability, rather than requiring unused calendar-metadata
+  access. Destination validation rejects Slack display names and malformed
+  Chat resource names before runtime assembly.
+- Fuel iX authorization is model-specific. Defaults now use Haiku 4.5 for
+  classification and Sonnet 5 elsewhere, every task supports an `ADC_MODEL_*`
+  override, and Doctor probes every distinct routed model.
+- `docs/getting-started.md` is the supported beginner path. Google/Slack
+  credentials and a live terminal brief passed on 2026-07-12; always-on and
+  write-path reliability remain unclaimed.
+
 ## 2026-07 — Retry queue initializes lazily (post-review defect fix)
 
 - `SqliteRetryQueue` created its database eagerly at construction, and

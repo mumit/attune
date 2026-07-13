@@ -32,7 +32,7 @@ Dev setup and full test run:
 ```bash
 pip install -e "packages/bearer-openai[dev]"
 pip install -e "packages/aidedecamp[dev]"
-pytest        # 565 tests should pass as a baseline before you change anything
+pytest        # 571 tests should pass as a baseline before you change anything
               # (deploy/ is excluded from collection via norecursedirs in both
               # pytest.ini and pyproject.toml — deploy/republisher/ has its
               # own dependency set and its own separate test suite, run from
@@ -282,6 +282,9 @@ Fuel iX: `base_url = https://api.fuelix.ai`; models `claude-haiku-4-5`,
 `claude-sonnet-4-7`, `claude-sonnet-5`, `gpt-5.4`, `gpt-5.6-luna`,
 `gpt-5.6-terra`; embeddings `text-embedding-3-small` (default, 1536),
 `text-embedding-3-large` (3072), `ada-002` (1536).
+Task routes can be overridden per deployment with `ADC_MODEL_CLASSIFY`,
+`ADC_MODEL_DRAFT`, `ADC_MODEL_REASON`, `ADC_MODEL_CONSOLIDATE`, and
+`ADC_MODEL_CONVERSE`; Doctor probes every distinct routed model.
 
 ## Next steps (suggested order)
 
@@ -316,9 +319,9 @@ deployment and the deliberately deferred product tail:
 
 - Google agent-tool quota/tiering vs. the Gmail watch-renewal + read cadence —
   confirm against current Google quota docs before production.
-- No live deployment yet — Phase 0's "brief for a full week without
-  babysitting" bar (design.md §6) is unverified; everything above is
-  code-complete-and-tested, not run-in-production-complete.
+- Personal OAuth, Slack authentication, and a real terminal brief were
+  exercised on 2026-07-12. The always-on process, approval-to-draft path, and
+  Phase 0's full-week bar remain unverified.
 
 (Google Chat's action-layer API design — sync events vs. Workspace Events pull
 — is answered; see `docs/decisions.md`, "Google Chat channel" and "Credentials,

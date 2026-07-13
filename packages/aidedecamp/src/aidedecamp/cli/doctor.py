@@ -16,11 +16,14 @@ from typing import Callable
 PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
+WARN = "WARN"
 
 CheckFn = Callable[[], tuple[str, str]]
 
 # Checks that must pass before `aidedecamp run` will start (see run_cmd.py).
-FATAL_CHECKS = ("env", "data-dir", "fuelix", "google-credentials")
+FATAL_CHECKS = (
+    "installation", "env", "data-dir", "fuelix", "google-credentials"
+)
 
 
 @dataclass
@@ -41,6 +44,7 @@ def run_doctor(
         checks = [c for c in checks if c.name in FATAL_CHECKS]
 
     failed = 0
+    warned = 0
     for check in checks:
         try:
             status, detail = check.fn()
@@ -48,10 +52,17 @@ def run_doctor(
             status, detail = FAIL, f"check crashed: {type(exc).__name__}: {exc}"
         if status == FAIL:
             failed += 1
+        elif status == WARN:
+            warned += 1
         out(f"{status:4}  {check.name:22} {detail}")
 
     out("")
-    out("All checks passed." if failed == 0 else f"{failed} check(s) FAILED.")
+    if failed:
+        out(f"{failed} check(s) FAILED.")
+    elif warned:
+        out(f"All required checks passed; {warned} warning(s) remain.")
+    else:
+        out("All checks passed.")
     return 0 if failed == 0 else 1
 
 
@@ -62,6 +73,17 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
     # check is exercised through run_doctor with injected fakes, and the real
     # ones need live services by definition.
     import os
+    import sys
+    import warnings
+
+    # Replace google-api-core's import-time wall of text with one concise,
+    # actionable Doctor row below.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"You are using a Python version .*",
+        category=FutureWarning,
+        module=r"google\.api_core\._python_version_support",
+    )
 
     from ..config import Settings
 
@@ -72,7 +94,33 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         msg = f"{type(exc).__name__}: {exc} — fix the ADC_* variable it names"
         return [Check("env", lambda: (FAIL, msg))]
 
+    def check_installation() -> tuple[str, str]:
+        import aidedecamp
+
+        package_file = os.path.realpath(aidedecamp.__file__ or "")
+        checkout = os.path.join(
+            os.path.realpath(os.getcwd()), "packages", "aidedecamp"
+        )
+        if os.path.isdir(checkout) and not package_file.startswith(
+            checkout + os.sep
+        ):
+            return FAIL, (
+                f"this checkout is using {package_file} — reinstall with "
+                "pip install -e packages/bearer-openai -e packages/aidedecamp"
+            )
+        return PASS, package_file
+
+    def check_python() -> tuple[str, str]:
+        version = ".".join(str(part) for part in sys.version_info[:3])
+        if sys.version_info < (3, 11):
+            return WARN, (
+                f"{version} works now; use Python 3.12 before Google library "
+                "support for 3.10 ends on 2026-10-04"
+            )
+        return PASS, version
+
     def check_env() -> tuple[str, str]:
+        settings.validate_proactive_destinations()
         return PASS, f"deployment={settings.deployment.value}"
 
     def check_data_dir() -> tuple[str, str]:
@@ -94,17 +142,24 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
 
         from ..fuelix import Task, make_client, model_for
 
+        model = "client construction"
         try:
-            make_client().chat_completions_create(
-                model=model_for(Task.CLASSIFY),
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=1,
-            )
+            client = make_client()
+            models = dict.fromkeys(model_for(task) for task in Task)
+            for model in models:
+                client.chat_completions_create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply OK."}],
+                    max_tokens=2,
+                )
         except TokenRejectedError as exc:
             return FAIL, str(exc)
         except Exception as exc:  # noqa: BLE001
-            return FAIL, f"gateway unreachable: {type(exc).__name__}"
-        return PASS, "token accepted"
+            return FAIL, (
+                f"model {model!r} unavailable: {type(exc).__name__} — set the "
+                "matching ADC_MODEL_* override to a model your token can use"
+            )
+        return PASS, f"token + {len(models)} routed model(s) accepted"
 
     def check_google_credentials() -> tuple[str, str]:
         from ..credentials import load_google_credentials
@@ -131,7 +186,13 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         service = build(
             "calendar", "v3", credentials=load_google_credentials(settings)
         )
-        service.calendars().get(calendarId=settings.calendar_id).execute()
+        # calendar.events authorizes the runtime's events.list/insert calls but
+        # not calendars.get metadata. Test the capability we actually use.
+        service.events().list(
+            calendarId=settings.calendar_id,
+            maxResults=1,
+            singleEvents=True,
+        ).execute()
         return PASS, settings.calendar_id
 
     def check_qdrant() -> tuple[str, str]:
@@ -180,6 +241,8 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         return PASS, f"{len(subscriptions)} subscription(s) exist"
 
     return [
+        Check("installation", check_installation),
+        Check("python", check_python),
         Check("env", check_env),
         Check("data-dir", check_data_dir),
         Check("fuelix", check_fuelix),

@@ -7,6 +7,7 @@ to raise the SDK's auth errors.
 
 from __future__ import annotations
 
+import httpx
 import openai
 import pytest
 
@@ -66,6 +67,37 @@ def test_token_becomes_api_key(monkeypatch):
     client = BearerClient(base_url=BASE, token="secret-123")
     assert client.api_key == "secret-123"
     assert str(client.base_url).rstrip("/") == BASE
+
+
+def test_real_sdk_request_builder_keeps_url_object():
+    """Exercise below the mocked resource method that hid an SDK collision."""
+    def respond(request):
+        assert request.headers["authorization"] == "Bearer secret-123"
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(respond))
+    client = BearerClient(
+        base_url=BASE, token="secret-123", http_client=http_client
+    )
+
+    result = client.chat_completions_create(
+        model="test", messages=[{"role": "user", "content": "ping"}]
+    )
+
+    assert result.choices[0].message.content == "ok"
 
 
 # ---------------------------------------------------------------------------

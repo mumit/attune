@@ -19,6 +19,7 @@ typer dependency. Heavy imports happen inside subcommands so
 from __future__ import annotations
 
 import argparse
+import warnings
 from typing import Any
 
 
@@ -106,6 +107,14 @@ def main(argv: list[str] | None = None) -> int:
     from dotenv import load_dotenv
 
     load_dotenv()
+    # Doctor reports this as an actionable row; other commands should not
+    # repeat google-api-core's import-time warning wall.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"You are using a Python version .*",
+        category=FutureWarning,
+        module=r"google\.api_core\._python_version_support",
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "func"):

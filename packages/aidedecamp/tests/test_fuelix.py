@@ -14,10 +14,15 @@ def test_base_url():
 
 def test_routing_matches_design():
     assert model_for(Task.CLASSIFY) == Model.HAIKU_4_5.value
-    assert model_for(Task.DRAFT) == Model.SONNET_4_7.value
+    assert model_for(Task.DRAFT) == Model.SONNET_5.value
     assert model_for(Task.REASON) == Model.SONNET_5.value
     assert model_for(Task.CONSOLIDATE) == Model.SONNET_5.value
-    assert model_for(Task.CONVERSE) == Model.SONNET_4_7.value
+    assert model_for(Task.CONVERSE) == Model.SONNET_5.value
+
+
+def test_model_routing_can_follow_deployment_entitlements(monkeypatch):
+    monkeypatch.setenv("ADC_MODEL_DRAFT", "gpt-5.6-luna")
+    assert model_for(Task.DRAFT) == "gpt-5.6-luna"
 
 
 def test_client_resolves_token_from_fuelix_env(monkeypatch):

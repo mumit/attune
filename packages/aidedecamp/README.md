@@ -10,7 +10,9 @@ sibling [`bearer-openai`](../bearer-openai) package.
 See [`../../docs/design.md`](../../docs/design.md) for the full architecture,
 memory design, autonomy model, and roadmap;
 [`../../docs/decisions.md`](../../docs/decisions.md) for the settled
-architectural decisions and why; and
+architectural decisions and why;
+[`../../docs/getting-started.md`](../../docs/getting-started.md) for the guided
+personal setup; and
 [`../../docs/deployment.md`](../../docs/deployment.md) for how to actually run
 this against a live GCP project.
 
@@ -57,8 +59,9 @@ detection and approved tentative holds, the audit log, and `runtime.py` wiring
 everything into one process.
 
 The conflict-triggered Calendar hold action is built at PROPOSE. Not built:
-invite responses, rescheduling, a production Chat app-auth credential, and an
-actual live deployment (nothing has run against a real account yet — see
+invite responses, rescheduling, a production Chat app-auth credential, and a
+complete live deployment (credentials and one terminal brief have been
+exercised, but not the always-on approval loop — see
 `../../docs/deployment.md`). See `../../CLAUDE.md`'s "Next steps" for the
 current, maintained list.
 

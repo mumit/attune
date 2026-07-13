@@ -227,6 +227,19 @@ class Settings:
 
     def validate_proactive_destinations(self) -> None:
         """Fail closed when proactive posts may be visible to other people."""
+        if self.slack_default_channel and not self.slack_default_channel.startswith(
+            ("D", "C", "G")
+        ):
+            raise ValueError(
+                "ADC_SLACK_CHANNEL must be a Slack conversation ID beginning "
+                "D, C, or G, not a display name such as #aide"
+            )
+        if self.chat_default_space and not self.chat_default_space.startswith(
+            "spaces/"
+        ):
+            raise ValueError(
+                "ADC_CHAT_SPACE must be a resource name such as spaces/AAAA"
+            )
         slack_needs_ack = bool(
             self.slack_default_channel
             and not self.slack_default_channel.startswith("D")

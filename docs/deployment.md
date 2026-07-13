@@ -18,10 +18,10 @@ There are two tracks:
   per deployment. Lower latency, lower API-call volume, and the posture the
   TELUS deployment should use. Everything from §2 onward is Track B.
 
-**Status: code-verified, live-unexercised.** Commands, settings, and scopes
-below are reconciled with the implementation and current vendor docs, but no
-maintainer has completed either track against a live account. Treat every
-vendor-console step as needing confirmation during the first deployment.
+**Status: partially live-exercised.** On 2026-07-12, Track A completed OAuth,
+Fuel iX, Gmail, Calendar, Qdrant, and Slack validation and generated a real
+terminal brief. Slack posting, approval-to-draft, the always-on loop, and the
+one-week reliability bar remain unverified; Track B remains unexercised.
 
 ---
 
@@ -144,6 +144,10 @@ v2 send/receive path (`channels/gchat.py`).
 ---
 
 ## 4. Google Workspace access and OAuth
+
+For a first personal setup, use the screenshot-free, click-by-click sequence in
+[`getting-started.md`](getting-started.md). This section is the security and
+deployment reference behind it.
 
 ### What is supported now
 

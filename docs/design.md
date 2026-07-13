@@ -267,10 +267,11 @@ Recommendation: build voice last, start with the cascaded approach, and only inv
 Each phase should produce something you actually use daily before moving to the next - this is the difference between a project that compounds and one that stalls at 80% forever.
 
 > **Implementation status (2026-07):** everything below marked ✅ is built and
-> covered by the current offline suite (565 passing); nothing has been
-> deployed or run against real accounts yet, so no phase's "Done when" usage
-> bar is actually met — that requires the entrypoint work in `CLAUDE.md`'s
-> "Next steps." Details and rationale for each ✅ item live in
+> covered by the current offline suite (571 passing); the first credential
+> checks and terminal brief have been exercised against a personal account,
+> but the service has not been deployed or left running. No phase's "Done
+> when" usage bar is met yet; that requires the work in `CLAUDE.md`'s "Next
+> steps." Details and rationale for each ✅ item live in
 > `docs/decisions.md`.
 
 ### Phase 0 - Foundations (prove the loop end to end)
@@ -343,7 +344,11 @@ Each phase should produce something you actually use daily before moving to the 
 - **Google Chat action-layer API design** - both, not either/or: card-interaction events (approve/reject) handle button clicks, and the Workspace Events API pull pattern (`ingestion/chat_events.py::ensure_subscription`, mirroring the Gmail watch lifecycle) handles proactive message ingestion. **Correction (2026-07):** an earlier version of this entry said card-interaction events use "the same thin-republisher pattern as Gmail" - that undersold a real difference. Gmail's republisher only ever forwards to Pub/Sub; Chat's card clicks need a *synchronous* HTTP response, which the credential-holding process can't provide (rule 5), so the actual resume happens asynchronously after the republisher's immediate placeholder ack (`dispatcher.handle_chat_interaction`, pulled via its own Pub/Sub subscription) - see `docs/decisions.md`, "Async Chat card-interaction flow," for the full reasoning and the options that were rejected along the way.
 
 ### Verified (2026-07)
-- **Fuel iX base URL and model identifiers.** `base_url = https://api.fuelix.ai`. Models: `claude-haiku-4-5`, `claude-sonnet-4-7`, `claude-sonnet-5`, `gpt-5.4`, `gpt-5.6-luna`, `gpt-5.6-terra`. Encoded in Aide-de-camp's `fuelix.py` config module with task-shape routing (classify→Haiku 4.5, draft/converse→Sonnet 4.7, reason/consolidate→Sonnet 5).
+- **Fuel iX base URL and model identifiers.** `base_url = https://api.fuelix.ai`.
+  Known model identifiers remain centralized in `fuelix.py`. Defaults route
+  classification to Haiku 4.5 and other tasks to Sonnet 5; every task has an
+  `ADC_MODEL_*` override because entitlements vary by token, and Doctor probes
+  the configured routes rather than assuming the catalog is authorization.
 
 ---
 

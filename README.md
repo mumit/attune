@@ -31,12 +31,17 @@ packages/
 The two are developed together now for convenience; `bearer-openai` deliberately
 knows nothing about `aidedecamp` so it can leave home cleanly.
 
-## Quickstart — first brief in about 15 minutes
+## Quickstart
 
-Prerequisites: Python 3.10+, Docker, a Google account, a Google Cloud project
-with Gmail and Calendar APIs enabled, an OAuth desktop-client JSON, and a Fuel
-iX bearer token. The default **poll mode** needs no Pub/Sub, VM, Cloud Run, or
-webhook infrastructure — everything is outbound-only.
+New to Google Cloud, OAuth, or Slack apps? Follow the fully guided
+[`docs/getting-started.md`](docs/getting-started.md). The abbreviated path
+below assumes those connectors already exist.
+
+Prerequisites: Python 3.10+ (3.12 recommended for a new environment), Docker,
+a Google account, a Google Cloud project with Gmail and Calendar APIs enabled,
+an OAuth desktop-client JSON, and a Fuel iX bearer token. The default **poll
+mode** needs no Pub/Sub, VM, Cloud Run, or webhook infrastructure — everything
+is outbound-only.
 
 ```bash
 # 1. Clone and install
@@ -100,7 +105,7 @@ each step.
 
 Everything through the 2026-07 roadmap (`docs/roadmap.md`, all 23 build
 prompts — including the M6 stabilization milestone from an independent
-external review) is built and tested — 565 offline tests, no live
+external review) is built and tested — 571 offline tests, no live
 credentials needed for the suite:
 
 - **The full interaction loop**: triage (memory-informed) → draft → approval
@@ -131,9 +136,10 @@ What's deliberately not built: a production-wired Google Chat app-auth
 credential (so live Cards v2 remain deferred), invite accept/decline and rescheduling (each
 needs its own decisions entry first — see `docs/decisions.md`, "Calendar
 write actions"), the Graphiti migration, the browser surface, and voice
-(design.md phases 4–7). **Nothing has run against a live account yet** —
-the Phase-0 "a genuinely useful brief for a week without babysitting" bar
-is unverified until someone deploys it. See `CLAUDE.md`'s "Next steps".
+(design.md phases 4–7). Google/Slack credential checks and one real terminal
+brief were exercised against a personal account on 2026-07-12. The always-on
+loop, approval-to-draft path, and Phase-0 "a genuinely useful brief for a week
+without babysitting" bar remain unverified.
 
 ## Security posture (read before running anything that touches real data)
 

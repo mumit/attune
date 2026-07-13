@@ -7,7 +7,7 @@ import os
 
 from aidedecamp.cli import build_parser, main
 from aidedecamp.cli.brief_cmd import run_brief
-from aidedecamp.cli.doctor import FAIL, PASS, SKIP, Check, run_doctor
+from aidedecamp.cli.doctor import FAIL, PASS, SKIP, WARN, Check, run_doctor
 from aidedecamp.cli.init_cmd import run_init
 from aidedecamp.cli.run_cmd import run_run
 
@@ -163,9 +163,18 @@ def test_doctor_renders_statuses_and_exit_code():
     assert any("1 check(s) FAILED" in line for line in lines)
 
 
-def test_doctor_all_green_exits_zero():
-    code = run_doctor([Check("env", lambda: (PASS, "ok"))], out=lambda s: None)
+def test_doctor_warning_is_nonfatal_and_summarized():
+    lines: list[str] = []
+    checks = [
+        Check("env", lambda: (PASS, "ok")),
+        Check("python", lambda: (WARN, "upgrade recommended")),
+    ]
+
+    code = run_doctor(checks, out=lines.append)
+
     assert code == 0
+    assert any(line.startswith("WARN") for line in lines)
+    assert any("required checks passed" in line for line in lines)
 
 
 def test_doctor_crashing_check_is_a_fail_not_a_traceback():

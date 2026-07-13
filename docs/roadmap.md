@@ -28,7 +28,7 @@ prompts in `docs/build-prompts/`.*
 > now enforce private proactive destinations, durable cursor-consumed retries,
 > atomic single-use approvals, execution-safe compatibility checks, fail-closed
 > policy reloads, canonical cross-channel principal identity, and successful
-> apply evidence before graduation. The core suite now has 565 passing tests.
+> apply evidence before graduation. The core suite now has 571 passing tests.
 >
 > **Deployment audit note:** completion here means offline implementation,
 > not live readiness for every surface. Slack + per-user Google OAuth is the

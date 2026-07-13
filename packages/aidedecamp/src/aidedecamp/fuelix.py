@@ -20,6 +20,7 @@ rather than being hard-coded per graph.
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 
 from bearer_openai import AsyncBearerClient, BearerClient
@@ -82,21 +83,30 @@ class Task(str, Enum):
 
 # Task -> model routing. Uses currently-available Fuel iX models; retune here.
 #   - Cheap/fast classification -> Haiku 4.5
-#   - Drafting & conversational turns -> Sonnet 4.7 (solid, cheaper than Sonnet 5)
+#   - Drafting & conversational turns -> Sonnet 5
 #   - Hard reasoning & nightly consolidation -> Sonnet 5 (most capable available)
 DEFAULT_ROUTING: dict[Task, Model] = {
     Task.CLASSIFY: Model.HAIKU_4_5,
-    Task.DRAFT: Model.SONNET_4_7,
+    Task.DRAFT: Model.SONNET_5,
     Task.REASON: Model.SONNET_5,
     Task.CONSOLIDATE: Model.SONNET_5,
-    Task.CONVERSE: Model.SONNET_4_7,
+    Task.CONVERSE: Model.SONNET_5,
+}
+
+MODEL_ENV: dict[Task, str] = {
+    task: f"ADC_MODEL_{task.value.upper()}" for task in Task
 }
 
 
 def model_for(task: Task, routing: dict[Task, Model] | None = None) -> str:
-    """Return the model id string for a task shape."""
+    """Return the model id, allowing deployment-specific entitlement overrides."""
     table = routing or DEFAULT_ROUTING
-    return table[task].value
+    default = table[task].value
+    return (
+        default
+        if routing is not None
+        else os.environ.get(MODEL_ENV[task], default)
+    )
 
 
 def make_client(*, token: str | None = None, **openai_kwargs) -> BearerClient:

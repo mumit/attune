@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from aidedecamp.config import Settings
 
 
@@ -64,3 +66,15 @@ def test_visibility_ack_allows_explicit_shared_destination():
         "ADC_ACK_DESTINATION_VISIBILITY": "1",
     })
     s.validate_proactive_destinations()
+
+
+@pytest.mark.parametrize(
+    "env, message",
+    [
+        ({"ADC_SLACK_CHANNEL": "#aide"}, "conversation ID"),
+        ({"ADC_CHAT_SPACE": "AAAA"}, "spaces/AAAA"),
+    ],
+)
+def test_destination_ids_reject_display_names(env, message):
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env(env).validate_proactive_destinations()

@@ -21,7 +21,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
-from typing import Any, Callable
+from typing import Callable
 
 DEFAULT_DATA_DIR = "~/.aidedecamp"
 
@@ -44,15 +44,22 @@ def run_init(
         answer = ask(f"{prompt} [{default}]: ").strip()
         return answer or default
 
-    out("aidedecamp setup — answers are written to " + env_file)
+    out("aidedecamp personal setup — answers are written to " + env_file)
+    out("Before continuing, follow docs/getting-started.md to create the")
+    out("Google project and OAuth desktop client. Press Enter for the")
+    out("recommended direct_oauth + poll choices. Start with Slack; leave")
+    out("Google Chat blank because its app-auth path is not live-ready yet.")
+    out("")
 
     deployment = ask_default("Deployment (personal/telus)", "personal")
     connector = ask_default(
-        "Connector mode (direct_oauth/mcp — direct_oauth works with plain "
-        "OAuth credentials today)",
+        "Connector mode (use direct_oauth; mcp is not runtime-wired)",
         "direct_oauth",
     )
-    ingestion = ask_default("Ingestion mode (poll/push)", "poll")
+    ingestion = ask_default(
+        "Ingestion mode (use poll; push needs the advanced GCP deployment)",
+        "poll",
+    )
 
     data_dir = os.path.expanduser(
         ask_default("Data directory (state, memory, audit log)", DEFAULT_DATA_DIR)
@@ -78,7 +85,10 @@ def run_init(
         else ""
     )
     slack_channel = (
-        ask_default("Slack channel for proactive posts (e.g. #aide)", "")
+        ask_default(
+            "Slack destination ID (D... owner DM preferred; not #channel-name)",
+            "",
+        )
         if slack_bot
         else ""
     )

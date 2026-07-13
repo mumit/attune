@@ -4,7 +4,7 @@ Prompts 01–23 are historical implementation artifacts. They describe the
 repository state and test baseline that existed when each prompt was run; do
 not use their setup instructions as current deployment documentation. Use the
 root `README.md`, `.env.example`, and `docs/deployment.md` for the maintained
-operator path. The current core baseline is 565 passing tests.
+operator path. The current core baseline is 571 passing tests.
 
 Self-contained prompts for implementing `docs/roadmap.md`, one per work item,
 written to be run with Claude Code (Sonnet) from the repo root:
