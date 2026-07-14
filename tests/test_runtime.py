@@ -1060,7 +1060,7 @@ def test_poll_once_gmail_dispatches_when_mailbox_advanced():
 
     summary = runtime.poll_once()
 
-    assert summary["gmail"] == "changed"
+    assert summary["gmail"] == "changed, 1 actionable"
     assert len(slack.approvals) == 1  # same dispatcher path as push mode
 
 
@@ -1111,9 +1111,62 @@ def test_poll_once_isolates_source_failures():
 
     summary = runtime.poll_once()
 
-    assert summary["gmail"] == "changed"
+    assert summary["gmail"] == "changed, 1 actionable"
     assert summary["calendar"].startswith("error:")
     assert len(slack.approvals) == 1
+
+
+def test_poll_failure_log_includes_safe_code_location(caplog):
+    import logging as _logging
+
+    runtime = _runtime(calendar_service=object())
+    with caplog.at_level(_logging.WARNING):
+        runtime.poll_once()
+
+    message = next(
+        record.getMessage()
+        for record in caplog.records
+        if "poll calendar failed" in record.getMessage()
+    )
+    assert "AttributeError at" in message
+    assert "_collect_changes:" in message
+
+
+def test_poll_once_reports_non_actionable_gmail_activity():
+    runtime = _runtime()
+    runtime.process_gmail_notification = lambda payload: []
+
+    summary = runtime.poll_once()
+
+    assert summary["gmail"] == "changed, 0 actionable"
+
+
+def test_poll_once_reports_calendar_change_count():
+    runtime = _runtime(calendar_service=object())
+
+    def reconcile(notification, *, on_reconciled):
+        on_reconciled(1, False)
+        return []
+
+    runtime.process_calendar_notification = reconcile
+
+    summary = runtime.poll_once()
+
+    assert summary["calendar"] == "1 changed, 0 conflict(s)"
+
+
+def test_meaningful_poll_activity_omits_idle_sources():
+    from attune.runtime import _meaningful_poll_activity
+
+    summary = {
+        "gmail": "idle",
+        "calendar": "0 changed, 0 conflict(s)",
+        "chat": "0 message(s)",
+    }
+    assert _meaningful_poll_activity(summary) is None
+
+    summary["gmail"] = "changed, 0 actionable"
+    assert _meaningful_poll_activity(summary) == "gmail=changed, 0 actionable"
 
 
 # ---------------------------------------------------------------------------
@@ -1394,7 +1447,8 @@ def test_weekly_autonomy_digest_posts_suggestions_to_channels():
     from datetime import datetime, timezone as _tz
 
     from attune.audit.log import JsonlAuditLog
-    import tempfile, os
+    import os
+    import tempfile
 
     with tempfile.TemporaryDirectory() as td:
         log = JsonlAuditLog(os.path.join(td, "audit.jsonl"))

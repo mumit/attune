@@ -23,7 +23,13 @@ class WatchState(Protocol):
     """Per-mailbox persistence: the last historyId baseline and watch expiry."""
 
     def get(self, email: str) -> dict[str, Any] | None: ...
-    def put(self, email: str, *, history_id: str, expiration: datetime) -> None: ...
+    def put(
+        self,
+        email: str,
+        *,
+        history_id: str,
+        expiration: datetime | int | str,
+    ) -> None: ...
 
 
 @dataclass

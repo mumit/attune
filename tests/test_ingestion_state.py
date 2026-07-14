@@ -47,6 +47,22 @@ def test_gmail_watch_state_persists_across_instances(tmp_path):
     assert reloaded.get("a@b.com")["history_id"] == "1"
 
 
+def test_gmail_watch_state_can_preserve_a_reloaded_expiration(tmp_path):
+    """Polling advances historyId after reloading epoch-ms state from disk."""
+    path = tmp_path / "watch.json"
+    state = JsonGmailWatchState(str(path))
+    exp = datetime.now(timezone.utc) + timedelta(days=7)
+    state.put("me", history_id="100", expiration=exp)
+
+    persisted_expiration = state.get("me")["expiration"]
+    state.put("me", history_id="200", expiration=persisted_expiration)
+
+    assert state.get("me") == {
+        "history_id": "200",
+        "expiration": persisted_expiration,
+    }
+
+
 def test_gmail_watch_state_creates_parent_dirs(tmp_path):
     path = tmp_path / "nested" / "watch.json"
     state = JsonGmailWatchState(str(path))

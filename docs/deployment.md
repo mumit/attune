@@ -91,6 +91,14 @@ and alert on authentication failures rather than retrying them indefinitely.
 Pin container image versions for production, terminate TLS at the platform for
 the republisher, and test restoration of backups.
 
+In polling mode, idle source checks remain quiet apart from the five-minute
+heartbeat. Successful activity is logged using counts only, for example
+`poll activity: gmail=changed, 0 actionable` or
+`calendar=1 changed, 0 conflict(s)`. Gmail activity produces an approval card
+only when triage finds an actionable thread; mail classified as noise remains
+visible in the audit log. Calendar activity produces an immediate notification
+only for conflicts. Ordinary appointments appear in the scheduled daily brief.
+
 Back up Attune while the process is stopped, or use filesystem snapshots that
 are consistent across `ATTUNE_DATA_DIR` and Qdrant. The state directory contains
 checkpoints, pending approvals, polling cursors, retry records, grants,

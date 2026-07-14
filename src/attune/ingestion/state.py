@@ -54,11 +54,25 @@ class JsonGmailWatchState:
     def get(self, email: str) -> dict[str, Any] | None:
         return _load(self._path).get(email)
 
-    def put(self, email: str, *, history_id: str, expiration: datetime) -> None:
+    def put(
+        self,
+        email: str,
+        *,
+        history_id: str,
+        expiration: datetime | int | str,
+    ) -> None:
+        # Reconciliation advances history_id while preserving the expiration
+        # returned by get(), which is already serialized epoch milliseconds.
+        # Accept both forms so a read -> update -> write cycle is stable.
+        expiration_ms = (
+            int(expiration.timestamp() * 1000)
+            if isinstance(expiration, datetime)
+            else int(expiration)
+        )
         data = _load(self._path)
         data[email] = {
             "history_id": history_id,
-            "expiration": int(expiration.timestamp() * 1000),
+            "expiration": expiration_ms,
         }
         _save(self._path, data)
 

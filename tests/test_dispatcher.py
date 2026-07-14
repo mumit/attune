@@ -1033,6 +1033,7 @@ def test_calendar_notification_no_notify_when_no_conflict():
         {"items": [{"id": "e1"}], "nextSyncToken": "new"}
     ])
     notifications = []
+    reconciled = []
 
     result = handle_calendar_notification(
         _fake_app_ctx(), {"resource_state": "exists"},
@@ -1041,10 +1042,14 @@ def test_calendar_notification_no_notify_when_no_conflict():
         connector=connector,
         notify=notifications.append,
         user_id="me@example.com",
+        on_reconciled=lambda changed, rebaselined: reconciled.append(
+            (changed, rebaselined)
+        ),
     )
 
     assert result == []
     assert notifications == []
+    assert reconciled == [(1, False)]
 
 
 def test_calendar_notification_skips_failed_event_fetch():
@@ -1075,6 +1080,7 @@ def test_calendar_notification_full_syncs_on_expired():
     calendar_service = _FakeCalendarEventsService(pages=[
         {"items": [{"id": "e1"}], "nextSyncToken": "fresh"}
     ])
+    reconciled = []
 
     result = handle_calendar_notification(
         _fake_app_ctx(), {"resource_state": "sync"},
@@ -1083,10 +1089,14 @@ def test_calendar_notification_full_syncs_on_expired():
         connector=connector,
         notify=lambda text: None,
         user_id="me@example.com",
+        on_reconciled=lambda changed, rebaselined: reconciled.append(
+            (changed, rebaselined)
+        ),
     )
 
     assert result == []  # no conflict, but no exception either
     assert sync_state.get("primary")["sync_token"] == "fresh"
+    assert reconciled == [(1, True)]
 
 
 def test_bootstrap_rebaselines_without_dispatching():

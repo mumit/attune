@@ -88,6 +88,35 @@ BACKOFF_INITIAL_SECONDS = 1
 BACKOFF_MAX_SECONDS = 60
 
 
+def _exception_location(exc: Exception) -> str:
+    """Return the deepest code location without logging exception content."""
+    tb = exc.__traceback__
+    if tb is None:
+        return "unknown"
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    code = tb.tb_frame.f_code
+    return f"{code.co_name}:{tb.tb_lineno}"
+
+
+def _meaningful_poll_activity(summary: dict[str, str]) -> str | None:
+    """Format non-idle poll outcomes without including message/event data."""
+    active: list[str] = []
+    for source, result in summary.items():
+        if result.startswith("error:"):
+            continue  # the source-specific warning already reports this
+        if source == "gmail" and result == "idle":
+            continue
+        if source == "calendar" and result == "0 changed, 0 conflict(s)":
+            continue
+        if source == "chat" and result == "0 message(s)":
+            continue
+        if source == "workspace" and result == "0 thread(s), 0 event(s)":
+            continue
+        active.append(f"{source}={result}")
+    return ", ".join(active) or None
+
+
 def _assemble_runtime_brief(connector: Any, app: AppContext, settings: Settings):
     """The one place brief-assembly arguments are derived from settings, used
     by every surface that produces a brief (scheduled post, Slack DM, Chat
@@ -217,7 +246,12 @@ class Runtime:
             allowed_senders=self.settings.chat_allowed_users,
         )
 
-    def process_calendar_notification(self, notification: dict[str, Any]):
+    def process_calendar_notification(
+        self,
+        notification: dict[str, Any],
+        *,
+        on_reconciled: Callable[[int, bool], None] | None = None,
+    ):
         """Reconcile one decoded Calendar webhook notification (already
         validated and republished by the thin republisher, per rule 5),
         check each changed event for a scheduling conflict, and notify every
@@ -251,6 +285,7 @@ class Runtime:
             post_approval=self._post_calendar_approval if has_channel else None,
             pending=self.pending,
             retry_queue=self.retry_queue,
+            on_reconciled=on_reconciled,
         )
 
     def process_chat_interaction(self, event: dict[str, Any]) -> None:
@@ -677,7 +712,10 @@ class Runtime:
                     )
                 return {"workspace": f"{len(threads)} thread(s), {len(events)} event(s)"}
             except Exception as exc:  # noqa: BLE001
-                logger.warning("connector poll failed (%s)", type(exc).__name__)
+                logger.warning(
+                    "connector poll failed (%s at %s)",
+                    type(exc).__name__, _exception_location(exc),
+                )
                 return {"workspace": f"error: {type(exc).__name__}"}
 
         try:
@@ -685,21 +723,42 @@ class Runtime:
                 self.gmail_service, self.watch_state, email=self.settings.user_id
             )
             if notification is not None:
-                self._handle_gmail_message(notification)
-            summary["gmail"] = "changed" if notification else "idle"
+                submitted = self._handle_gmail_message(notification)
+                summary["gmail"] = f"changed, {len(submitted)} actionable"
+            else:
+                summary["gmail"] = "idle"
         except Exception as exc:  # noqa: BLE001 — per-source isolation
             summary["gmail"] = f"error: {type(exc).__name__}"
-            logger.warning("poll gmail failed (%s)", type(exc).__name__)
+            logger.warning(
+                "poll gmail failed (%s at %s)",
+                type(exc).__name__, _exception_location(exc),
+            )
 
         if self.calendar_service is not None:
             try:
+                reconciliation = {"changed": 0, "rebaselined": False}
+
+                def _calendar_reconciled(changed: int, rebaselined: bool) -> None:
+                    reconciliation["changed"] = changed
+                    reconciliation["rebaselined"] = rebaselined
+
                 conflicts = self.process_calendar_notification(
-                    calendar_poll_notification()
+                    calendar_poll_notification(),
+                    on_reconciled=_calendar_reconciled,
                 )
-                summary["calendar"] = f"{len(conflicts or [])} conflict(s)"
+                status = (
+                    f"{reconciliation['changed']} changed, "
+                    f"{len(conflicts or [])} conflict(s)"
+                )
+                if reconciliation["rebaselined"]:
+                    status += ", rebaselined"
+                summary["calendar"] = status
             except Exception as exc:  # noqa: BLE001
                 summary["calendar"] = f"error: {type(exc).__name__}"
-                logger.warning("poll calendar failed (%s)", type(exc).__name__)
+                logger.warning(
+                    "poll calendar failed (%s at %s)",
+                    type(exc).__name__, _exception_location(exc),
+                )
 
         if (
             self.chat_service is not None
@@ -723,20 +782,24 @@ class Runtime:
                 summary["chat"] = f"{len(events)} message(s)"
             except Exception as exc:  # noqa: BLE001
                 summary["chat"] = f"error: {type(exc).__name__}"
-                logger.warning("poll chat failed (%s)", type(exc).__name__)
+                logger.warning(
+                    "poll chat failed (%s at %s)",
+                    type(exc).__name__, _exception_location(exc),
+                )
 
         return summary
 
     # --- supervised pull-loop machinery (testable per-message core) ---------
 
-    def _handle_gmail_message(self, payload: dict[str, Any]) -> None:
+    def _handle_gmail_message(self, payload: dict[str, Any]) -> list[str]:
         """One decoded Gmail notification, preserving the HistoryExpired
         special case: an expired baseline forces a watch re-registration
         (which re-baselines it) rather than counting as a failure."""
         try:
-            self.process_gmail_notification(payload)
+            return self.process_gmail_notification(payload)
         except HistoryExpired:
             self.renew_gmail_watch(force=True)
+            return []
 
     def _handle_pulled_message(
         self,
@@ -902,7 +965,10 @@ class Runtime:
         )
         while True:
             try:
-                self.poll_once()
+                summary = self.poll_once()
+                activity = _meaningful_poll_activity(summary)
+                if activity:
+                    logger.info("poll activity: %s", activity)
                 stats.record(ok=True)
                 backoff = BACKOFF_INITIAL_SECONDS
             except Exception as exc:  # noqa: BLE001

@@ -73,4 +73,10 @@ Polling is the portable default and requires no inbound application port.
 Start with it. Move to `google_pubsub` only when lower latency justifies the
 additional Google Cloud topics, subscriptions, watches, and republisher.
 
+While running, idle polls are quiet except for a five-minute heartbeat. A
+successful source change produces a count-only `poll activity` log. Gmail only
+posts an approval for mail triaged as actionable; noise is audit-only. Calendar
+only notifies immediately about conflicts, while ordinary appointments appear
+in that day's scheduled brief.
+
 Run tests with `pytest -q`.

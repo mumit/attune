@@ -45,26 +45,26 @@ injected so the dispatcher is testable offline with fakes.
 
 from __future__ import annotations
 
-import logging
 import inspect
+import logging
 from datetime import datetime, timezone
 from typing import Any, Callable
-
-logger = logging.getLogger(__name__)
 
 from .app import AppContext
 from .audit.log import AuditLog
 from .connectors.base import WorkspaceConnector
-from .llm import Task, create_chat_completion, model_for
 from .ingestion.calendar_sync import SyncExpired, SyncState, full_calendar_sync
 from .ingestion.calendar_sync import process_calendar_notification as _reconcile_calendar
 from .ingestion.chat_events import ChatMessage, process_chat_event
 from .ingestion.chat_interactions import decode_chat_interaction
-from .ingestion.gmail_history import HistoryExpired, process_notification
+from .ingestion.gmail_history import process_notification
 from .ingestion.gmail_watch import WatchState
+from .llm import Task, create_chat_completion, model_for
 from .orchestrator.draft_approve import apply_confirmation
 from .orchestrator.scheduling import ConflictResult, detect_conflict, propose_free_slots
 from .orchestrator.triage import Priority, TriageResult, triage_thread
+
+logger = logging.getLogger(__name__)
 
 
 # Sentinel marking "use the real memory-informed triage": callers that inject
@@ -372,6 +372,7 @@ def handle_calendar_notification(
     post_approval: Callable[..., None] | None = None,
     pending: Any = None,
     retry_queue: Any = None,
+    on_reconciled: Callable[[int, bool], None] | None = None,
 ) -> list[ConflictResult]:
     """Process a decoded Calendar webhook notification (design 1.2, 1.4, 4.2).
 
@@ -391,6 +392,10 @@ def handle_calendar_notification(
     first same-day free slot; only human approval materializes the tentative
     hold via the apply node (see docs/decisions.md, "Calendar write
     actions"). No slot free -> notify-only fallback, no card.
+
+    ``on_reconciled(changed_count, rebaselined)`` is an optional operational
+    observer. It receives counts only, never event content, so callers can
+    report successful activity without leaking calendar details.
 
     Returns the list of conflicts detected (empty if none).
     """
@@ -419,7 +424,12 @@ def handle_calendar_notification(
                 domain="ops",
                 user_id=user_id,
             )
+        if on_reconciled is not None:
+            on_reconciled(len(changes.event_ids), True)
         return []
+
+    if on_reconciled is not None:
+        on_reconciled(len(changes.event_ids), False)
 
     conflicts: list[ConflictResult] = []
     offers_made = 0
