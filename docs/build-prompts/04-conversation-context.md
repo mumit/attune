@@ -18,13 +18,13 @@ gap they'll hit in the first five minutes.
 
 ## Task
 
-1. New module `packages/aidedecamp/src/aidedecamp/conversation.py`: a small
+1. New module `src/attune/conversation.py`: a small
    rolling window of recent turns keyed by `(channel, user_id)` — protocol +
    `JsonConversationLog(path)` concrete impl (the `ingestion/state.py`
    pattern). Keep the last N turns (default 10) and drop turns older than a
    TTL (default 2h) so stale context doesn't leak into tomorrow's questions.
-   New Settings: `conversation_state_path`, `ADC_CONVERSE_WINDOW_TURNS`,
-   `ADC_CONVERSE_TTL_MINUTES`.
+   New Settings: `conversation_state_path`, `ATTUNE_CONVERSE_WINDOW_TURNS`,
+   `ATTUNE_CONVERSE_TTL_MINUTES`.
 2. `_converse` gains the window: prior turns go into the messages list as
    alternating user/assistant turns **between** the system prompt and the
    current message. The current message keeps its `[UNTRUSTED chat]` frame;

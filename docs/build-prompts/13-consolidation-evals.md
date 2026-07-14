@@ -24,7 +24,7 @@ regression set — the "is it actually learning?" check — doesn't exist.
    - Gather recent raw action signals (`metadata.signal == "action"`) and
      existing preference memories.
    - One `Task.CONSOLIDATE` call (already routed to the strong model in
-     `fuelix.py` — correctness compounds, per design §4.5) with a structured
+     `llm.py` — correctness compounds, per design §4.5) with a structured
      prompt asking for: (a) repeated patterns worth promoting to a durable
      preference ("3× rejected drafts to <sender>" → a stated preference),
      (b) near-duplicate memories to merge, (c) contradictions where the
@@ -40,7 +40,7 @@ regression set — the "is it actually learning?" check — doesn't exist.
      and let the scheduler's existing job audit it.
    - Cap work per run (e.g., 200 signals) so a backlog can't produce a
      mega-prompt.
-2. **Memory eval set** — `packages/aidedecamp/tests/test_memory_quality.py`
+2. **Memory eval set** — `tests/test_memory_quality.py`
    plus a small YAML/JSON scenario file, LoCoMo/LongMemEval-style categories
    (design §2.4): single-session recall, multi-session recall, preference
    recall, and **knowledge update** (fact stated, later contradicted —
@@ -48,8 +48,8 @@ regression set — the "is it actually learning?" check — doesn't exist.
    against a scripted fake store/LLM by default (regression-checks the
    *pipeline logic*: what gets written, what consolidation decides given a
    canned model response, what retrieval is asked). Mark a live variant
-   (real Mem0 + Fuel iX) with a skip-unless-env marker
-   (`ADC_LIVE_MEMORY_EVAL=1`) — same suite, real substrate, run manually
+   (real Mem0 + configured OpenAI-compatible gateway) with a skip-unless-env marker
+   (`ATTUNE_LIVE_MEMORY_EVAL=1`) — same suite, real substrate, run manually
    after memory-pipeline changes.
 3. Document in the module docstring *when* to extend the set: any change to
    `memory/`, `signals.py`, or this consolidation prompt requires a run and,

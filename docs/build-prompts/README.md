@@ -4,7 +4,8 @@ Prompts 01–23 are historical implementation artifacts. They describe the
 repository state and test baseline that existed when each prompt was run; do
 not use their setup instructions as current deployment documentation. Use the
 root `README.md`, `.env.example`, and `docs/deployment.md` for the maintained
-operator path. The current core baseline is 571 passing tests.
+operator path. The current core baseline is 563 passing tests (plus the
+standalone republisher suite).
 
 Self-contained prompts for implementing `docs/roadmap.md`, one per work item,
 written to be run with Claude Code (Sonnet) from the repo root:
@@ -49,7 +50,7 @@ House rules every prompt inherits (do not skip):
    non-negotiable rules are inviolable.
 2. `pytest` must pass before you start and after you finish, with
    new offline tests (injected fakes, no credentials/network) for everything
-   you add — match the style in `packages/aidedecamp/tests/`.
+   you add — match the style in `tests/`.
 3. Keep collaborators injected and optional heavy deps lazy-imported.
 4. Finish by appending a `docs/decisions.md` entry (newest first, existing
    format) recording what was settled and why, and update `CLAUDE.md`'s module

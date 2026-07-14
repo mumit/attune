@@ -21,9 +21,9 @@ subscriptions — and turns "a weekend of GCP plumbing" into "OAuth + go".
 
 ## Task
 
-1. New Settings: `ingestion_mode` (`ADC_INGESTION_MODE`, enum `poll|push`,
-   **default `poll`**) and `ADC_POLL_SECONDS` (default 120).
-2. New module `packages/aidedecamp/src/aidedecamp/ingestion/polling.py`
+1. New Settings: `ingestion_mode` (`ATTUNE_INGESTION_MODE`, enum `poll|push`,
+   **default `poll`**) and `ATTUNE_POLL_SECONDS` (default 120).
+2. New module `src/attune/ingestion/polling.py`
    with three pure poll-step functions, each reusing the existing
    reconciliation machinery rather than duplicating it:
    - `poll_gmail_step(gmail_service, watch_state) -> notification | None`:

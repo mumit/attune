@@ -20,9 +20,9 @@ logging anywhere in the package — the always-on process is a black box.
 ## Task
 
 1. **Logging.** Adopt stdlib `logging` package-wide: a
-   `aidedecamp.logging_setup.configure(level, json_mode=False)` helper the
+   `attune.logging_setup.configure(level, json_mode=False)` helper the
    entrypoint calls (plain human format by default; one-JSON-object-per-line
-   when `ADC_LOG_JSON=1`, for journald/Cloud Logging). Add loggers at the
+   when `ATTUNE_LOG_JSON=1`, for journald/Cloud Logging). Add loggers at the
    natural seams — dispatcher decisions (thread triaged/skipped/submitted),
    channel posts, renewals, scheduler firings, loop lifecycle. **Rule 6:**
    never log tokens, credential contents, or full message bodies; subjects
@@ -44,7 +44,7 @@ logging anywhere in the package — the always-on process is a black box.
 4. **Heartbeat:** a `runtime` logger line every ~5 minutes per live loop
    (messages pulled/handled/failed since last beat) so "is it alive?" is one
    `journalctl | grep heartbeat` away.
-5. Wire `configure()` into `__main__.py`; `ADC_LOG_LEVEL` (default INFO).
+5. Wire `configure()` into `__main__.py`; `ATTUNE_LOG_LEVEL` (default INFO).
 
 ## Constraints
 

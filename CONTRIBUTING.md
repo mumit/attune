@@ -4,15 +4,15 @@
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-./scripts/test.sh   # installs both packages editable + runs all tests
+./scripts/test.sh   # installs Attune editable and runs all tests
 ```
 
 ## Conventions
 
-- Each package under `packages/` is independently buildable and testable.
-- `bearer-openai` must stay vendor-neutral: no Fuel iX (or any vendor) base URLs,
-  model IDs, or routing. If you're tempted to add one, it belongs in
-  `aidedecamp` instead.
+- The package at the repository root is independently buildable and testable.
+- Model access stays provider-neutral: configure the official OpenAI SDK with
+  a base URL, API key, and model identifiers. Do not add gateway clients or
+  provider-specific catalogs.
 - Keep the memory interface substrate-agnostic (`add` / `search` / `consolidate`)
   so the planned Mem0 → Graphiti migration is an implementation change, not an
   API change.

@@ -20,7 +20,7 @@ schedule" — no such schedule exists.
 
 ## Task
 
-1. New module `packages/aidedecamp/src/aidedecamp/scheduler.py`. Do **not**
+1. New module `src/attune/scheduler.py`. Do **not**
    add APScheduler — a small in-process scheduler is enough and keeps the
    dependency set flat: a `Job(name, next_run_fn, action)` list where
    `next_run_fn(now) -> datetime` computes the next firing (daily-at-time
@@ -31,8 +31,8 @@ schedule" — no such schedule exists.
    thin `run_loop()` (`pragma: no cover`, matching the pull-loop precedent)
    that ticks `run_pending` every ~30s.
 2. Standard job set, assembled in `runtime.py`:
-   - **Daily brief** at `ADC_BRIEF_TIME` (local time, default `"07:30"`, in
-     `ADC_TIMEZONE` — an IANA name, default UTC; prompt 07 reuses this
+   - **Daily brief** at `ATTUNE_BRIEF_TIME` (local time, default `"07:30"`, in
+     `ATTUNE_TIMEZONE` — an IANA name, default UTC; prompt 07 reuses this
      setting) posted via the existing `post_brief`/`post_text` surfaces to
      every configured channel.
    - **Watch renewals** daily: all three `renew_*` methods, each wrapped so
@@ -41,7 +41,7 @@ schedule" — no such schedule exists.
      exactly the silent-failure class the audit log exists for.
    - **Pending sweep** (prompt 03's `sweep_ignored`) every 6h, if the
      registry is configured.
-   - **Consolidation** nightly at `ADC_CONSOLIDATE_TIME` (default `"02:00"`)
+   - **Consolidation** nightly at `ATTUNE_CONSOLIDATE_TIME` (default `"02:00"`)
      calling `store.consolidate(user_id=…)` and auditing the report — the
      base impl is currently a no-op report; prompt 13 makes it real, this
      prompt gives it its cadence.
@@ -49,7 +49,7 @@ schedule" — no such schedule exists.
    also calls the three `renew_*` once at startup (bootstrap: a fresh
    deployment must not wait a day for its first watch registration).
 4. New Settings fields per above, with env names following the existing
-   `ADC_*` convention.
+   `ATTUNE_*` convention.
 
 ## Constraints
 

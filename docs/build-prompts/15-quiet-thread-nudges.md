@@ -18,13 +18,13 @@ action offer in the system, so it must enter the autonomy ladder correctly.
 
 ## Task
 
-1. New module `packages/aidedecamp/src/aidedecamp/orchestrator/followup.py`:
+1. New module `src/attune/orchestrator/followup.py`:
    - `find_nudge_candidates(connector, nudge_state, *, now, min_age_days)` —
      wraps prompt 07's `find_quiet_threads`, then filters through a
      `JsonNudgeState(path)` (the usual pattern) recording already-nudged
      thread ids + nudge time, so a thread is nudged at most once per
-     `ADC_NUDGE_COOLDOWN_DAYS` (default 7). Settings additions follow the
-     existing conventions (`ADC_NUDGE_MIN_AGE_DAYS` default 4, state path
+     `ATTUNE_NUDGE_COOLDOWN_DAYS` (default 7). Settings additions follow the
+     existing conventions (`ATTUNE_NUDGE_MIN_AGE_DAYS` default 4, state path
      data-dir-derived).
 2. **Nudge = an approval card for a follow-up draft.** For each candidate
    (cap 3/day), start the existing draft-approve graph with
@@ -37,7 +37,7 @@ action offer in the system, so it must enter the autonomy ladder correctly.
    ignored cards decay via prompt 03. **No new approval surface, no new
    autonomy path.** Register cards in the pending-approvals registry like
    any other.
-3. **Scheduler job**: daily at `ADC_NUDGE_TIME` (default "14:00" local —
+3. **Scheduler job**: daily at `ATTUNE_NUDGE_TIME` (default "14:00" local —
    deliberately not brief time; the brief already lists quiet threads, the
    nudge is the afternoon "want me to act?" follow-through). Audit each
    nudge under a `"followup"` workflow (thread id, age, resulting lg_tid).

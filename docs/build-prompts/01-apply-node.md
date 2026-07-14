@@ -11,7 +11,7 @@ baseline and after your change.
 ## Problem
 
 When a user clicks **Approve** on a draft card, the draft-approve graph
-(`packages/aidedecamp/src/aidedecamp/orchestrator/draft_approve.py`) resumes,
+(`src/attune/orchestrator/draft_approve.py`) resumes,
 sets `decision`/`final_text`, captures a memory signal — and stops.
 `connector.create_draft` (implemented on both `McpWorkspaceConnector` and
 `DirectOAuthConnector`) has **zero callers**. The user approves a reply and

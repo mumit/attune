@@ -1,0 +1,50 @@
+# NOTE: superseded by deploy/compose.yml (the full stack: Qdrant + the
+# assistant behind a --profile). This file is kept because docs and decisions
+# link to it; new setups should use compose.yml.
+#
+# Self-hosted Mem0 for Attune.
+#
+# This stands up a local memory substrate: Qdrant (vector store) plus the Mem0
+# API server. Mem0's extraction LLM and embedder must point at the configured
+# managed gateway so memory operations do not use an unmanaged path. That wiring is done in code via
+# attune.memory.build_mem0_config(); this compose file is the infra beneath it.
+#
+# Usage:
+#   cp ../../.env.example ../../.env   # fill ATTUNE_LLM_API_KEY
+#   docker compose -f deploy/mem0-compose.yml up -d
+#
+# Then in the app:
+#   from attune.memory import Mem0Store, build_mem0_config
+#   store = Mem0Store(build_mem0_config(vector_store={
+#       "provider": "qdrant",
+#       "config": {"host": "localhost", "port": 6333,
+#                  "collection_name": "attune",
+#                  "embedding_model_dims": 1536}}))
+#
+# Embedding provider, model, and dimensions come from ATTUNE_EMBEDDING_*.
+# Changing dimensions requires recreating the vector collection.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  # Optional: only if you want the standalone Mem0 REST server rather than the
+  # in-process library (attune uses the library by default). Left here for
+  # the browser-based memory-correction UI in a later phase.
+  # mem0:
+  #   image: mem0/mem0-api-server:latest
+  #   depends_on: [qdrant]
+  #   environment:
+  #     - OPENAI_BASE_URL=${ATTUNE_EMBEDDING_BASE_URL}
+  #     - OPENAI_API_KEY=${ATTUNE_LLM_API_KEY}
+  #   ports:
+  #     - "8000:8000"
+  #   restart: unless-stopped
+
+volumes:
+  qdrant_data:

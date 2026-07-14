@@ -20,12 +20,12 @@ nothing about which person clicked.
 ## Task
 
 1. **Settings**: `slack_allowed_users` / `chat_allowed_users`
-   (`ADC_SLACK_ALLOWED_USERS` / `ADC_CHAT_ALLOWED_USERS`, comma-separated —
+   (`ATTUNE_SLACK_ALLOWED_USERS` / `ATTUNE_CHAT_ALLOWED_USERS`, comma-separated —
    Slack user IDs like `U0123`, Chat user resource names like `users/123`),
    parsed to frozensets. **Empty means deny-all** (fail-safe, rule-3
    spirit): an unconfigured deployment refuses every actor with a message
    that includes the sender's own ID so the owner can allowlist themselves
-   in one copy-paste. `aidedecamp init` asks for the Slack user ID.
+   in one copy-paste. `attune init` asks for the Slack user ID.
 2. **Enforce at every human entry point**, before any dispatch:
    - Slack: the `message` DM handler, `_approve`/`_reject`/`_edit` action
      handlers, and the `view_submission` handler — actor is

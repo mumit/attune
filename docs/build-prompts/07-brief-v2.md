@@ -1,6 +1,6 @@
 # 07 — Brief v2: local timezone, meeting prep, quiet threads
 
-**Milestone:** M2 · **Depends on:** none (uses `ADC_TIMEZONE` from 05 if
+**Milestone:** M2 · **Depends on:** none (uses `ATTUNE_TIMEZONE` from 05 if
 present; add it here if running first) · **Fixes roadmap defect #7**
 
 ---
@@ -26,7 +26,7 @@ notes pulled from the last thread on each … anything that's gone quiet"):
 ## Task
 
 1. **Timezone.** `assemble_brief` gains a `tz: ZoneInfo` parameter (from new
-   `Settings.timezone`, env `ADC_TIMEZONE`, IANA name, default `"UTC"`).
+   `Settings.timezone`, env `ATTUNE_TIMEZONE`, IANA name, default `"UTC"`).
    Day boundaries computed in `tz` then converted to UTC for `list_events`;
    all rendered times in `tz`. `zoneinfo` is stdlib — no new dependency.
 2. **Meeting prep.** For each of today's events (cap at ~8), search two

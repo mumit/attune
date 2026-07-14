@@ -1,5 +1,47 @@
-# Workspace-level tool config. Each package under packages/ has its own build
-# metadata; this file only holds shared dev-tool settings.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "attune"
+version = "0.0.1"
+description = "A self-learning workspace assistant over Gmail, Calendar, Google Chat, and Slack."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Mumit" }]
+keywords = ["assistant", "agent", "langgraph", "mem0", "workspace"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "openai>=1.30,<3",
+    "python-dotenv>=1,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "langgraph>=0.2"]
+memory = ["mem0ai>=0.1", "qdrant-client>=1.9"]
+orchestrator = ["langgraph>=0.2", "langgraph-checkpoint-sqlite>=2"]
+slack = ["slack-bolt>=1.24"]
+google = [
+    "google-api-python-client>=2",
+    "google-auth>=2",
+    "google-auth-oauthlib>=1",
+    "google-cloud-pubsub>=2",
+]
+mcp = ["mcp>=1.10,<2", "httpx>=0.27"]
+
+[project.scripts]
+attune = "attune.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/attune"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 90
@@ -7,7 +49,5 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# deploy/ (under packages/aidedecamp/) holds standalone deployable services
-# (e.g. deploy/republisher/) with their own dependency sets, independent of
-# the aidedecamp package — never collect them here.
+# deploy/ contains standalone services with independent dependencies.
 norecursedirs = ["deploy"]

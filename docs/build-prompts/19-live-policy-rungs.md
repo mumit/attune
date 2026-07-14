@@ -11,7 +11,7 @@ of `docs/roadmap.md`. This touches the safety spine — re-read rule 3. Run
 ## Problem
 
 1. **Revocations don't take effect until restart.** The matrix loads once in
-   `build_app` and is captured by the compiled graph's closure. `aidedecamp
+   `build_app` and is captured by the compiled graph's closure. `attune
    autonomy revoke` writes the file; the running gate keeps the old object.
    A safety claw-back that waits for a restart isn't a claw-back.
 2. **Rung semantics are half-built.** When the gate auto-applies
@@ -37,7 +37,7 @@ of `docs/roadmap.md`. This touches the safety spine — re-read rule 3. Run
    - **ACT_NOTIFY** → no card, no pending entry; call the (new, optional)
      `notify` callable with an honest after-the-fact line ("Acted
      autonomously (act-notify grant): created draft for <subject>. Revoke
-     with `aidedecamp autonomy revoke …`"), audit `auto_notified`.
+     with `attune autonomy revoke …`"), audit `auto_notified`.
    - **AUTONOMOUS** → no card, no notification; audit `auto_silent`.
    The rung comes from the result's `autonomy_gate` audit event
    (`max_rung`); add a small shared helper.

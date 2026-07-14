@@ -52,7 +52,7 @@ The `edited` decision can currently only occur in tests.
      `deploy/republisher/` and run separately (see CLAUDE.md).
 3. Keep action-name strings in sync the existing way: any new action name
    is defined in `channels/blocks.py`, mirrored where needed, and pinned by
-   an equality test (the technique already used for `adc_approve`).
+   an equality test (the technique already used for `attune_approve`).
 
 ## Constraints
 

@@ -23,7 +23,7 @@ Two related gaps:
 
 ## Task
 
-1. New module `packages/aidedecamp/src/aidedecamp/orchestrator/pending.py`:
+1. New module `src/attune/orchestrator/pending.py`:
    a `PendingApprovals` registry with a protocol + JSON-file-backed
    implementation (`JsonPendingApprovals(path)`), following exactly the
    `ingestion/state.py` pattern (protocol, concrete JSON impl, injected
@@ -42,7 +42,7 @@ Two related gaps:
    per-channel bookkeeping.
 4. **Sweep:** `sweep_ignored(registry, store, *, user_id, max_age, now=None)
    -> int` — entries pending longer than `max_age` (default 48h, new
-   Settings field `ADC_APPROVAL_IGNORE_HOURS`) are marked resolved and
+   Settings field `ATTUNE_APPROVAL_IGNORE_HOURS`) are marked resolved and
    captured via `capture_action_signal(…, signal=ActionSignal.IGNORED,
    summary=…)`, plus an audit event. Pure function, injected clock, called
    by the scheduler when prompt 05 lands (leave a wiring TODO the 05 prompt

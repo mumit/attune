@@ -1,0 +1,50 @@
+# The full Attune stack (roadmap prompt 10).
+#
+# Two ways to use it:
+#
+#   1. Substrate only (recommended while setting up) — Qdrant for the memory
+#      store; run the assistant on the host via `attune run`:
+#
+#        docker compose -f deploy/compose.yml up -d
+#
+#   2. Everything containerized — add the assistant profile once `.env` is
+#      written (attune init) and doctor passes:
+#
+#        docker compose -f deploy/compose.yml \
+#          --profile assistant up -d --build
+#
+# Secrets stay in .env (env_file, gitignored) — never in this file or the
+# image (rule 6). All assistant state lives in the attune_data volume via
+# ATTUNE_DATA_DIR. Mem0 runs in-process inside the assistant (the library, not
+# the REST server), pointed at the qdrant service via ATTUNE_QDRANT_HOST.
+#
+# This supersedes mem0-compose.yml (kept as a pointer for old docs links).
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  assistant:
+    profiles: ["assistant"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      ATTUNE_DATA_DIR: /data
+      ATTUNE_QDRANT_HOST: qdrant
+    volumes:
+      - attune_data:/data
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  attune_data:

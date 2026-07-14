@@ -20,7 +20,7 @@ the browser UI later renders the same operations.
 
 ## Task
 
-1. New module `packages/aidedecamp/src/aidedecamp/memory/commands.py` with
+1. New module `src/attune/memory/commands.py` with
    pure functions over an injected `MemoryStore`:
    - `list_memories(store, *, user_id, query=None, limit=20)` — formatted,
      **numbered** listing (via `search` when a query is given, else
@@ -42,7 +42,7 @@ the browser UI later renders the same operations.
    number→id map and any pending forget-confirmation in the prompt-04
    conversation window if it landed (per-user, per-channel), else a small
    injected dict-backed state.
-3. **CLI.** Fill prompt 08's `aidedecamp memory` group: `list [--query]`,
+3. **CLI.** Fill prompt 08's `attune memory` group: `list [--query]`,
    `forget <id>` (with `--yes` for non-interactive), `remember <text>`.
 4. Audit every mutation: `memory_deleted` / `memory_taught` events under a
    `"memory"` workflow (user_id, id, text snippet) — corrections to the
