@@ -4,11 +4,9 @@ no network, no Google credentials.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 
-from attune.config import WorkspaceBackend, Settings
+from attune.config import Settings
 from attune.connectors import (
     DirectOAuthConnector,
     McpWorkspaceConnector,
@@ -16,6 +14,7 @@ from attune.connectors import (
     SendNotPermitted,
     make_connector,
 )
+from attune.connectors.mcp import MCP_CONTRACT_VERSION, MCP_REQUIRED_TOOLS
 
 
 class FakeMcp:
@@ -69,6 +68,16 @@ def test_factory_builds_real_mcp_caller_from_url():
         "ATTUNE_MCP_URL": "https://mcp.example/mcp",
     })
     assert isinstance(make_connector(s), McpWorkspaceConnector)
+
+
+def test_mcp_contract_v1_covers_every_connector_operation():
+    assert MCP_CONTRACT_VERSION == "1"
+    assert MCP_REQUIRED_TOOLS == {
+        "gmail": frozenset({
+            "search_threads", "get_thread", "create_draft", "modify_labels"
+        }),
+        "calendar": frozenset({"list_events", "get_event"}),
+    }
 
 
 # --- provenance is tagged at the boundary --------------------------------

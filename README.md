@@ -43,7 +43,8 @@ comments and unknown keys are preserved, legacy names are migrated, and a
 want a new configuration.
 
 See [Getting started](docs/getting-started.md), [Design](docs/design.md), and
-[Deployment](docs/deployment.md).
+[Deployment](docs/deployment.md). MCP server implementers should use the
+[versioned Workspace contract](docs/mcp-contract.md).
 
 ## Development
 

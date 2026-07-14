@@ -22,7 +22,7 @@ CheckFn = Callable[[], tuple[str, str]]
 
 # Checks that must pass before `attune run` will start (see run_cmd.py).
 FATAL_CHECKS = (
-    "installation", "env", "data-dir", "llm", "workspace"
+    "installation", "env", "data-dir", "llm", "workspace", "channels"
 )
 
 
@@ -30,6 +30,83 @@ FATAL_CHECKS = (
 class Check:
     name: str
     fn: CheckFn
+
+
+def check_channel_routes(settings) -> tuple[str, str]:
+    """Validate that every selected route has usable local configuration."""
+    routed = (
+        settings.brief_channels
+        | settings.notification_channels
+        | settings.interaction_channels
+        | ({settings.approval_channel} if settings.approval_channel else set())
+    )
+    if not routed:
+        return SKIP, "no Slack or Google Chat routes configured"
+
+    errors: list[str] = []
+    slack_proactive = (
+        "slack" in settings.brief_channels
+        or "slack" in settings.notification_channels
+        or settings.approval_channel == "slack"
+    )
+    if "slack" in routed:
+        if not settings.slack_bot_token:
+            errors.append("Slack routes require SLACK_BOT_TOKEN")
+        if slack_proactive and not settings.slack_default_channel:
+            errors.append("proactive Slack routes require ATTUNE_SLACK_CHANNEL")
+        if "slack" in settings.interaction_channels:
+            if not settings.slack_app_token:
+                errors.append("Slack interactions require SLACK_APP_TOKEN")
+            if not settings.slack_allowed_users:
+                errors.append("Slack interactions require ATTUNE_SLACK_ALLOWED_USERS")
+
+    if "google_chat" in routed:
+        if not settings.chat_default_space:
+            errors.append("Google Chat routes require ATTUNE_CHAT_SPACE")
+        if not settings.chat_credentials_file:
+            errors.append("Google Chat routes require ATTUNE_CHAT_CREDENTIALS_FILE")
+        if (
+            "google_chat" in settings.interaction_channels
+            and not settings.chat_allowed_users
+        ):
+            errors.append(
+                "Google Chat interactions require ATTUNE_CHAT_ALLOWED_USERS"
+            )
+        if (
+            settings.approval_channel == "google_chat"
+            and not settings.chat_interaction_pubsub_subscription
+        ):
+            errors.append(
+                "Google Chat approvals require "
+                "ATTUNE_CHAT_INTERACTION_PUBSUB_SUBSCRIPTION"
+            )
+
+        from ..config import IngestionMode, WorkspaceBackend
+
+        if "google_chat" in settings.interaction_channels:
+            if (
+                settings.workspace_backend == WorkspaceBackend.MCP
+                and not settings.chat_interaction_pubsub_subscription
+            ):
+                errors.append(
+                    "Google Chat interaction with MCP requires the verified "
+                    "Chat interaction Pub/Sub subscription"
+                )
+            elif (
+                settings.ingestion_mode == IngestionMode.GOOGLE_PUBSUB
+                and not (
+                    settings.chat_pubsub_subscription
+                    or settings.chat_interaction_pubsub_subscription
+                )
+            ):
+                errors.append(
+                    "Google Chat interaction in google_pubsub mode requires "
+                    "a Chat Pub/Sub subscription"
+                )
+
+    if errors:
+        return FAIL, "; ".join(dict.fromkeys(errors))
+    return PASS, "configured routes have credentials, destinations, and allowlists"
 
 
 def run_doctor(
@@ -158,14 +235,10 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
     def check_workspace() -> tuple[str, str]:
         from ..config import WorkspaceBackend
         if settings.workspace_backend == WorkspaceBackend.MCP:
-            from ..connectors.mcp import CALENDAR_SERVER, GMAIL_SERVER
+            from ..connectors.mcp import MCP_REQUIRED_TOOLS
             from ..connectors.mcp_client import make_mcp_caller
             caller = make_mcp_caller(settings)
-            required = {
-                GMAIL_SERVER: {"search_threads", "get_thread", "create_draft"},
-                CALENDAR_SERVER: {"list_events", "get_event"},
-            }
-            for server, expected in required.items():
+            for server, expected in MCP_REQUIRED_TOOLS.items():
                 missing = expected - caller.list_tools(server)
                 if missing:
                     return FAIL, f"{server} MCP server missing tools: {', '.join(sorted(missing))}"
@@ -260,6 +333,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("data-dir", check_data_dir),
         Check("llm", check_llm),
         Check("workspace", check_workspace),
+        Check("channels", lambda: check_channel_routes(settings)),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),
         Check("qdrant", check_qdrant),

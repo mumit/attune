@@ -20,11 +20,13 @@ attune run
   official OpenAI SDK using base URL, API key, and model identifiers.
 - Keep one principal per instance. Do not add organization-named profiles.
 - Keep OAuth and MCP as real workspace alternatives. Direct OAuth is the
-  default; MCP currently requires polling and Streamable HTTP.
+  default; MCP currently requires polling and Streamable HTTP. Changes to its
+  required tools or envelopes must version `docs/mcp-contract.md`.
 - Keep hosting portable. Name Google Pub/Sub when code is specifically tied to
   it; otherwise use backend-neutral concepts.
 - Slack and Google Chat are optional peers. Respect brief, approval,
-  notification, and interaction routes at every send/receive site.
+  notification, and interaction routes at every send/receive site. Selected
+  routes must remain covered by Doctor's fail-fast local configuration check.
 - The runtime holding user credentials exposes no public port. The standalone
   republisher is stateless and must not gain model, memory, or user OAuth access.
 - Preserve human approval, actor allowlists, idempotency, durable checkpoints,

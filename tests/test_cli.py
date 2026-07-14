@@ -7,7 +7,15 @@ import os
 
 from attune.cli import build_parser, main
 from attune.cli.brief_cmd import run_brief
-from attune.cli.doctor import FAIL, PASS, SKIP, WARN, Check, run_doctor
+from attune.cli.doctor import (
+    FAIL,
+    PASS,
+    SKIP,
+    WARN,
+    Check,
+    check_channel_routes,
+    run_doctor,
+)
 from attune.cli.init_cmd import run_init
 from attune.cli.run_cmd import run_run
 
@@ -230,10 +238,49 @@ def test_doctor_fatal_only_filters_battery():
     def mk(name):
         return Check(name, lambda: (ran.append(name), (PASS, "ok"))[1])
 
-    checks = [mk("env"), mk("llm"), mk("slack"), mk("pubsub")]
+    checks = [mk("env"), mk("llm"), mk("channels"), mk("slack"), mk("pubsub")]
     run_doctor(checks, out=lambda s: None, fatal_only=True)
 
-    assert ran == ["env", "llm"]  # slack/pubsub aren't fatal
+    assert ran == ["env", "llm", "channels"]  # network channel checks aren't fatal
+
+
+def test_channel_routes_skip_when_no_surface_is_selected():
+    from attune.config import Settings
+
+    assert check_channel_routes(Settings.from_env({}))[0] == SKIP
+
+
+def test_channel_routes_fail_with_actionable_missing_slack_settings():
+    from attune.config import Settings
+
+    status, detail = check_channel_routes(Settings.from_env({
+        "ATTUNE_BRIEF_CHANNELS": "slack",
+        "ATTUNE_INTERACTION_CHANNELS": "slack",
+    }))
+
+    assert status == FAIL
+    assert "SLACK_BOT_TOKEN" in detail
+    assert "ATTUNE_SLACK_CHANNEL" in detail
+    assert "SLACK_APP_TOKEN" in detail
+    assert "ATTUNE_SLACK_ALLOWED_USERS" in detail
+
+
+def test_channel_routes_accept_complete_google_chat_only_configuration():
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_BRIEF_CHANNELS": "google_chat",
+        "ATTUNE_APPROVAL_CHANNEL": "google_chat",
+        "ATTUNE_NOTIFICATION_CHANNELS": "google_chat",
+        "ATTUNE_INTERACTION_CHANNELS": "google_chat",
+        "ATTUNE_CHAT_SPACE": "spaces/S1",
+        "ATTUNE_CHAT_CREDENTIALS_FILE": "/secrets/chat.json",
+        "ATTUNE_CHAT_ALLOWED_USERS": "users/U1",
+        "ATTUNE_CHAT_INTERACTION_PUBSUB_SUBSCRIPTION": "projects/p/subscriptions/chat",
+        "ATTUNE_ACK_DESTINATION_VISIBILITY": "1",
+    })
+
+    assert check_channel_routes(settings)[0] == PASS
 
 
 # ---------------------------------------------------------------------------

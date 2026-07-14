@@ -35,7 +35,7 @@ Choose one workspace backend:
 - `mcp`: set a shared `ATTUNE_MCP_URL`, or Gmail and Calendar URLs separately.
   Add `ATTUNE_MCP_TOKEN` if the server requires bearer authentication. MCP is
   currently polling-only and requires servers exposing Attune's documented
-  Gmail and Calendar tool contract.
+  Gmail and Calendar [version-1 tool contract](mcp-contract.md).
 
 ## 3. Choose channels
 
@@ -63,6 +63,11 @@ separate from the Chat app identity.
 attune doctor
 attune run
 ```
+
+Doctor fails before the runtime starts when a selected channel lacks its bot or
+app credential, proactive destination, actor allowlist, or required Chat
+interaction subscription. An empty route remains a valid way to disable that
+delivery or interaction behavior.
 
 Polling is the portable default and requires no inbound application port.
 Start with it. Move to `google_pubsub` only when lower latency justifies the

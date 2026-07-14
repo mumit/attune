@@ -8,15 +8,14 @@
 - portable polling and advanced Google Pub/Sub ingestion
 - independently configurable Slack and Google Chat routes
 - editable, migration-aware `attune init`
+- versioned generic MCP tool contract and capability diagnostics
+- fail-fast validation for optional channel routes
 - durable approvals, memory, audit, retries, and earned autonomy
 
 ## Near term
 
-- publish and version the MCP tool contract; add live conformance fixtures
 - exercise the Google Chat app callback and cards in a real test space
-- add deployment examples for a generic VM and one container platform
-- improve route diagnostics for missing channel credentials or destinations
-- add backup/restore and credential-rotation runbooks
+- add live MCP conformance fixtures for selected server packages
 
 ## Later
 

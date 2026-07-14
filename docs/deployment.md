@@ -20,6 +20,33 @@ docker compose -f deploy/compose.yml up -d
 docker compose -f deploy/compose.yml --profile assistant up -d --build
 ```
 
+For a non-container VM, install Attune into a dedicated virtual environment and
+run it under the host service manager. A minimal systemd unit is:
+
+```ini
+[Unit]
+Description=Attune workspace assistant
+After=network-online.target
+
+[Service]
+Type=simple
+User=attune
+WorkingDirectory=/opt/attune
+EnvironmentFile=/etc/attune/attune.env
+ExecStart=/opt/attune/.venv/bin/attune run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Keep the environment file readable only by the service account. Mount
+`ATTUNE_DATA_DIR` and Qdrant storage on durable volumes; the source checkout
+itself should be replaceable.
+
 ## Workspace backends
 
 Direct Google OAuth is the default and supports polling plus Google Pub/Sub.
@@ -62,4 +89,23 @@ subscriber-only access.
 Use structured logs where supported, monitor loop heartbeats and retry state,
 and alert on authentication failures rather than retrying them indefinitely.
 Pin container image versions for production, terminate TLS at the platform for
-the republisher, and test restoration of `ATTUNE_DATA_DIR` and Qdrant backups.
+the republisher, and test restoration of backups.
+
+Back up Attune while the process is stopped, or use filesystem snapshots that
+are consistent across `ATTUNE_DATA_DIR` and Qdrant. The state directory contains
+checkpoints, pending approvals, polling cursors, retry records, grants,
+conversation windows, and the append-only audit log. Qdrant contains durable
+memory vectors; back it up using its snapshot facility. Restore both to the same
+point before restarting so workflow state and memory do not disagree.
+
+Rotate credentials independently:
+
+1. Create the replacement in the model gateway, MCP server, Google project, or
+   channel platform.
+2. Update the secret store/environment file without logging the value.
+3. Restart Attune and run `attune doctor`.
+4. Revoke the old credential only after Doctor and one read-only smoke test
+   succeed.
+
+Google OAuth authorized-user files and the Google Chat app service-account file
+are separate credentials and should have separate rotation schedules.

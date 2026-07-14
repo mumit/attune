@@ -33,6 +33,7 @@ from .base import (
 )
 
 # Logical service and tool identifiers, centralized as the public contract.
+MCP_CONTRACT_VERSION = "1"
 GMAIL_SERVER = "gmail"
 CALENDAR_SERVER = "calendar"
 
@@ -42,6 +43,13 @@ TOOL_CREATE_DRAFT = "create_draft"
 TOOL_LIST_EVENTS = "list_events"
 TOOL_GET_EVENT = "get_event"
 TOOL_ADD_LABEL = "modify_labels"
+
+MCP_REQUIRED_TOOLS = {
+    GMAIL_SERVER: frozenset(
+        {TOOL_SEARCH_THREADS, TOOL_GET_THREAD, TOOL_CREATE_DRAFT, TOOL_ADD_LABEL}
+    ),
+    CALENDAR_SERVER: frozenset({TOOL_LIST_EVENTS, TOOL_GET_EVENT}),
+}
 
 
 McpCall = Callable[[str, str, dict[str, Any]], dict[str, Any]]

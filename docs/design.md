@@ -42,6 +42,8 @@ placement: a managed server can own consent, credentials, tool allowlists,
 policy, and centralized auditing. It does not automatically improve model
 reasoning or Workspace semantics, and it adds an operational dependency. MCP
 currently uses connector polling so behavior is backend-neutral.
+The adapter targets a small, [versioned Gmail and Calendar tool
+contract](mcp-contract.md), not a named MCP vendor.
 
 ## Instance and deployment model
 

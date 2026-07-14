@@ -2,6 +2,20 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Routes and MCP capability contracts fail fast
+
+- Selecting a channel route is an operational commitment. Doctor now treats
+  missing channel credentials, destinations, interaction allowlists, and Chat
+  approval subscriptions as fatal configuration errors instead of letting the
+  runtime silently omit delivery.
+- An empty route explicitly disables that behavior and remains valid.
+- The generic Workspace MCP adapter has a versioned contract. Version 1 requires
+  four Gmail tools and two Calendar tools; Doctor checks `tools/list` before
+  startup. The contract intentionally supports draft creation but not sending.
+- Live Chat and MCP conformance remain deployment smoke tests because they
+  require chosen external services and credentials; offline reference fixtures
+  pin the protocol-independent behavior.
+
 ## 2026-07 — Rename and provider-neutral configuration
 
 - The project, distribution, import package, CLI, state defaults, and current
