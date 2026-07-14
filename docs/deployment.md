@@ -5,6 +5,11 @@ and has its own Workspace credential or MCP endpoint, model credentials,
 channel credentials, memory, state, and audit log. Run separate isolated
 instances for separate principals.
 
+This guide describes the current single-principal deployment. The normative
+[security architecture](security-architecture.md) defines the controls for the
+planned setup assistant and hosted service. In particular, local files, SQLite,
+JSON, JSONL, and a Qdrant collection are not a multi-tenant security boundary.
+
 There are two practical deployment tracks:
 
 - **Polling on a standalone host or VM** is the recommended starting point.

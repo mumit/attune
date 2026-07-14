@@ -2,6 +2,25 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Security architecture is normative and the model is non-authoritative
+
+- `security-architecture.md` defines stable `SEC-*` requirements, data classes,
+  trust boundaries, feature-review evidence, adversarial tests, and hosted
+  launch gates. Target hosted controls are explicitly distinguished from the
+  current single-principal runtime.
+- The model may propose a versioned typed intent, but deterministic code owns
+  actor and tenant identity, capability selection, argument validation, policy,
+  approval, credential access, and provider effects. Prompt instructions and
+  prompt-injection detectors are not authorization controls.
+- Hosted Attune uses tenant-aware durable services and stateless workers; local
+  SQLite, JSON, JSONL, and Qdrant state are not stretched into a shared tenant
+  boundary.
+- Autonomy can progress only within a product-defined risk ceiling. History or
+  memory cannot unlock autonomous external sends, destructive/bulk operations,
+  sharing changes, or access grants.
+- Security exceptions are explicit, owned, compensating-control-backed, and
+  time-bounded.
+
 ## 2026-07 — Qdrant server mode is the memory default
 
 - Attune defaults to the durable Qdrant server at `127.0.0.1:6333`; embedded

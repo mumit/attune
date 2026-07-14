@@ -50,8 +50,10 @@ want a new configuration.
 See [Getting started](docs/getting-started.md), the complete
 [configuration reference](docs/configuration.md), the
 [user journey](docs/user-journey.md), [Design](docs/design.md), and
-[Deployment](docs/deployment.md). MCP server implementers should use the
-[versioned Workspace contract](docs/mcp-contract.md).
+[Deployment](docs/deployment.md). The normative
+[security architecture](docs/security-architecture.md) defines trust boundaries,
+control requirements, red-team cases, and hosted launch gates. MCP server
+implementers should use the [versioned Workspace contract](docs/mcp-contract.md).
 
 ## Development
 

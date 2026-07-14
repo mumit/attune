@@ -15,6 +15,13 @@ workspace, prepares useful work, and acts only within earned authority.
    auth, channel tokens, and model credentials are separate boundaries.
 5. Incoming notifications are signals, not commands. Credential-bearing
    runtime processes expose no public listener.
+6. The model is not a security principal. Identity, tenant selection,
+   authorization, capability limits, approvals, and provider effects are
+   enforced deterministically outside the model.
+
+The normative [security architecture](security-architecture.md) assigns stable
+requirements to these boundaries. New data sources, channels, memory behavior,
+model routes, and write capabilities must satisfy its feature-review checklist.
 
 ## Components
 
@@ -52,6 +59,12 @@ credential set, audit log, and state directory. Deployment targets—local host,
 VM, container platform, or cloud—are operational choices. When isolation is
 required, deploy separate instances instead of adding named profiles to code.
 
+This describes the current self-hosted runtime. A future hosted service does not
+make local state multi-tenant: it separates control/event ingress from queued,
+tenant-scoped execution and replaces SQLite, JSON, JSONL, and local Qdrant state
+with explicitly tenant-aware durable services. Hosted workers remain stateless
+between jobs.
+
 Polling is the portable default. `google_pubsub` explicitly names the advanced
 Google-specific transport. Gmail and Chat Workspace Events can publish to pull
 subscriptions. Calendar and Chat app callbacks use the stateless republisher,
@@ -69,6 +82,11 @@ natural-language planner. The planner can select live Gmail reads, live
 Calendar reads, a fresh brief, or memory-informed conversation. It is not an
 unrestricted tool loop and cannot execute free-form mutations. Workspace
 writes remain explicit durable workflows governed by autonomy and approval.
+
+Model output is an untrusted proposal. Trusted code binds the authenticated
+actor and tenant, validates a registered typed capability, constructs provider
+arguments, and enforces the maximum risk tier. Successful history cannot grant
+authority beyond that product-defined ceiling.
 
 Google Chat app messages and card actions arrive through its verified callback;
 proactive messages use a separate app service account. Google Workspace OAuth
