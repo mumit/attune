@@ -72,6 +72,11 @@ They must not fall back to logs, a local file, a second database identity, or a
 direct append call. Alerting and recovery of pending intents remain required
 before customer traffic.
 
+The dispatch broker applies this rule twice: a durable `allowed` event is
+required before Cloud Task creation, and an `observed` event is required after
+creation or deterministic `AlreadyExists`. Failure of the first creates no
+task; failure of the second is retried from canonical dispatched state.
+
 ## GCP deployment evidence
 
 `deploy/gcp/runtime` deploys the writer as an internal-ingress Cloud Run

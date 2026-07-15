@@ -37,13 +37,16 @@ sequenceDiagram
     B->>B: Verify exact producer identity and audience
     B->>DB: Lease intent through narrow dispatcher function
     DB-->>B: Canonical tenant, job, purpose, capability
+    B->>A: Persist and write dispatch-allowed audit intent
+    A-->>B: Durable pre-effect audit acknowledgement
     B->>Q: Create deterministic task name and minimal body
+    B->>DB: Mark intent dispatched after create/AlreadyExists
+    B->>A: Write observed dispatch result
     Q->>W: OIDC delivery to fixed worker route
     W->>DB: Atomic tenant/job/purpose/capability claim
     W->>A: Required content-free audit event
     W->>W: Execute registered deterministic capability
     W->>DB: Succeed or enter reconciliation
-    B->>DB: Mark intent dispatched after create/AlreadyExists
 ```
 
 ## Identities and permissions
@@ -76,6 +79,13 @@ the stored producer class matches that identity, the intent is unexpired and
 dispatchable, and the referenced job has the stored purpose and capability.
 It returns canonical routing data without granting the broker arbitrary table
 or cross-tenant query access.
+
+Before task creation, the broker must create and synchronously write the
+fixed-purpose `task.dispatch`/`allowed` audit intent derived from the leased
+dispatch record. Audit unavailability leaves the lease recoverable and creates
+no task. After creation or deterministic `AlreadyExists`, the broker finalizes
+the dispatch and writes the `observed` result. A replay of dispatched state
+retries only that post-effect audit; it never creates a differently named task.
 
 Intent states are `requested`, `leased`, `dispatched`, `failed`, and
 `cancelled`. A bounded lease permits recovery after a broker crash. The Cloud

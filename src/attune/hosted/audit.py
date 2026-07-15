@@ -142,8 +142,10 @@ class PostgresDispatchAuditRepository:
         outcome: str,
         error_code: str | None = None,
     ) -> UUID | None:
-        if outcome not in {"observed", "failed"}:
+        if outcome not in {"allowed", "observed", "failed"}:
             raise ValueError("invalid dispatch audit outcome")
+        if outcome != "failed" and error_code is not None:
+            raise ValueError("error_code is valid only for failed dispatch")
         if error_code is not None:
             _bounded_text("error_code", error_code, 80)
         with closing(self._connect()) as connection:

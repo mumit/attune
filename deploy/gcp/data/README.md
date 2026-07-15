@@ -52,6 +52,12 @@ The migrations currently create tenant-bound records for:
 - tenant-bound audit intents, hash-chained audit events, and per-tenant audit
   heads.
 
+Dispatch audit is two-phase without being ambiguous: the broker must write a
+canonical `allowed` audit intent while the dispatch lease is active before it
+can create a task, then write the `observed` or `failed` result from finalized
+canonical state. Audit failure before creation leaves the lease recoverable and
+creates no task.
+
 The hosted Python boundary provides repositories for every durable object
 class: provider events, jobs/retries, workflow checkpoints, conversations,
 approvals, memories/vectors, autonomy grants, usage, exports, deletion markers,

@@ -68,7 +68,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0004_audit_intents.sql"
+    assert migrations[-1].name == "0005_dispatch_pre_audit.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -163,7 +163,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 4
+    assert apply_migrations(admin) == 5
     with admin.cursor() as cursor:
         cursor.execute(
             "GRANT attune_worker TO attune_test_stale_member"
@@ -874,6 +874,11 @@ def test_dispatch_intent_is_canonical_idempotent_and_broker_only(
     assert broker.lease(
         dispatch.intent.id, producer_kind="control_plane"
     ) is None
+    pre_audit_intent_id = dispatch_audit.request(
+        dispatch.intent.id, outcome="allowed"
+    )
+    assert pre_audit_intent_id
+    assert audit_writer.write(pre_audit_intent_id)
     assert broker.finalize(
         dispatch.intent.id,
         producer_kind="control_plane",

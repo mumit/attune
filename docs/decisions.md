@@ -14,6 +14,9 @@ Newest first. This log records decisions that constrain current implementation.
   workload IAM authenticates a caller but does not prove a request's tenant.
 - Security-sensitive effects fail closed when the intent cannot be written.
   The complete contract is in `audit-writer.md`.
+- Dispatch specifically requires a written `allowed` event before task
+  creation and records the observed result afterward; deterministic task names
+  make post-effect audit recovery safe.
 
 ## 2026-07 — A private broker exclusively owns hosted task dispatch
 
