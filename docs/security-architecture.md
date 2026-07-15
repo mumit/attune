@@ -339,6 +339,11 @@ arguments.
   it MUST NOT silently retry a non-idempotent write.
 - **SEC-505.** R3 actions require recent web authentication or an equivalently
   strong step-up ceremony; possession of a channel session alone is insufficient.
+- **SEC-506.** Ambiguous effect intake MUST atomically bind a canonical job to a
+  tenant-bound, content-free reconciliation record with a fixed reason. Workers
+  MAY open this record but MUST NOT resolve, delete, or silently requeue it.
+  Resolution MUST refetch authoritative provider state through an authenticated,
+  audited, provider-specific workflow.
 
 ## 10. Memory and retrieval security
 

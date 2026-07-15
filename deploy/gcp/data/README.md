@@ -57,7 +57,9 @@ The migrations currently create tenant-bound records for:
 - tenant-bound audit intents, hash-chained audit events, and per-tenant audit
   heads; and
 - immutable encrypted connector credential versions plus one-time installation,
-  use, and revocation intents leased only through secret-broker functions.
+  use, and revocation intents leased only through secret-broker functions; and
+- content-free job reconciliation records opened atomically with the canonical
+  job's transition out of a lease.
 
 Credential installation and rotation atomically supersede the prior active
 version, insert the new encrypted envelope, update the connector reference, and

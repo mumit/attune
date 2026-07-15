@@ -8,6 +8,7 @@ from .audit import PostgresAuditProducerRepository
 from .audit_client import AuditWriterClient
 from .cloud_sql import iam_connection
 from .repositories import PostgresJobRepository
+from .reconciliation import PostgresJobReconciliationRepository
 from .worker_audit import WorkerAudit
 from .worker_dispatch import WorkerDispatcher
 from .worker_routes import registered_routes
@@ -25,6 +26,7 @@ def create_production_app():
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),
         audit=audit,
+        reconciliations=PostgresJobReconciliationRepository(iam_connection),
         routes=registered_routes(),
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_service_account=os.environ[

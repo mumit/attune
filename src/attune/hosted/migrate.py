@@ -82,6 +82,7 @@ TENANT_TABLES = (
     "audit_intents",
     "connector_credentials",
     "credential_intents",
+    "job_reconciliations",
 )
 
 
@@ -527,6 +528,47 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
         )
         if tuple(cursor.fetchone()) != (False, False):
             raise RuntimeError("secret broker has ambient connector-vault access")
+
+        cursor.execute(
+            """
+            SELECT
+                pg_catalog.has_table_privilege(
+                    'attune_worker', 'attune.job_reconciliations', 'SELECT'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_worker', 'attune.job_reconciliations', 'INSERT'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_worker', 'attune.job_reconciliations',
+                    'UPDATE,DELETE,TRUNCATE'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane', 'attune.job_reconciliations', 'SELECT'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane', 'attune.job_reconciliations',
+                    'INSERT,UPDATE,DELETE,TRUNCATE'
+                )
+            """
+        )
+        if tuple(cursor.fetchone()) != (True, True, False, True, False):
+            raise RuntimeError("reconciliation intake privileges do not match policy")
+
+        cursor.execute(
+            """
+            SELECT count(*)
+              FROM pg_catalog.pg_trigger AS trigger
+              JOIN pg_catalog.pg_class AS class ON class.oid = trigger.tgrelid
+              JOIN pg_catalog.pg_namespace AS namespace
+                ON namespace.oid = class.relnamespace
+             WHERE namespace.nspname = 'attune'
+               AND class.relname = 'job_reconciliations'
+               AND trigger.tgname = 'job_reconciliation_insert_guard'
+               AND NOT trigger.tgisinternal AND trigger.tgenabled <> 'D'
+            """
+        )
+        if cursor.fetchone()[0] != 1:
+            raise RuntimeError("reconciliation intake guard is missing or disabled")
 
         for role, login in bindings.items():
             cursor.execute(

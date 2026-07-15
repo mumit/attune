@@ -42,6 +42,7 @@ from attune.hosted.repositories import (
     PostgresJobRepository,
     PostgresMemoryRepository,
 )
+from attune.hosted.reconciliation import PostgresJobReconciliationRepository
 from attune.hosted.tenant import TenantContext, tenant_transaction
 
 TENANT_A = UUID("10000000-0000-4000-8000-000000000001")
@@ -68,7 +69,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0009_privileged_function_owners.sql"
+    assert migrations[-1].name == "0011_reconciliation_intake_guard.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -163,7 +164,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 9
+    assert apply_migrations(admin) == 11
     with admin.cursor() as cursor:
         cursor.execute(
             "GRANT attune_worker TO attune_test_stale_member"
@@ -468,6 +469,44 @@ def test_job_repository_is_idempotent_and_tenant_scoped(
         available_at=datetime.now(timezone.utc),
     ) is None
     assert repository.finish(TenantContext(TENANT_A), first.id, outcome="succeeded")
+
+
+def test_reconciliation_atomically_moves_only_the_canonical_leased_job(
+    initialized_database, database_url
+):
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    jobs = PostgresJobRepository(factory)
+    reconciliations = PostgresJobReconciliationRepository(factory)
+    job = jobs.enqueue(
+        TenantContext(TENANT_A),
+        kind="calendar.write",
+        capability="calendar.write",
+        payload={"canonical_ref": "opaque"},
+        idempotency_key=hashlib.sha256(b"reconciliation-job").digest(),
+    )
+    leased = jobs.claim(
+        TenantContext(TENANT_A),
+        job.id,
+        expected_kind="calendar.write",
+        expected_capability="calendar.write",
+    )
+    assert leased is not None
+    opened = reconciliations.open(
+        TenantContext(TENANT_A),
+        leased,
+        reason_code="executor_ambiguous",
+        provider_request_ref_hash=hashlib.sha256(b"provider-request").digest(),
+    )
+    assert opened.job_id == job.id
+    assert opened.state == "open"
+    assert jobs.get(TenantContext(TENANT_A), job.id).state == "reconcile"
+    assert jobs.get(TenantContext(TENANT_B), job.id) is None
+    replay = reconciliations.open(
+        TenantContext(TENANT_A),
+        leased,
+        reason_code="executor_ambiguous",
+    )
+    assert replay.id == opened.id
 
 
 def test_memory_repository_scopes_vector_search_and_soft_delete(

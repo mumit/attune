@@ -60,14 +60,27 @@ class _Jobs:
 
 
 class _Audit:
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, fail_on: int | None = None):
         self.fail = fail
+        self.fail_on = fail_on
         self.events = []
 
     def record(self, context, **event):
-        if self.fail:
+        if self.fail or self.fail_on == len(self.events) + 1:
             raise RuntimeError("audit unavailable")
         self.events.append((context, event))
+
+
+class _Reconciliations:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.opened = []
+
+    def open(self, context, job, *, reason_code):
+        if self.fail:
+            raise RuntimeError("reconciliation unavailable")
+        self.opened.append((context, job, reason_code))
+        return object()
 
 
 def _job() -> HostedJob:
@@ -83,11 +96,12 @@ def _job() -> HostedJob:
     )
 
 
-def _dispatcher(jobs, audit, execute):
+def _dispatcher(jobs, audit, execute, reconciliations=None):
     route = TaskRoute("gmail.reconcile", "gmail.read", execute)
     return WorkerDispatcher(
         jobs=jobs,
         audit=audit,
+        reconciliations=reconciliations or _Reconciliations(),
         routes={route.purpose: route},
         expected_audience=AUDIENCE,
         expected_service_account=SERVICE_ACCOUNT,
@@ -143,23 +157,60 @@ def test_duplicate_or_mismatched_delivery_has_no_effect():
 
 def test_audit_failure_prevents_effect_and_forces_reconciliation():
     jobs = _Jobs(_job())
+    reconciliations = _Reconciliations()
     executed = []
-    result = _dispatcher(jobs, _Audit(fail=True), executed.append).dispatch(
+    result = _dispatcher(
+        jobs,
+        _Audit(fail=True),
+        executed.append,
+        reconciliations,
+    ).dispatch(
         authorization="Bearer valid", raw_body=_body()
     )
     assert result.status_code == 503
     assert executed == []
-    assert jobs.finished[-1][2] == "reconcile"
+    assert reconciliations.opened[-1][2] == "pre_effect_audit"
+    assert jobs.finished == []
 
 
 def test_executor_failure_is_not_blindly_retried():
     jobs = _Jobs(_job())
+    reconciliations = _Reconciliations()
 
     def fail(context, job):
         raise RuntimeError("ambiguous provider result")
 
-    result = _dispatcher(jobs, _Audit(), fail).dispatch(
+    result = _dispatcher(jobs, _Audit(), fail, reconciliations).dispatch(
         authorization="Bearer valid", raw_body=_body()
     )
     assert result.status_code == 500
-    assert jobs.finished[-1][2] == "reconcile"
+    assert reconciliations.opened[-1][2] == "executor_ambiguous"
+    assert jobs.finished == []
+
+
+def test_job_finalize_failure_opens_reconciliation():
+    jobs = _Jobs(_job())
+    jobs.finish = lambda *args, **kwargs: False
+    reconciliations = _Reconciliations()
+    result = _dispatcher(
+        jobs,
+        _Audit(),
+        lambda context, job: None,
+        reconciliations,
+    ).dispatch(authorization="Bearer valid", raw_body=_body())
+    assert result.status_code == 503
+    assert reconciliations.opened[-1][2] == "job_finalize"
+
+
+def test_post_effect_audit_failure_opens_reconciliation():
+    jobs = _Jobs(_job())
+    reconciliations = _Reconciliations()
+    result = _dispatcher(
+        jobs,
+        _Audit(fail_on=2),
+        lambda context, job: None,
+        reconciliations,
+    ).dispatch(authorization="Bearer valid", raw_body=_body())
+    assert result.status_code == 503
+    assert reconciliations.opened[-1][2] == "post_effect_audit"
+    assert jobs.finished == []

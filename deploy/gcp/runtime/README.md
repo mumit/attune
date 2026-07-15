@@ -39,7 +39,9 @@ custom audience, then atomically rebinds tenant, job kind, and capability to
 canonical PostgreSQL state. The initial `platform.smoke` executor accepts only
 `{"probe":"dispatch-v1"}` and has no provider, model, network, secret, or
 customer-content effect. Required audit failure or executor ambiguity moves the
-job to reconciliation rather than retrying an uncertain effect.
+job to reconciliation rather than retrying an uncertain effect. That transition
+now atomically opens a tenant-bound, content-free reconciliation record with a
+fixed reason; workers cannot resolve or delete it.
 
 ## Dispatch-broker boundary
 

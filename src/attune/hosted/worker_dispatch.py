@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol
-from uuid import UUID
-
 from .repositories import HostedJob, PostgresJobRepository
 from .task_envelope import TokenVerifier, verify_task_envelope
 from .tenant import TenantContext
+
+LOG = logging.getLogger(__name__)
 
 
 class AuditSink(Protocol):
@@ -23,6 +24,16 @@ class AuditSink(Protocol):
         job_id: str,
         caller_subject: str,
     ) -> None: ...
+
+
+class ReconciliationSink(Protocol):
+    def open(
+        self,
+        context: TenantContext,
+        job: HostedJob,
+        *,
+        reason_code: str,
+    ) -> object: ...
 
 
 JobExecutor = Callable[[TenantContext, HostedJob], None]
@@ -61,6 +72,7 @@ class WorkerDispatcher:
         *,
         jobs: PostgresJobRepository,
         audit: AuditSink,
+        reconciliations: ReconciliationSink,
         routes: Mapping[str, TaskRoute],
         expected_audience: str,
         expected_service_account: str,
@@ -70,6 +82,7 @@ class WorkerDispatcher:
             raise ValueError("routes must be keyed by their exact purpose")
         self._jobs = jobs
         self._audit = audit
+        self._reconciliations = reconciliations
         self._routes = dict(routes)
         self._audience = expected_audience
         self._service_account = expected_service_account
@@ -110,7 +123,7 @@ class WorkerDispatcher:
             job=job,
             caller_subject=envelope.caller_subject,
         ):
-            self._reconcile(envelope.tenant, job.id)
+            self._reconcile(envelope.tenant, job, "pre_effect_audit")
             return DispatchResult(503)
 
         try:
@@ -123,7 +136,7 @@ class WorkerDispatcher:
                 job=job,
                 caller_subject=envelope.caller_subject,
             )
-            self._reconcile(envelope.tenant, job.id)
+            self._reconcile(envelope.tenant, job, "executor_ambiguous")
             return DispatchResult(500)
 
         if not self._record(
@@ -133,14 +146,16 @@ class WorkerDispatcher:
             job=job,
             caller_subject=envelope.caller_subject,
         ):
-            self._reconcile(envelope.tenant, job.id)
+            self._reconcile(envelope.tenant, job, "post_effect_audit")
             return DispatchResult(503)
         try:
             if not self._jobs.finish(
                 envelope.tenant, job.id, outcome="succeeded"
             ):
+                self._reconcile(envelope.tenant, job, "job_finalize")
                 return DispatchResult(503)
         except Exception:
+            self._reconcile(envelope.tenant, job, "job_finalize")
             return DispatchResult(503)
         return DispatchResult(204)
 
@@ -165,8 +180,20 @@ class WorkerDispatcher:
             return False
         return True
 
-    def _reconcile(self, context: TenantContext, job_id: UUID) -> None:
+    def _reconcile(
+        self,
+        context: TenantContext,
+        job: HostedJob,
+        reason_code: str,
+    ) -> None:
         try:
-            self._jobs.finish(context, job_id, outcome="reconcile")
-        except Exception:
-            pass
+            self._reconciliations.open(
+                context,
+                job,
+                reason_code=reason_code,
+            )
+        except Exception as error:
+            LOG.warning(
+                "job reconciliation failed (%s)",
+                type(error).__name__,
+            )

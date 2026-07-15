@@ -2,6 +2,20 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Ambiguous effects open durable reconciliation
+
+- A worker that cannot prove pre-effect audit, executor outcome, post-effect
+  audit, or canonical completion atomically moves the leased job to
+  `reconcile` and opens one tenant-bound record with a fixed reason.
+- Reconciliation records contain no provider body, credential, exception text,
+  or model output. An optional provider request reference is stored only as a
+  fixed-length one-way hash.
+- Workers can open but cannot resolve or delete records. Provider-specific
+  evidence collection and an authenticated, audited resolution workflow remain
+  a launch gate; an open record is not permission to retry.
+- This was selected over treating a 5xx as retry authority or leaving a leased
+  job without durable ambiguity state. The contract is in `reconciliation.md`.
+
 ## 2026-07 — Cross-tenant functions have memberless owners
 
 - Forced RLS remains enabled on every tenant table. Narrow cross-tenant

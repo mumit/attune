@@ -147,9 +147,11 @@ acceptable substitutes.
    dispatch-broker service, fixed jobs-queue override, and deterministic smoke
    worker are deployed in development. The brokered synthetic round trip has
    live evidence across canonical state, pre-effect audit, Cloud Tasks, worker
-   claim/execution, and post-effect audit. Provider capability executors,
-   ingress queue routing, reconciliation operations, and adversarial provider
-   evidence remain before this gate is complete.
+   claim/execution, and post-effect audit. Ambiguous worker outcomes now open a
+   durable content-free reconciliation record atomically with job state.
+   Provider capability executors, ingress queue routing, authenticated
+   resolution operations, and adversarial provider evidence remain before this
+   gate is complete.
 3. **Secret broker:** private install/revoke service, serialized encrypted
    lifecycle, exact workload authentication, intent-only audit, and live KMS
    evidence are implemented in development. Broker-mediated provider use,
