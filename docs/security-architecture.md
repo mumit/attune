@@ -252,6 +252,11 @@ entries, export jobs, and connector references. See the
 - **SEC-306.** Encryption keys MUST have documented ownership, rotation,
   recovery, regional placement, and destruction procedures.
 
+The hosted connector-vault implementation follows the envelope-encryption and
+opaque-intent contract in [`secret-broker.md`](secret-broker.md): a fresh
+AES-256-GCM DEK per credential version, tenant/connector/provider/version-bound
+associated data, KMS-wrapped DEKs, and no caller-authoritative tenant field.
+
 ## 8. Agent and capability containment
 
 ### 8.1 Typed capability gateway

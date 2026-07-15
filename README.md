@@ -66,7 +66,9 @@ control requirements, red-team cases, and hosted launch gates; the approved
 [dispatch-broker contract](docs/dispatch-broker.md) defines exclusive task
 authority and queue delivery, while the
 [audit-writer contract](docs/audit-writer.md) defines the intent-only path to
-hosted hash-chained audit events. MCP server
+hosted hash-chained audit events, and the
+[secret-broker contract](docs/secret-broker.md) defines connector credential
+encryption and use. MCP server
 implementers should use the [versioned Workspace contract](docs/mcp-contract.md).
 
 ## Development
