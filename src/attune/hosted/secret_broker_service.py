@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from .secret_broker import SecretBroker
 from .task_envelope import _google_token_verifier, _verify_claims
 
 MAX_SECRET_REQUEST_BYTES = 70_000
+LOG = logging.getLogger(__name__)
 
 
 def create_app(
@@ -64,6 +66,10 @@ def create_app(
             return None
         return parsed if str(parsed) == raw else None
 
+    @app.get("/healthz")
+    def health():
+        return jsonify({"status": "ok"})
+
     @app.post("/v1/credentials/install")
     def install():
         if not authorize():
@@ -72,7 +78,11 @@ def create_app(
         parsed = intent_id(body) if body is not None else None
         if parsed is None or not isinstance(body["credential"], dict):
             return jsonify({"error": "invalid_request"}), 400
-        result = broker.install(parsed, body["credential"])
+        try:
+            result = broker.install(parsed, body["credential"])
+        except Exception as error:
+            LOG.warning("credential install failed (%s)", type(error).__name__)
+            return jsonify({"error": "broker_unavailable"}), 503
         return ("", result.status_code)
 
     @app.post("/v1/credentials/revoke")
@@ -83,7 +93,11 @@ def create_app(
         parsed = intent_id(body) if body is not None else None
         if parsed is None:
             return jsonify({"error": "invalid_request"}), 400
-        result = broker.revoke(parsed)
+        try:
+            result = broker.revoke(parsed)
+        except Exception as error:
+            LOG.warning("credential revoke failed (%s)", type(error).__name__)
+            return jsonify({"error": "broker_unavailable"}), 503
         return ("", result.status_code)
 
     return app

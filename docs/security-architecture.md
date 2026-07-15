@@ -251,11 +251,17 @@ entries, export jobs, and connector references. See the
   Production secrets MUST never be copied to development or test environments.
 - **SEC-306.** Encryption keys MUST have documented ownership, rotation,
   recovery, regional placement, and destruction procedures.
+- **SEC-307.** A credential installation or revocation boundary MUST accept an
+  opaque one-time intent rather than caller-authoritative tenant, connector,
+  provider, capability, or key fields. Its workload identity and exact audience
+  MUST be verified before parsing secret material, and the protected effect
+  MUST fail closed unless content-free pre-effect audit is durable.
 
 The hosted connector-vault implementation follows the envelope-encryption and
 opaque-intent contract in [`secret-broker.md`](secret-broker.md): a fresh
 AES-256-GCM DEK per credential version, tenant/connector/provider/version-bound
-associated data, KMS-wrapped DEKs, and no caller-authoritative tenant field.
+associated data, KMS-wrapped DEKs, exact control-plane workload authentication,
+content-free intent-based audit, and no caller-authoritative tenant field.
 
 ## 8. Agent and capability containment
 

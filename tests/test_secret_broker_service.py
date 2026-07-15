@@ -28,6 +28,11 @@ class Broker:
         return SimpleNamespace(status_code=204)
 
 
+class FailingBroker(Broker):
+    def install(self, intent_id, credential):
+        raise RuntimeError("secret detail")
+
+
 def claims(token, audience):
     assert token == "valid" and audience == AUDIENCE
     now = int(time.time())
@@ -70,6 +75,18 @@ def test_install_requires_identity_and_exact_secret_envelope():
         headers=headers,
         json={"intent_id": str(INTENT), "credential": {}, "tenant_id": str(INTENT)},
     ).status_code == 400
+
+
+def test_health_is_content_free_and_broker_errors_are_generic():
+    app = client(FailingBroker())
+    assert app.get("/healthz").get_json() == {"status": "ok"}
+    response = app.post(
+        "/v1/credentials/install",
+        headers={"Authorization": "Bearer valid"},
+        json={"intent_id": str(INTENT), "credential": {"token": "secret"}},
+    )
+    assert response.status_code == 503
+    assert b"secret detail" not in response.data
 
 
 def test_revoke_accepts_no_credential_or_tenant_fields():

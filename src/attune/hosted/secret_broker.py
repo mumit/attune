@@ -43,9 +43,7 @@ class SecretBroker:
         intent = self._lease(intent_id, "control_plane", "install")
         if intent is None:
             return SecretBrokerResult(404)
-        if not self._audit.record(
-            intent, action="credential.install", outcome="allowed"
-        ):
+        if not self._record(intent, action="credential.install", outcome="allowed"):
             return SecretBrokerResult(503)
         version = (intent.credential_version or 0) + 1
         try:
@@ -63,9 +61,7 @@ class SecretBroker:
             return SecretBrokerResult(503)
         return SecretBrokerResult(
             204
-            if self._audit.record(
-                intent, action="credential.install", outcome="observed"
-            )
+            if self._record(intent, action="credential.install", outcome="observed")
             else 503
         )
 
@@ -73,9 +69,7 @@ class SecretBroker:
         intent = self._lease(intent_id, "control_plane", "revoke")
         if intent is None:
             return SecretBrokerResult(404)
-        if not self._audit.record(
-            intent, action="credential.revoke", outcome="allowed"
-        ):
+        if not self._record(intent, action="credential.revoke", outcome="allowed"):
             return SecretBrokerResult(503)
         try:
             revoked = self._vault.revoke(intent.id)
@@ -85,9 +79,7 @@ class SecretBroker:
             return SecretBrokerResult(503)
         return SecretBrokerResult(
             204
-            if self._audit.record(
-                intent, action="credential.revoke", outcome="observed"
-            )
+            if self._record(intent, action="credential.revoke", outcome="observed")
             else 503
         )
 
@@ -101,3 +93,15 @@ class SecretBroker:
         if intent is None or intent.operation != operation:
             return None
         return intent
+
+    def _record(
+        self,
+        intent: LeasedCredentialIntent,
+        *,
+        action: str,
+        outcome: str,
+    ) -> bool:
+        try:
+            return self._audit.record(intent, action=action, outcome=outcome)
+        except Exception:
+            return False

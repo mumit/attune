@@ -56,6 +56,11 @@ class Audit:
         return next(self.results)
 
 
+class FailingAudit:
+    def record(self, *args, **kwargs):
+        raise RuntimeError("audit detail")
+
+
 def test_install_audits_before_encrypting_and_storing():
     vault, cipher, audit = Vault(intent()), Cipher(), Audit()
     result = SecretBroker(vault=vault, cipher=cipher, audit=audit).install(
@@ -75,6 +80,15 @@ def test_install_audits_before_encrypting_and_storing():
 def test_install_does_not_touch_secret_when_pre_audit_fails():
     vault, cipher = Vault(intent()), Cipher()
     result = SecretBroker(vault=vault, cipher=cipher, audit=Audit((False,))).install(
+        INTENT, {"refresh_token": "restricted"}
+    )
+    assert result.status_code == 503
+    assert cipher.calls == [] and vault.stored == []
+
+
+def test_install_fails_closed_when_audit_raises():
+    vault, cipher = Vault(intent()), Cipher()
+    result = SecretBroker(vault=vault, cipher=cipher, audit=FailingAudit()).install(
         INTENT, {"refresh_token": "restricted"}
     )
     assert result.status_code == 503

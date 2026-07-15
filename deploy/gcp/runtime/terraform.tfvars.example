@@ -1,6 +1,7 @@
 state_bucket            = "attune-development-example-attune-tfstate"
 foundation_state_prefix = "foundation"
 audit_writer_image      = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-audit-writer@sha256:REPLACE"
+secret_broker_image     = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-secret-broker@sha256:REPLACE"
 
 labels = {
   owner       = "platform"

@@ -19,6 +19,16 @@ variable "audit_writer_image" {
   }
 }
 
+variable "secret_broker_image" {
+  description = "Artifact Registry secret-broker image pinned by sha256 digest."
+  type        = string
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.secret_broker_image))
+    error_message = "secret_broker_image must be an immutable @sha256 Artifact Registry reference."
+  }
+}
+
 variable "labels" {
   description = "Additional non-sensitive resource labels."
   type        = map(string)

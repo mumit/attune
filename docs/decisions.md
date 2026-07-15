@@ -2,6 +2,25 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Credential mutation uses an opaque-intent secret broker
+
+- The control plane creates a short-lived tenant-bound install or revoke intent;
+  the private broker accepts only that canonical intent UUID plus the credential
+  object required for installation. It does not accept tenant, connector,
+  provider, capability, KMS, or destination authority from the request.
+- Cloud Run IAM and application verification both restrict the caller to the
+  exact control-plane service account and a stable custom audience. Static
+  shared API keys and generated-URL guessing are rejected.
+- The broker is the only connector-KMS user. It creates a fresh AES-256-GCM DEK
+  per version, binds ciphertext to canonical tenant/connector/provider/version
+  state, wraps the DEK with KMS, and persists no plaintext.
+- A content-free tenant-bound audit event is required before each mutation and
+  again after it. Audit/KMS/database ambiguity fails closed; serialized leases
+  prevent overlapping install/revoke effects for one connector.
+- Provider use remains broker-mediated rather than releasing refresh tokens to
+  workers. Live KMS evidence and fixed Google operations are separate launch
+  gates. The complete contract is in `secret-broker.md`.
+
 ## 2026-07 — Hosted audit accepts tenant-bound intents, not event bodies
 
 - Tenant-scoped workloads persist idempotent audit intents under forced RLS.

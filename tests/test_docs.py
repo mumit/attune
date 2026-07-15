@@ -166,3 +166,20 @@ def test_audit_writer_is_private_intent_only_and_least_privileged():
     assert 'FROM attune_audit_writer' in migration
     assert 'caller-supplied tenant' in architecture
     assert 'only the opaque audit-intent UUID' in architecture
+
+
+def test_secret_broker_is_private_exact_identity_and_kms_bound():
+    root = ROOT / "deploy" / "gcp" / "runtime"
+    terraform = "\n".join(path.read_text() for path in sorted(root.glob("*.tf")))
+    architecture = (ROOT / "docs" / "secret-broker.md").read_text()
+    normalized_architecture = " ".join(architecture.split())
+    dockerfile = (ROOT / "deploy" / "secret-broker" / "Dockerfile").read_text()
+
+    assert 'custom_audiences' in terraform
+    assert 'ATTUNE_CONTROL_PLANE_SERVICE_ACCOUNT' in terraform
+    assert 'ATTUNE_CONNECTOR_KMS_KEY' in terraform
+    assert 'secret_broker_invoker' in terraform
+    assert 'allUsers' not in terraform
+    assert 'USER 65532:65532' in dockerfile
+    assert 'no caller-authoritative tenant field' in normalized_architecture
+    assert 'content-free `allowed` audit intent' in normalized_architecture
