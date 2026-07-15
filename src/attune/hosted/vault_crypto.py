@@ -126,7 +126,9 @@ class GoogleKmsKeyWrapper:
         )
         if not response.verified_plaintext_crc32c:
             raise RuntimeError("KMS did not verify the DEK checksum")
-        if response.ciphertext_crc32c.value != _crc32c(response.ciphertext):
+        if _checksum_value(response.ciphertext_crc32c) != _crc32c(
+            response.ciphertext
+        ):
             raise RuntimeError("KMS wrapped-DEK checksum mismatch")
         return bytes(response.ciphertext)
 
@@ -140,7 +142,9 @@ class GoogleKmsKeyWrapper:
                 "ciphertext_crc32c": Int64Value(value=_crc32c(wrapped_dek)),
             }
         )
-        if response.plaintext_crc32c.value != _crc32c(response.plaintext):
+        if _checksum_value(response.plaintext_crc32c) != _crc32c(
+            response.plaintext
+        ):
             raise RuntimeError("KMS unwrapped-DEK checksum mismatch")
         return bytes(response.plaintext)
 
@@ -174,3 +178,14 @@ def _crc32c(value: bytes) -> int:
     import google_crc32c
 
     return int.from_bytes(google_crc32c.Checksum(value).digest(), "big")
+
+
+def _checksum_value(value: Any) -> int:
+    """Normalize protobuf-plus scalar and wrapper checksum representations."""
+
+    candidate = value if isinstance(value, int) and not isinstance(value, bool) else None
+    if candidate is None:
+        candidate = getattr(value, "value", None)
+    if not isinstance(candidate, int) or isinstance(candidate, bool):
+        raise RuntimeError("KMS response checksum is unavailable")
+    return candidate

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
-from attune.hosted.vault_crypto import EnvelopeCipher
+from attune.hosted.vault_crypto import (
+    EnvelopeCipher,
+    GoogleKmsKeyWrapper,
+    _crc32c,
+)
 
 TENANT = UUID("10000000-0000-4000-8000-000000000201")
 CONNECTOR = UUID("10000000-0000-4000-8000-000000000202")
@@ -86,3 +91,40 @@ def test_cipher_refuses_empty_or_oversized_credentials():
             {"token": "x" * 70_000}, tenant_id=TENANT,
             connector_id=CONNECTOR, provider="google", credential_version=1,
         )
+
+
+class KmsClient:
+    def __init__(self, *, wrapped_checksums=False):
+        self.wrapped_checksums = wrapped_checksums
+
+    def _checksum(self, value):
+        checksum = _crc32c(value)
+        return SimpleNamespace(value=checksum) if self.wrapped_checksums else checksum
+
+    def encrypt(self, request):
+        plaintext = request["plaintext"]
+        ciphertext = b"wrapped:" + plaintext
+        return SimpleNamespace(
+            verified_plaintext_crc32c=True,
+            ciphertext=ciphertext,
+            ciphertext_crc32c=self._checksum(ciphertext),
+        )
+
+    def decrypt(self, request):
+        plaintext = request["ciphertext"].removeprefix(b"wrapped:")
+        return SimpleNamespace(
+            plaintext=plaintext,
+            plaintext_crc32c=self._checksum(plaintext),
+        )
+
+
+@pytest.mark.parametrize("wrapped_checksums", [False, True])
+def test_google_kms_wrapper_accepts_client_checksum_representations(
+    wrapped_checksums,
+):
+    wrapper = GoogleKmsKeyWrapper(
+        Wrapper.key_resource,
+        client=KmsClient(wrapped_checksums=wrapped_checksums),
+    )
+    plaintext = bytes(range(32))
+    assert wrapper.unwrap(wrapper.wrap(plaintext)) == plaintext
