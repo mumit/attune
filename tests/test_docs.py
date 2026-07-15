@@ -135,7 +135,8 @@ def test_hosted_data_boundary_is_private_pinned_and_fail_closed():
     assert "Customer data remains prohibited" in normalized_guide
     assert "Provider content and executable arguments" in normalized_guide
     assert "does not sign arbitrary body fields" in normalized_guide
-    assert "live worker service remains prohibited" in normalized_guide
+    assert "live provider executor remains prohibited" in normalized_guide
+    assert "memberless `NOLOGIN BYPASSRLS` roles" in normalized_guide
 
 
 def test_dispatch_broker_boundary_is_documented_and_fail_closed():

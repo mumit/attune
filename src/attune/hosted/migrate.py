@@ -25,6 +25,32 @@ RUNTIME_ROLES = (
     "attune_audit_writer",
 )
 
+FUNCTION_OWNER_ROLES = (
+    "attune_dispatch_executor",
+    "attune_audit_executor",
+    "attune_vault_executor",
+)
+
+FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
+    {
+        ("attune_dispatch_executor", "attune.dispatch_intents", "SELECT"),
+        ("attune_dispatch_executor", "attune.dispatch_intents", "UPDATE"),
+        ("attune_dispatch_executor", "attune.jobs", "SELECT"),
+        ("attune_dispatch_executor", "attune.audit_intents", "SELECT"),
+        ("attune_dispatch_executor", "attune.audit_intents", "INSERT"),
+        ("attune_dispatch_executor", "attune.audit_intents", "UPDATE"),
+        ("attune_audit_executor", "attune.audit_intents", "SELECT"),
+        ("attune_audit_executor", "attune.audit_intents", "UPDATE"),
+        ("attune_vault_executor", "attune.credential_intents", "SELECT"),
+        ("attune_vault_executor", "attune.credential_intents", "UPDATE"),
+        ("attune_vault_executor", "attune.connector_credentials", "SELECT"),
+        ("attune_vault_executor", "attune.connector_credentials", "INSERT"),
+        ("attune_vault_executor", "attune.connector_credentials", "UPDATE"),
+        ("attune_vault_executor", "attune.connectors", "SELECT"),
+        ("attune_vault_executor", "attune.connectors", "UPDATE"),
+    }
+)
+
 
 def _dispatch_function_invariants_hold(row: Any) -> bool:
     """Normalize DB-API row containers across psycopg and pg8000."""
@@ -245,6 +271,74 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "runtime database roles must be unprivileged NOLOGIN roles"
             )
 
+        placeholders = ", ".join("%s" for _ in FUNCTION_OWNER_ROLES)
+        cursor.execute(
+            f"""
+            SELECT r.rolname, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
+                   r.rolcanlogin, r.rolinherit, r.rolbypassrls,
+                   EXISTS (
+                       SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                        WHERE membership.roleid = r.oid
+                           OR membership.member = r.oid
+                   )
+              FROM pg_catalog.pg_roles AS r
+             WHERE r.rolname IN ({placeholders})
+            """,
+            FUNCTION_OWNER_ROLES,
+        )
+        owner_roles = {row[0]: tuple(row[1:]) for row in cursor.fetchall()}
+        if set(owner_roles) != set(FUNCTION_OWNER_ROLES) or any(
+            flags != (False, False, False, False, False, True, False)
+            for flags in owner_roles.values()
+        ):
+            raise RuntimeError(
+                "function owner roles must be memberless NOLOGIN BYPASSRLS roles"
+            )
+
+        cursor.execute(
+            """
+            SELECT role.rolname, namespace.nspname || '.' || class.relname,
+                   acl.privilege_type
+              FROM pg_catalog.pg_roles AS role
+              JOIN pg_catalog.pg_class AS class ON class.relkind = 'r'
+              JOIN pg_catalog.pg_namespace AS namespace
+                ON namespace.oid = class.relnamespace
+              CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(
+                  class.relacl,
+                  pg_catalog.acldefault('r', class.relowner)
+              )) AS acl
+             WHERE role.rolname = ANY(%s)
+               AND namespace.nspname = 'attune'
+               AND acl.grantee = role.oid
+            """,
+            (list(FUNCTION_OWNER_ROLES),),
+        )
+        owner_table_privileges = {tuple(row) for row in cursor.fetchall()}
+        if owner_table_privileges != FUNCTION_OWNER_TABLE_PRIVILEGES:
+            raise RuntimeError("function owner table privileges do not match policy")
+
+        cursor.execute(
+            """
+            SELECT role.rolname,
+                   pg_catalog.has_schema_privilege(role.oid, 'attune', 'USAGE'),
+                   pg_catalog.has_schema_privilege(role.oid, 'attune', 'CREATE'),
+                   pg_catalog.has_schema_privilege(role.oid, 'attune_ext', 'USAGE'),
+                   pg_catalog.has_schema_privilege(role.oid, 'attune_ext', 'CREATE')
+              FROM pg_catalog.pg_roles AS role
+             WHERE role.rolname = ANY(%s)
+            """,
+            (list(FUNCTION_OWNER_ROLES),),
+        )
+        owner_schema_privileges = {
+            row[0]: tuple(row[1:]) for row in cursor.fetchall()
+        }
+        if owner_schema_privileges != {
+            "attune_dispatch_executor": (True, False, True, False),
+            "attune_audit_executor": (True, False, False, False),
+            "attune_vault_executor": (True, False, False, False),
+        }:
+            raise RuntimeError("function owner schema privileges do not match policy")
+
         cursor.execute(
             """
             SELECT e.extname, n.nspname
@@ -308,8 +402,10 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                              )) AS acl
                             WHERE acl.grantee = 0
                               AND acl.privilege_type = 'EXECUTE'
-                       )
+                       ),
+                       owner.rolname = 'attune_dispatch_executor'
                   FROM pg_catalog.pg_proc AS p
+                  JOIN pg_catalog.pg_roles AS owner ON owner.oid = p.proowner
                  WHERE p.oid = %s::pg_catalog.regprocedure
                 """,
                 (
@@ -319,11 +415,12 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 ),
             )
             row = cursor.fetchone()
-            if not _dispatch_function_invariants_hold(row):
+            if tuple(row) != (True, True, True, True, True):
                 raise RuntimeError(
                     f"dispatch function invariant failed for {signature}: "
                     f"security_definer={row[0]}, search_path={row[1]}, "
-                    f"broker_execute={row[2]}, no_public_execute={row[3]}"
+                    f"broker_execute={row[2]}, no_public_execute={row[3]}, "
+                    f"safe_owner={row[4]}"
                 )
         cursor.execute(
             "SELECT pg_catalog.has_table_privilege(%s, %s, %s)",
@@ -340,29 +437,35 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             (
                 "attune.write_audit_intent(uuid)",
                 "attune_audit_writer",
+                "attune_audit_executor",
             ),
             (
                 "attune.request_dispatch_audit(uuid,text,text)",
                 "attune_dispatch_broker",
+                "attune_dispatch_executor",
             ),
             (
                 "attune.lease_credential_intent(uuid,text,integer)",
                 "attune_secret_broker",
+                "attune_vault_executor",
             ),
             (
                 "attune.finalize_credential_intent(uuid,text,text)",
                 "attune_secret_broker",
+                "attune_vault_executor",
             ),
             (
                 "attune.store_connector_credential(uuid,bytea,bytea,bytea,text,integer)",
                 "attune_secret_broker",
+                "attune_vault_executor",
             ),
             (
                 "attune.revoke_connector_credential(uuid)",
                 "attune_secret_broker",
+                "attune_vault_executor",
             ),
         )
-        for signature, role in privileged_functions:
+        for signature, role, expected_owner in privileged_functions:
             cursor.execute(
                 """
                 SELECT p.prosecdef,
@@ -378,14 +481,16 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                              )) AS acl
                             WHERE acl.grantee = 0
                               AND acl.privilege_type = 'EXECUTE'
-                       )
+                       ),
+                       owner.rolname = %s
                   FROM pg_catalog.pg_proc AS p
+                  JOIN pg_catalog.pg_roles AS owner ON owner.oid = p.proowner
                  WHERE p.oid = %s::pg_catalog.regprocedure
                 """,
-                (role, signature, signature),
+                (role, signature, expected_owner, signature),
             )
             row = cursor.fetchone()
-            if not _dispatch_function_invariants_hold(row):
+            if tuple(row) != (True, True, True, True, True):
                 raise RuntimeError(
                     f"privileged function invariant failed for {signature}"
                 )

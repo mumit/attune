@@ -68,7 +68,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0008_vault_mutation_serialization.sql"
+    assert migrations[-1].name == "0009_privileged_function_owners.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -163,7 +163,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 8
+    assert apply_migrations(admin) == 9
     with admin.cursor() as cursor:
         cursor.execute(
             "GRANT attune_worker TO attune_test_stale_member"

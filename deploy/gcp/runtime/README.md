@@ -50,6 +50,13 @@ before task creation, and can enqueue only the foundation jobs queue. Runtime
 configuration contains only the `platform.smoke` route, while the queue itself
 independently forces the worker target and delivery identity.
 
+Services that invoke another internal Cloud Run service use Direct VPC
+`ALL_TRAFFIC` egress. This is required because an internal service is addressed
+through its HTTPS `run.app` origin: `PRIVATE_RANGES_ONLY` would bypass the VPC
+and fail the callee's internal-ingress check. The audit writer and database
+migrator need only private Cloud SQL and retain `PRIVATE_RANGES_ONLY`. The
+development VPC has no Cloud NAT, so arbitrary internet egress remains denied.
+
 ## Development deployment
 
 Apply `deploy/gcp/data` and successfully execute its migrator before deploying
@@ -155,7 +162,7 @@ gcloud run jobs create "attune-ENVIRONMENT-dispatch-smoke" \
   --service-account="$CONTROL_PLANE_SA" \
   --set-env-vars="ATTUNE_CLOUD_SQL_INSTANCE=$CLOUD_SQL_INSTANCE,ATTUNE_DB_NAME=attune,ATTUNE_DB_USER=$CONTROL_PLANE_DB_USER,ATTUNE_DISPATCH_BROKER_URL=$DISPATCH_BROKER_URL,ATTUNE_DISPATCH_BROKER_AUDIENCE=$DISPATCH_BROKER_AUDIENCE,ATTUNE_REGION=$REGION" \
   --network="$VPC_NETWORK" --subnet="$VPC_SUBNETWORK" \
-  --vpc-egress=private-ranges-only \
+  --vpc-egress=all-traffic \
   --command=python --args=-m,attune.hosted.dispatch_smoke \
   --tasks=1 --max-retries=0 --task-timeout=120s --execute-now --wait
 gcloud run jobs delete "attune-ENVIRONMENT-dispatch-smoke" \

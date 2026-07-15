@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from collections.abc import Iterable
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -17,6 +18,10 @@ from .tenant import TenantContext, tenant_transaction
 
 SMOKE_TENANT = UUID("00000000-0000-4000-8000-000000000001")
 SMOKE_SLUG = "platform-smoke-development"
+
+
+def _row_tuple(row: Iterable[object] | None) -> tuple[object, ...] | None:
+    return None if row is None else tuple(row)
 
 
 def _origin(value: str, name: str) -> str:
@@ -53,7 +58,7 @@ def _ensure_smoke_tenant(region: str) -> TenantContext:
                 (SMOKE_TENANT,),
             )
             row = cursor.fetchone()
-            if row != (SMOKE_SLUG, region, "active"):
+            if _row_tuple(row) != (SMOKE_SLUG, region, "active"):
                 raise RuntimeError("platform smoke tenant does not match")
     return context
 
@@ -110,7 +115,7 @@ def _verify_worker_audit(context: TenantContext, job_id: UUID) -> None:
                 """,
                 (context.tenant_id, target_hash),
             )
-            events = cursor.fetchall()
+            events = [tuple(row) for row in cursor.fetchall()]
     if events != [
         ("worker.job.claimed", "allowed"),
         ("worker.job.execute", "allowed"),

@@ -15,9 +15,9 @@ to the first GCP implementation.
 | Web control plane | Cloud Run behind external HTTPS load balancing and Cloud Armor | No | Yes |
 | Provider/channel ingress | Dedicated Cloud Run service with verified Slack, Chat, Calendar, and Pub/Sub handlers | Signing material only where verification requires it | Yes |
 | Durable dispatch | Cloud Tasks with a dedicated OIDC dispatch identity | No | No |
-| Dispatch broker | Private Cloud Run service and the only Cloud Tasks enqueuer | No | Fixed smoke route implemented in development; IAM only |
-| Tenant worker | Private Cloud Run service, one authenticated job envelope per request | No | Deterministic smoke route implemented in development; IAM only |
-| Secret broker | Private Cloud Run service with the only connector-vault KMS identity | Yes | Implemented in development; IAM only |
+| Dispatch broker | Private Cloud Run service and the only Cloud Tasks enqueuer | No | No (internal ingress and IAM) |
+| Tenant worker | Private Cloud Run service, one authenticated job envelope per request | No | No (internal ingress and task-delivery IAM) |
+| Secret broker | Private Cloud Run service with the only connector-vault KMS identity | Yes | No (internal ingress and IAM) |
 | Relational/vector data | Private-IP Cloud SQL PostgreSQL with IAM authentication, RLS, and `vector` | No | No |
 | Audit writer | Private intent-only service writing canonical events to PostgreSQL and retained Cloud Storage | No | Implemented in development |
 | Images | Artifact Registry with provenance and vulnerability policy gates | No | No |
@@ -113,10 +113,11 @@ an Attune-signed authorization statement. The worker dispatch core consequently
 rebinds the exact purpose and capability while atomically claiming canonical
 database state, requires a content-free audit event before execution, and sends
 ambiguous executor or audit outcomes to reconciliation rather than blind retry.
-The live worker endpoint is intentionally not deployed until queue target
-routing, producer permissions, the private audit-writer path, and registered
-deterministic capability executors exist. Higher-assurance cells may also use
-producer signatures or one-time job capabilities as an additional boundary.
+The development worker is deployed only with the content-free deterministic
+`platform.smoke` capability after queue target routing, producer permissions,
+and the private audit-writer path were installed. Higher-assurance cells may
+also use producer signatures or one-time job capabilities as an additional
+boundary.
 
 The approved broker contract is documented in
 [`dispatch-broker.md`](dispatch-broker.md). Producers persist a tenant-bound
@@ -144,9 +145,11 @@ acceptable substitutes.
    dispatch boundary, exclusive broker IAM, tenant-bound audit outbox, and
    private audit-writer service are implemented in development. The strict
    dispatch-broker service, fixed jobs-queue override, and deterministic smoke
-   worker are deployed in development. Provider capability executors, ingress
-   queue routing, reconciliation operations, and adversarial live evidence
-   remain before this gate is complete.
+   worker are deployed in development. The brokered synthetic round trip has
+   live evidence across canonical state, pre-effect audit, Cloud Tasks, worker
+   claim/execution, and post-effect audit. Provider capability executors,
+   ingress queue routing, reconciliation operations, and adversarial provider
+   evidence remain before this gate is complete.
 3. **Secret broker:** private install/revoke service, serialized encrypted
    lifecycle, exact workload authentication, intent-only audit, and live KMS
    evidence are implemented in development. Broker-mediated provider use,

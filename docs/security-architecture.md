@@ -225,6 +225,11 @@ exports, and deletion markers.
   audit intent under the storage boundary; privileged writers MUST resolve that
   intent server-side and atomically append it. Fixed-purpose infrastructure
   brokers MAY create intents only by resolving canonical state.
+- **SEC-209.** A cross-tenant `SECURITY DEFINER` function under forced RLS MUST
+  have a dedicated `NOLOGIN BYPASSRLS` owner with no members, no superuser or
+  role/database-creation authority, and only its reviewed table/function
+  privileges. Runtime and IAM login roles MUST remain `NOBYPASSRLS`, MUST NOT
+  own these functions, and MUST NOT receive the owner's direct table access.
 
 Automated isolation tests MUST attempt every operation with another tenant's
 IDs, installations, approval nonces, queue records, vector filters, cache
@@ -450,6 +455,10 @@ through protected files or standard input rather than interpolated shell text.
   publicly reachable.
 - Worker egress MUST be deny-by-default and limited to required internal
   services and approved provider/model endpoints.
+- Calls to internal Cloud Run HTTPS origins MUST traverse the private VPC using
+  all-traffic egress so internal-ingress provenance is preserved. Environments
+  without an approved egress gateway or Cloud NAT MUST fail closed for arbitrary
+  internet destinations.
 - Production, staging, development, and security-test environments MUST use
   separate projects/accounts, credentials, OAuth clients, and customer data.
 - Infrastructure changes MUST be declarative, reviewed, logged, and applied by

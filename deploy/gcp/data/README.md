@@ -23,6 +23,11 @@ application, public endpoint, connector credential, tenant, or customer record.
 - Runtime database roles are fixed, `NOLOGIN`, non-superuser, and
   `NOBYPASSRLS`. Each role is reconciled to exactly one foundation IAM database
   user; stale members are revoked.
+- Cross-tenant `SECURITY DEFINER` functions are owned by three distinct
+  memberless `NOLOGIN BYPASSRLS` roles for dispatch, audit writing, and vault
+  mutation. No IAM or runtime login is a member. Each owner has only the table
+  privileges required by its fixed functions; temporary migrator membership
+  and schema-create authority are revoked inside the migration transaction.
 - Every tenant table enables and forces RLS. Missing transaction-local tenant
   context raises an error rather than returning an ambiguous empty result.
 - Audit events can only be appended through the tenant-checking hash-chain
@@ -91,14 +96,15 @@ Cloud Tasks OIDC authenticates the Google-managed delivery and exact dispatch
 service account; it does not sign arbitrary body fields on behalf of Attune.
 The dispatch core therefore binds purpose and capability again inside the
 atomic database claim and refuses to execute when the audit boundary is
-unavailable. A live worker service remains prohibited until its queue has
+unavailable. A live provider executor remains prohibited until its queue has
 fixed target routing and least-privilege producers, the private audit writer
-exists, and each registered executor passes deterministic capability and
-ambiguous-effect review. Deploying a generic handler before those controls
-would turn an identifier envelope into unintended authority. The private
-intent-only audit writer and credential-mutation secret broker are now deployed
-from `deploy/gcp/runtime`; the dispatch broker, fixed worker routes, registered
-executors, and broker-mediated provider operations remain required.
+exists, and the executor passes deterministic capability and ambiguous-effect
+review. Deploying a generic handler before those controls would turn an
+identifier envelope into unintended authority. The private intent-only audit
+writer, credential-mutation secret broker, dispatch broker, fixed jobs-queue
+route, and content-free deterministic smoke worker are now deployed from
+`deploy/gcp/runtime`. Provider capability executors and broker-mediated
+provider operations remain required.
 
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value

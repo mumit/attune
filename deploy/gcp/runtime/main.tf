@@ -216,7 +216,10 @@ resource "google_cloud_run_v2_service" "worker" {
     }
 
     vpc_access {
-      egress = "PRIVATE_RANGES_ONLY"
+      # The worker calls private Cloud Run services by their HTTPS run.app
+      # origins. ALL_TRAFFIC preserves internal-ingress provenance; without
+      # Cloud NAT it also fails closed for arbitrary internet egress.
+      egress = "ALL_TRAFFIC"
       network_interfaces {
         network    = local.foundation.network_id
         subnetwork = local.foundation.subnetwork_id
@@ -349,7 +352,8 @@ resource "google_cloud_run_v2_service" "dispatch_broker" {
     }
 
     vpc_access {
-      egress = "PRIVATE_RANGES_ONLY"
+      # The broker must reach the internal audit writer through this VPC.
+      egress = "ALL_TRAFFIC"
       network_interfaces {
         network    = local.foundation.network_id
         subnetwork = local.foundation.subnetwork_id
@@ -467,7 +471,8 @@ resource "google_cloud_run_v2_service" "secret_broker" {
     }
 
     vpc_access {
-      egress = "PRIVATE_RANGES_ONLY"
+      # The secret broker must reach the internal audit writer through this VPC.
+      egress = "ALL_TRAFFIC"
       network_interfaces {
         network    = local.foundation.network_id
         subnetwork = local.foundation.subnetwork_id

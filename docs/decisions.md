@@ -2,6 +2,21 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Cross-tenant functions have memberless owners
+
+- Forced RLS remains enabled on every tenant table. Narrow cross-tenant
+  `SECURITY DEFINER` functions are owned by distinct dispatch, audit, and vault
+  `NOLOGIN BYPASSRLS` roles so the functions can resolve opaque intents without
+  accepting a caller-selected tenant.
+- No IAM/runtime login is a member of an owner role. The roles are non-superuser,
+  cannot create roles or databases, cannot log in, and receive only the table
+  privileges required by their fixed functions.
+- The migrator receives owner-role membership and schema-create authority only
+  inside the migration transaction, revokes both before commit, and verifies
+  function ownership, role flags, and zero members after every run.
+- This was selected over disabling forced RLS, granting runtime roles
+  `BYPASSRLS`, or giving brokers direct cross-tenant table access.
+
 ## 2026-07 — Credential mutation uses an opaque-intent secret broker
 
 - The control plane creates a short-lived tenant-bound install or revoke intent;
@@ -61,6 +76,8 @@ Newest first. This log records decisions that constrain current implementation.
 - Hosted PostgreSQL migrations are immutable and checksum recorded. A separate
   private Cloud Run job owns schema changes through a dedicated IAM database
   identity; runtime identities never own tables or receive `BYPASSRLS`.
+  Memberless `NOLOGIN` function-owner roles may hold `BYPASSRLS` solely for
+  reviewed cross-tenant `SECURITY DEFINER` functions.
 - Every durable customer object carries an immutable tenant ID and is forced
   through RLS. Composite foreign keys prevent cross-tenant relationships, and
   variable-dimension pgvector rows remain inside the same policy boundary.

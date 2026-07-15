@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from attune.hosted.dispatch_smoke import _origin, _wait_for_success
+from attune.hosted.dispatch_smoke import _origin, _row_tuple, _wait_for_success
 from attune.hosted.tenant import TenantContext
 
 
@@ -29,6 +29,20 @@ def test_dispatch_smoke_accepts_only_https_origins():
     ):
         with pytest.raises(ValueError):
             _origin(value, "url")
+
+
+def test_dispatch_smoke_normalizes_dbapi_rows():
+    assert _row_tuple(["slug", "region", "active"]) == (
+        "slug",
+        "region",
+        "active",
+    )
+    assert _row_tuple(("slug", "region", "active")) == (
+        "slug",
+        "region",
+        "active",
+    )
+    assert _row_tuple(None) is None
 
 
 def test_dispatch_smoke_fails_on_ambiguous_terminal_state():
