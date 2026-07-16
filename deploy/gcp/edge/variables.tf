@@ -99,6 +99,12 @@ variable "enable_hosted_policy" {
   default     = false
 }
 
+variable "enable_hosted_channels" {
+  description = "Expose the recent-authenticated effect-free hosted channel preference ceremony."
+  type        = bool
+  default     = false
+}
+
 variable "google_oauth_provider_ready" {
   description = "Explicit operator attestation that the separate Workspace web client, exact redirect, consent screen, secret version, and negative tests are ready."
   type        = bool

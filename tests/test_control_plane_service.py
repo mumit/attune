@@ -146,6 +146,35 @@ class Policies:
         return type("Activation", (), {"status": self.status})()
 
 
+class Channels:
+    def __init__(self, onboarding, preferences=None, failure=None):
+        self.onboarding = onboarding
+        self.preferences = preferences
+        self.failure = failure
+        self.calls = []
+
+    def read(self, context, *, principal_id):
+        self.calls.append(("read", context, principal_id))
+        if self.failure:
+            raise self.failure
+        return self.preferences
+
+    def configure(self, context, **kwargs):
+        self.calls.append(("configure", context, kwargs))
+        if self.failure:
+            raise self.failure
+        self.onboarding.state.channels = "authorized"
+        self.preferences = type(
+            "Preferences",
+            (),
+            {
+                "interaction_channels": tuple(sorted(kwargs["interaction_channels"])),
+                "brief_channels": tuple(sorted(kwargs["brief_channels"])),
+            },
+        )()
+        return self.preferences
+
+
 def verified(_token, project_id):
     assert project_id == PROJECT
     return VerifiedIdentity(
@@ -711,3 +740,70 @@ def test_hosted_policy_requires_recent_auth_and_audited_service():
     assert response.status_code == 503
     assert response.get_json() == {"error": "policy_unavailable"}
     assert b"private audit" not in response.data
+
+
+def test_hosted_channels_are_bounded_recent_auth_and_effect_free():
+    onboarding = Onboarding(OnboardingState())
+    channels = Channels(onboarding)
+    client, _sessions = signed_in_client(
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_channels_enabled=True,
+        hosted_channels=channels,
+    )
+    review = client.get("/v1/onboarding/channels", base_url=f"https://{HOST}")
+    assert review.status_code == 200
+    assert review.get_json() == {
+        "schema_version": 1,
+        "status": "not_started",
+        "interaction_channels": [],
+        "brief_channels": [],
+        "options": [
+            {"id": "google_chat", "label": "Google Chat"},
+            {"id": "slack", "label": "Slack"},
+        ],
+        "installation": "required",
+    }
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    configured = client.put(
+        "/v1/onboarding/channels",
+        json={
+            "schema_version": 1,
+            "interaction_channels": ["slack", "google_chat"],
+            "brief_channels": ["slack"],
+        },
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert configured.status_code == 200
+    assert configured.get_json()["channels"]["status"] == "authorized"
+    assert configured.get_json()["channels"]["installation"] == "required"
+    assert configured.get_json()["onboarding"]["steps"]["channels"] == "authorized"
+    assert channels.calls[-1][2]["principal_id"] == PRINCIPAL_ID
+    assert channels.calls[-1][2]["session_id"] == SESSION_ID
+
+
+def test_hosted_channels_reject_invalid_or_stale_configuration():
+    with pytest.raises(ValueError, match="channels"):
+        identity_client(hosted_channels_enabled=True)
+    onboarding = Onboarding(OnboardingState())
+    client, _sessions = signed_in_client(
+        sessions=Sessions(recent=False),
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_channels_enabled=True,
+        hosted_channels=Channels(onboarding),
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    stale = client.put(
+        "/v1/onboarding/channels",
+        json={
+            "schema_version": 1,
+            "interaction_channels": ["slack"],
+            "brief_channels": [],
+        },
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert stale.status_code == 409
+    assert stale.get_json() == {"error": "recent_authentication_required"}

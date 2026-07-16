@@ -15,6 +15,8 @@ const workspaceButton = document.querySelector("#google-workspace-connect");
 const disconnectButton = document.querySelector("#google-workspace-disconnect");
 const onboarding = document.querySelector("#onboarding-progress");
 const onboardingStart = document.querySelector("#onboarding-start");
+const channelPreferences = document.querySelector("#channel-preferences");
+const channelsSave = document.querySelector("#channels-save");
 const policyReview = document.querySelector("#policy-review");
 const policyAutomatic = document.querySelector("#policy-automatic");
 const policyExcluded = document.querySelector("#policy-excluded");
@@ -22,6 +24,7 @@ const policyConfirm = document.querySelector("#policy-confirm");
 const sessionSignOut = document.querySelector("#session-sign-out");
 const status = document.querySelector("#status");
 let hostedPolicyAvailable = false;
+let hostedChannelsAvailable = false;
 
 function show(message, kind = "info") {
   status.textContent = message;
@@ -250,6 +253,7 @@ function renderOnboarding(state) {
 async function showOnboarding(session) {
   if (session.hosted_onboarding !== "available") return;
   hostedPolicyAvailable = session.hosted_policy === "available";
+  hostedChannelsAvailable = session.hosted_channels === "available";
   const state = await json(
     await fetch("/v1/onboarding", {
       credentials: "same-origin",
@@ -260,7 +264,80 @@ async function showOnboarding(session) {
   if (hostedPolicyAvailable && state.status !== "not_started") {
     await showPolicy();
   }
+  if (hostedChannelsAvailable && state.status !== "not_started") {
+    await showChannels();
+  }
 }
+
+function selectedChannels(purpose) {
+  return [...channelPreferences.querySelectorAll(`[data-purpose="${purpose}"]:checked`)]
+    .map((input) => input.value)
+    .sort();
+}
+
+function renderChannels(channels) {
+  channelPreferences.hidden = false;
+  const interaction = new Set(channels.interaction_channels || []);
+  const briefs = new Set(channels.brief_channels || []);
+  for (const input of channelPreferences.querySelectorAll("[data-purpose]")) {
+    input.checked = (input.dataset.purpose === "interaction" ? interaction : briefs).has(
+      input.value,
+    );
+  }
+  channelsSave.textContent =
+    channels.status === "not_started" ? "Save channel choices" : "Update channel choices";
+  channelsSave.disabled = false;
+}
+
+async function showChannels() {
+  const channels = await json(
+    await fetch("/v1/onboarding/channels", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }),
+  );
+  renderChannels(channels);
+}
+
+channelsSave.addEventListener("click", async () => {
+  const interactionChannels = selectedChannels("interaction");
+  const briefChannels = selectedChannels("brief");
+  if (!interactionChannels.length && !briefChannels.length) {
+    show("Choose at least one conversation or brief channel.", "pending");
+    return;
+  }
+  channelsSave.disabled = true;
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    const result = await json(
+      await fetch("/v1/onboarding/channels", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({
+          schema_version: 1,
+          interaction_channels: interactionChannels,
+          brief_channels: briefChannels,
+        }),
+      }),
+    );
+    renderChannels(result.channels);
+    renderOnboarding(result.onboarding);
+    show("Channel choices saved. App installation and destination verification are still required.", "success");
+  } catch (error) {
+    channelsSave.disabled = false;
+    if (error.code === "recent_authentication_required") {
+      show("Sign out and sign in again before changing channel choices.", "pending");
+    } else {
+      show("Channel choices could not be saved. Please try again.", "error");
+    }
+  }
+});
 
 function renderItems(target, items) {
   target.replaceChildren(
@@ -350,6 +427,7 @@ onboardingStart.addEventListener("click", async () => {
     );
     renderOnboarding(state);
     if (hostedPolicyAvailable) await showPolicy();
+    if (hostedChannelsAvailable) await showChannels();
     show("Guided setup started. Your progress will be saved.", "success");
   } catch {
     onboardingStart.disabled = false;

@@ -2,6 +2,21 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Hosted channel choice is not channel authority
+
+- Owners choose Google Chat, Slack, or both independently for interaction and
+  briefs. At least one purpose is required; unsupported and duplicate values
+  fail closed.
+- The bounded preference is audited and tenant-bound but advances onboarding
+  only to `authorized`. It contains no app, token, installation, destination,
+  allowlist, ingress, or provider authority and sends no test message.
+- Recent authentication, same-origin CSRF, a fixed function owner, forced RLS,
+  and mandatory pre/post audit protect configuration. A validated route cannot
+  be silently retargeted; it requires a future replacement ceremony.
+- Browser-only was not offered because no hosted conversational web surface
+  exists. This was selected over pretending a preference is a working route or
+  coupling brief and interaction delivery to one provider.
+
 ## 2026-07 — Hosted policy starts with one recent-authenticated R0 profile
 
 - Private alpha exposes a fixed read-only profile rather than a generic policy

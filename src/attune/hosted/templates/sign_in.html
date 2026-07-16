@@ -42,6 +42,25 @@
           Start guided setup
         </button>
       </section>
+      <section id="channel-preferences" hidden>
+        <h2>Choose where Attune meets you</h2>
+        <p>
+          Choose channels independently for conversation and morning briefs.
+          Saving these choices does not install an app or send a message.
+        </p>
+        <fieldset>
+          <legend>Conversation</legend>
+          <label><input type="checkbox" data-purpose="interaction" value="google_chat"> Google Chat</label>
+          <label><input type="checkbox" data-purpose="interaction" value="slack"> Slack</label>
+        </fieldset>
+        <fieldset>
+          <legend>Morning briefs</legend>
+          <label><input type="checkbox" data-purpose="brief" value="google_chat"> Google Chat</label>
+          <label><input type="checkbox" data-purpose="brief" value="slack"> Slack</label>
+        </fieldset>
+        <p class="channel-note">The selected apps and owner-only destinations must be installed and verified before this step is complete.</p>
+        <button id="channels-save" type="button">Save channel choices</button>
+      </section>
       <section id="policy-review" hidden>
         <h2>Review assistant policy</h2>
         <p>

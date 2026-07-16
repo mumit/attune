@@ -109,6 +109,14 @@ returned 200 through priority `885`, with both mandatory private audit-writer
 requests returning 200. This is activation evidence for the development
 tenant, not permission to auto-confirm policy during future deployments.
 
+Hosted channel preferences use the independent default-off
+`enable_hosted_channels` gate. It requires hosted onboarding, shares only the
+private audit-writer URL, and adds Cloud Armor priority `886` for exact GET/PUT
+`/v1/onboarding/channels`. Apply and verify migration 0020 first. Enabling the
+gate exposes preference review/configuration only; it does not install Slack or
+Google Chat, choose a destination, enable ingress, send a test, or validate the
+channel step.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate

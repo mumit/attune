@@ -51,7 +51,10 @@ The first hosted connection journey is:
    calendar changes, deletion, and sharing. Choose **Enable read-only policy**
    within ten minutes of sign-in; otherwise sign out and sign in again before
    confirming the authority change.
-8. Configure delivery and interaction channels, then activate briefs.
+8. Choose Google Chat, Slack, or both independently for conversation and brief
+   delivery. Saving records intent only; Attune clearly leaves the step pending
+   installation and verified owner-only destination tests.
+9. Install and verify the selected channel apps, then activate briefs.
    Capability upgrades such as Gmail draft
    creation are separate, explicit consent and policy changes.
 
@@ -79,6 +82,12 @@ before creating the grant, derives the owner and tenant from the current
 session, and never accepts a browser-supplied policy or risk tier. An unexpected
 existing policy or grant set is shown as requiring repair instead of being
 overwritten or adopted silently.
+
+Channel choices are similarly resumable but deliberately stop at `authorized`.
+They contain no provider token, app installation, destination, or allowlist.
+Slack and Google Chat may be selected independently for interaction and briefs;
+the step becomes `validated` only after the selected installations and exact
+owner-only destinations pass bounded live tests.
 
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed

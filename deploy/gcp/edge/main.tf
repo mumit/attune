@@ -94,8 +94,12 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "ATTUNE_HOSTED_POLICY_ENABLED"
         value = tostring(var.enable_hosted_policy)
       }
+      env {
+        name  = "ATTUNE_HOSTED_CHANNELS_ENABLED"
+        value = tostring(var.enable_hosted_channels)
+      }
       dynamic "env" {
-        for_each = var.enable_hosted_policy ? [1] : []
+        for_each = var.enable_hosted_policy || var.enable_hosted_channels ? [1] : []
         content {
           name  = "ATTUNE_AUDIT_WRITER_URL"
           value = local.runtime.audit_writer.uri
@@ -236,6 +240,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
     precondition {
       condition     = !var.enable_hosted_policy || var.enable_hosted_onboarding
       error_message = "Hosted policy review requires active hosted onboarding."
+    }
+    precondition {
+      condition     = !var.enable_hosted_channels || var.enable_hosted_onboarding
+      error_message = "Hosted channel preferences require active hosted onboarding."
     }
   }
 }
@@ -462,6 +470,29 @@ resource "google_compute_security_policy" "edge" {
       match {
         expr {
           expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/onboarding/policy' || request.path == '/v1/onboarding/policy/confirm')"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 10
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_channels ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 886
+      description = "Permit only authenticated hosted channel preference paths"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/onboarding/channels'"
         }
       }
       rate_limit_options {

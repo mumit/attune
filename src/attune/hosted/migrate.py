@@ -35,6 +35,7 @@ FUNCTION_OWNER_ROLES = (
     "attune_identity_executor",
     "attune_identity_provisioning_executor",
     "attune_policy_executor",
+    "attune_channel_config_executor",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -84,6 +85,34 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
             "attune.hosted_onboarding_states",
             "UPDATE",
         ),
+        ("attune_channel_config_executor", "attune.tenants", "SELECT"),
+        ("attune_channel_config_executor", "attune.principals", "SELECT"),
+        ("attune_channel_config_executor", "attune.identity_sessions", "SELECT"),
+        (
+            "attune_channel_config_executor",
+            "attune.hosted_onboarding_states",
+            "SELECT",
+        ),
+        (
+            "attune_channel_config_executor",
+            "attune.hosted_onboarding_states",
+            "UPDATE",
+        ),
+        (
+            "attune_channel_config_executor",
+            "attune.hosted_channel_preferences",
+            "SELECT",
+        ),
+        (
+            "attune_channel_config_executor",
+            "attune.hosted_channel_preferences",
+            "INSERT",
+        ),
+        (
+            "attune_channel_config_executor",
+            "attune.hosted_channel_preferences",
+            "UPDATE",
+        ),
     }
 )
 
@@ -122,6 +151,7 @@ TENANT_TABLES = (
     "oauth_transactions",
     "identity_sessions",
     "hosted_onboarding_states",
+    "hosted_channel_preferences",
 )
 
 
@@ -381,6 +411,7 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 False,
             ),
             "attune_policy_executor": (True, False, True, False),
+            "attune_channel_config_executor": (True, False, False, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
@@ -558,6 +589,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune.activate_hosted_read_only_policy(uuid,uuid)",
                 "attune_control_plane",
                 "attune_policy_executor",
+            ),
+            (
+                "attune.configure_hosted_channels(uuid,uuid,text[],text[])",
+                "attune_control_plane",
+                "attune_channel_config_executor",
             ),
         )
         for signature, role, expected_owner in privileged_functions:

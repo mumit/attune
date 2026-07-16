@@ -51,6 +51,7 @@ from attune.hosted.oauth import (
 )
 from attune.hosted.onboarding import PostgresHostedOnboardingRepository
 from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
+from attune.hosted.hosted_channels import PostgresHostedChannelRepository
 from attune.hosted.capability_gateway import (
     CapabilityDefinition,
     CapabilityDenied,
@@ -89,6 +90,9 @@ IDENTITY_PRINCIPAL_B = UUID("20000000-0000-4000-8000-000000000072")
 POLICY_TENANT = UUID("30000000-0000-4000-8000-000000000081")
 POLICY_PRINCIPAL = UUID("30000000-0000-4000-8000-000000000082")
 POLICY_SESSION = UUID("30000000-0000-4000-8000-000000000083")
+CHANNEL_TENANT = UUID("30000000-0000-4000-8000-000000000084")
+CHANNEL_PRINCIPAL = UUID("30000000-0000-4000-8000-000000000085")
+CHANNEL_SESSION = UUID("30000000-0000-4000-8000-000000000086")
 
 ROLE_BINDINGS = {
     "attune_control_plane": "attune_test_control",
@@ -107,7 +111,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0019_hosted_read_only_policy.sql"
+    assert migrations[-1].name == "0020_hosted_channel_preferences.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -222,7 +226,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 19
+    assert apply_migrations(admin) == 20
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -627,6 +631,118 @@ def test_read_only_policy_activation_is_exact_recent_and_function_only(
         3,
         "externally_modified",
     )
+
+
+def test_hosted_channel_preferences_are_tenant_bound_recent_and_effect_free(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) VALUES (%s,%s,%s)",
+            (CHANNEL_TENANT, "channel-tenant", "test"),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test')
+            """,
+            (CHANNEL_TENANT, CHANNEL_PRINCIPAL, hashlib.sha256(b"channel").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.identity_sessions
+                (tenant_id, id, principal_id, token_hash, csrf_hash, expires_at)
+            VALUES (%s, %s, %s, %s, %s,
+                    clock_timestamp() + interval '8 hours')
+            """,
+            (
+                CHANNEL_TENANT,
+                CHANNEL_SESSION,
+                CHANNEL_PRINCIPAL,
+                hashlib.sha256(b"channel-token").digest(),
+                hashlib.sha256(b"channel-csrf").digest(),
+            ),
+        )
+    initialized_database.commit()
+    factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    context = TenantContext(CHANNEL_TENANT)
+    onboarding = PostgresHostedOnboardingRepository(factory)
+    channels = PostgresHostedChannelRepository(factory)
+    onboarding.start(context, principal_id=CHANNEL_PRINCIPAL)
+
+    first = channels.configure(
+        context,
+        principal_id=CHANNEL_PRINCIPAL,
+        session_id=CHANNEL_SESSION,
+        interaction_channels=["slack", "google_chat"],
+        brief_channels=["slack"],
+    )
+    repeated = channels.configure(
+        context,
+        principal_id=CHANNEL_PRINCIPAL,
+        session_id=CHANNEL_SESSION,
+        interaction_channels=["google_chat", "slack"],
+        brief_channels=["slack"],
+    )
+    assert first == repeated
+    assert first.interaction_channels == ("google_chat", "slack")
+    assert first.brief_channels == ("slack",)
+    assert first.status == "authorized"
+    assert channels.read(context, principal_id=CHANNEL_PRINCIPAL) == first
+    assert channels.read(TenantContext(TENANT_A), principal_id=PRINCIPAL_A) is None
+
+    control = factory()
+    try:
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            with tenant_transaction(control, context) as cursor:
+                cursor.execute(
+                    "SELECT * FROM attune.configure_hosted_channels(%s,%s,%s,%s)",
+                    (
+                        CHANNEL_PRINCIPAL,
+                        CHANNEL_SESSION,
+                        ["slack", "slack"],
+                        [],
+                    ),
+                )
+    finally:
+        control.rollback()
+        control.close()
+
+    control = factory()
+    try:
+        with control.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    """
+                    INSERT INTO attune.hosted_channel_preferences
+                        (tenant_id, owner_principal_id,
+                         interaction_channels, brief_channels)
+                    VALUES (%s, %s, ARRAY['slack'], ARRAY[]::text[])
+                    """,
+                    (CHANNEL_TENANT, CHANNEL_PRINCIPAL),
+                )
+        control.rollback()
+    finally:
+        control.close()
+
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions "
+            "SET created_at = clock_timestamp() - interval '11 minutes' "
+            "WHERE tenant_id = %s AND id = %s",
+            (CHANNEL_TENANT, CHANNEL_SESSION),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        channels.configure(
+            context,
+            principal_id=CHANNEL_PRINCIPAL,
+            session_id=CHANNEL_SESSION,
+            interaction_channels=["slack"],
+            brief_channels=["slack"],
+        )
 
 
 def test_rls_hides_other_tenant_rows_and_vectors(initialized_database):

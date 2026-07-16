@@ -277,6 +277,16 @@ authenticated, and audited.
   role, missing or ambiguous state, audit outage, stale authentication, and
   external modification MUST fail closed. See the [hosted policy
   ceremony](hosted-policy.md).
+- **SEC-119.** Hosted channel preference changes MUST require a same-origin,
+  CSRF-authorized session authenticated within ten minutes and mandatory
+  content-free pre/post audit. The browser MAY submit only a fixed schema and
+  bounded Slack/Google Chat interaction/brief selections; tenant, principal,
+  app, installation, token, destination, allowlist, ingress, and provider
+  authority MUST remain server-derived. Preference MUST advance onboarding no
+  further than `authorized`; only verified installation, destination binding,
+  ingress, and test delivery may produce `validated`. The ordinary control
+  plane MUST NOT directly mutate preferences, and validated routes MUST NOT be
+  silently retargeted. See the [hosted channel ceremony](hosted-channels.md).
 
 ### 5.2 Authorization model
 

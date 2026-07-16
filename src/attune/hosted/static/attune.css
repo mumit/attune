@@ -142,10 +142,43 @@ button.danger {
   border-top: 1px solid rgb(23 33 28 / 10%);
 }
 
-#policy-review {
+#policy-review,
+#channel-preferences {
   margin-top: 2rem;
   padding-top: 1.5rem;
   border-top: 1px solid rgb(23 33 28 / 10%);
+}
+
+#channel-preferences p,
+#channel-preferences fieldset {
+  color: #526058;
+  line-height: 1.55;
+}
+
+#channel-preferences fieldset {
+  margin: 1rem 0;
+  border: 1px solid rgb(23 33 28 / 14%);
+  border-radius: 0.75rem;
+  padding: 0.85rem 1rem;
+}
+
+#channel-preferences legend {
+  padding: 0 0.35rem;
+  color: #244c35;
+  font-weight: 700;
+}
+
+#channel-preferences label {
+  display: block;
+  padding: 0.3rem 0;
+}
+
+#channel-preferences input {
+  margin-right: 0.45rem;
+}
+
+#channel-preferences .channel-note {
+  font-size: 0.85rem;
 }
 
 #policy-review p,

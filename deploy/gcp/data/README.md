@@ -176,6 +176,12 @@ was applied to both private jobs. Execution
 reported 28 tenant tables forced through RLS; the following data plan was
 empty. No policy or autonomy grant was created by the migration.
 
+Migration `0020_hosted_channel_preferences.sql` adds the forced-RLS preference
+record and fixed recent-session configuration function. It stores only
+canonical Slack/Google Chat purpose choices and advances channels to
+`authorized`; it creates no app, destination, credential, ingress, or message.
+Apply and verify it before enabling the separate edge gate.
+
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value
 belongs in these migrations, Terraform state, Cloud Run environment variables,

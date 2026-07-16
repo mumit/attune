@@ -74,7 +74,9 @@ encryption and use. The
 [capability-gateway contract](docs/capability-gateway.md) defines how untrusted
 model proposals become typed, tenant-bound admission without becoming provider
 requests, and the [hosted policy ceremony](docs/hosted-policy.md) defines the
-recent-authenticated fixed R0 owner choice. MCP server
+recent-authenticated fixed R0 owner choice. The [hosted channel preference
+ceremony](docs/hosted-channels.md) keeps Slack/Google Chat interaction and brief
+choices independent without treating a preference as an installed route. MCP server
 implementers should use the [versioned Workspace contract](docs/mcp-contract.md).
 
 ## Development

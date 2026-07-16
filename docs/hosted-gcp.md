@@ -249,6 +249,13 @@ authenticated confirmation with 200, completed both mandatory private audit
 writes, and returned only after rereading `validated` policy state. Deployment
 automation did not submit the confirmation.
 
+The next default-off onboarding slice is the effect-free channel preference
+ceremony in [`hosted-channels.md`](hosted-channels.md). Migration 0020 and edge
+priority `886` permit a recently authenticated owner to record independent
+Slack/Google Chat interaction and brief choices. The result is only
+`authorized`; provider app installation, exact destination binding, verified
+ingress and test delivery remain mandatory before `validated`.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

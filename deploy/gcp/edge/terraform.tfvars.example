@@ -10,6 +10,7 @@ identity_api_key         = ""
 enable_google_workspace_oauth = false
 enable_hosted_onboarding       = false
 enable_hosted_policy           = false
+enable_hosted_channels         = false
 google_oauth_provider_ready    = false
 google_oauth_client_id         = ""
 

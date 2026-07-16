@@ -58,6 +58,11 @@ grant creation, and resumable step advancement are implemented. Owner
 activation was exercised on 2026-07-16. The channel and activation ceremonies
 remain.
 
+The next step-5 slice now records bounded Slack/Google Chat preferences behind
+a default-off gate. It preserves independent interaction and brief choices and
+advances only to `authorized`; live app installation, destination binding,
+verified ingress/test delivery, replacement, and disconnection still remain.
+
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does
 not authorize customer data or constitute a hosted launch.

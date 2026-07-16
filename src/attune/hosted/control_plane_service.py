@@ -84,6 +84,12 @@ class HostedPolicy(Protocol):
     def activate_read_only(self, context, *, principal_id, session_id): ...
 
 
+class HostedChannels(Protocol):
+    def read(self, context, *, principal_id): ...
+
+    def configure(self, context, **kwargs): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -103,6 +109,8 @@ def create_app(
     hosted_onboarding: HostedOnboarding | None = None,
     hosted_policy_enabled: bool = False,
     hosted_policy: HostedPolicy | None = None,
+    hosted_channels_enabled: bool = False,
+    hosted_channels: HostedChannels | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -154,6 +162,12 @@ def create_app(
     if hosted_policy_enabled and (not hosted_onboarding_enabled or hosted_policy is None):
         raise ValueError(
             "enabled hosted policy requires hosted onboarding and an audited policy service"
+        )
+    if hosted_channels_enabled and (
+        not hosted_onboarding_enabled or hosted_channels is None
+    ):
+        raise ValueError(
+            "enabled hosted channels require hosted onboarding and an audited service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -315,6 +329,9 @@ def create_app(
                     ),
                     "hosted_policy": (
                         "available" if hosted_policy_enabled else "not_configured"
+                    ),
+                    "hosted_channels": (
+                        "available" if hosted_channels_enabled else "not_configured"
                     ),
                 }
             )
@@ -575,6 +592,81 @@ def create_app(
                     }
                 )
 
+        if hosted_channels_enabled:
+
+            @app.get("/v1/onboarding/channels")
+            def read_hosted_channels():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    state = hosted_onboarding.read(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                    preferences = hosted_channels.read(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except Exception:
+                    return jsonify({"error": "channels_unavailable"}), 503
+                if state is None:
+                    return jsonify({"error": "onboarding_not_started"}), 409
+                return jsonify(_public_channels(preferences, state.channels))
+
+            @app.put("/v1/onboarding/channels")
+            def configure_hosted_channels():
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload)
+                    != {
+                        "schema_version",
+                        "interaction_channels",
+                        "brief_channels",
+                    }
+                    or payload.get("schema_version") != 1
+                ):
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify({"error": "recent_authentication_required"}), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    preferences = hosted_channels.configure(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        interaction_channels=payload["interaction_channels"],
+                        brief_channels=payload["brief_channels"],
+                    )
+                    state = hosted_onboarding.read(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except (TypeError, ValueError):
+                    return jsonify({"error": "invalid_channel_preferences"}), 400
+                except Exception:
+                    return jsonify({"error": "channels_unavailable"}), 503
+                if state is None:
+                    return jsonify({"error": "onboarding_not_started"}), 409
+                return jsonify(
+                    {
+                        "channels": _public_channels(preferences, state.channels),
+                        "onboarding": _public_onboarding(state),
+                    }
+                )
+
     @app.errorhandler(400)
     def bad_request(_error):
         return jsonify({"error": "invalid_request"}), 400
@@ -654,4 +746,20 @@ def _public_policy(status: str) -> dict:
             "Change calendar events",
             "Delete or share provider data",
         ],
+    }
+
+
+def _public_channels(preferences, status: str) -> dict:
+    return {
+        "schema_version": 1,
+        "status": status,
+        "interaction_channels": (
+            list(preferences.interaction_channels) if preferences else []
+        ),
+        "brief_channels": list(preferences.brief_channels) if preferences else [],
+        "options": [
+            {"id": "google_chat", "label": "Google Chat"},
+            {"id": "slack", "label": "Slack"},
+        ],
+        "installation": "required",
     }
