@@ -7,6 +7,7 @@ locals {
     dispatch_broker      = "task-broker"
     ingress              = "ingress"
     identity_provisioner = "id-prov"
+    model_gateway        = "model"
     worker               = "worker"
     secret_broker        = "secrets"
     task_dispatch        = "dispatch"
@@ -128,12 +129,19 @@ resource "google_service_account_iam_member" "cloud_tasks_token_creator" {
 resource "google_secret_manager_secret_iam_member" "broker_access" {
   for_each = {
     for name, secret in google_secret_manager_secret.platform : name => secret
-    if !contains(["channel-reference-hmac", "identity-bootstrap"], name)
+    if !contains(["channel-reference-hmac", "identity-bootstrap", "llm-api-key"], name)
   }
   project   = var.project_id
   secret_id = each.value.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.workload["secret_broker"].email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "model_gateway_llm_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.platform["llm-api-key"].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.workload["model_gateway"].email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "channel_broker_hmac_access" {

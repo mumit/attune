@@ -22,11 +22,13 @@ locals {
   dispatch_broker_labels   = merge(local.common_labels, { component = "dispatch-broker" })
   secret_broker_labels     = merge(local.common_labels, { component = "secret-broker" })
   oauth_exchange_labels    = merge(local.common_labels, { component = "oauth-exchange" })
+  model_gateway_labels     = merge(local.common_labels, { component = "model-gateway" })
   worker_labels            = merge(local.common_labels, { component = "worker" })
   dispatch_broker_audience = "https://${local.prefix}-dispatch-broker.attune.internal"
   secret_broker_audience   = "https://${local.prefix}-secret-broker.attune.internal"
   oauth_exchange_audience  = "https://${local.prefix}-oauth-exchange.attune.internal"
   worker_audience          = "https://${local.prefix}-worker.attune.internal"
+  model_gateway_audience   = "https://${local.prefix}-model-gateway.attune.internal"
   audit_callers = toset([
     local.foundation.workload_identities.control_plane,
     local.foundation.workload_identities.channel_broker,
@@ -276,6 +278,110 @@ resource "google_cloud_run_v2_service_iam_member" "worker_invoker" {
   name     = google_cloud_run_v2_service.worker.name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${local.foundation.workload_identities.task_dispatch}"
+}
+
+resource "google_cloud_run_v2_service" "model_gateway" {
+  count               = var.enable_model_gateway ? 1 : 0
+  project             = local.foundation.project_id
+  name                = "${local.prefix}-model-gateway"
+  location            = local.foundation.region
+  deletion_protection = true
+  ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  custom_audiences    = [local.model_gateway_audience]
+  labels              = local.model_gateway_labels
+
+  template {
+    service_account                  = local.foundation.workload_identities.model_gateway
+    timeout                          = "30s"
+    max_instance_request_concurrency = 4
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 3
+    }
+
+    containers {
+      name  = "model-gateway"
+      image = var.model_gateway_image
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+
+      env {
+        name  = "ATTUNE_LLM_BASE_URL"
+        value = var.llm_base_url
+      }
+      env {
+        name  = "ATTUNE_MODEL_CLASSIFY"
+        value = var.model_classify
+      }
+      env {
+        name  = "ATTUNE_MODEL_CONVERSE"
+        value = var.model_converse
+      }
+      env {
+        name  = "ATTUNE_EXPECTED_AUDIENCE"
+        value = local.model_gateway_audience
+      }
+      env {
+        name  = "ATTUNE_WORKER_SERVICE_ACCOUNT"
+        value = local.foundation.workload_identities.worker
+      }
+      env {
+        name = "ATTUNE_LLM_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = local.foundation.platform_secret_ids["llm-api-key"]
+            version = "latest"
+          }
+        }
+      }
+
+      startup_probe {
+        initial_delay_seconds = 1
+        timeout_seconds       = 2
+        period_seconds        = 3
+        failure_threshold     = 10
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+
+      liveness_probe {
+        timeout_seconds   = 2
+        period_seconds    = 10
+        failure_threshold = 3
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_cloud_run_v2_service_iam_member" "model_gateway_invoker" {
+  count    = var.enable_model_gateway ? 1 : 0
+  project  = local.foundation.project_id
+  location = local.foundation.region
+  name     = google_cloud_run_v2_service.model_gateway[0].name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.worker}"
 }
 
 resource "google_cloud_run_v2_service" "dispatch_broker" {

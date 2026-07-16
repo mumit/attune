@@ -10,6 +10,14 @@ secret_broker_image          = "northamerica-northeast1-docker.pkg.dev/PROJECT/R
 oauth_exchange_image         = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-oauth-exchange@sha256:REPLACE"
 oauth_min_instance_count = 0
 worker_image                 = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-worker@sha256:REPLACE"
+model_gateway_image          = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-model-gateway@sha256:REPLACE"
+
+# Deploying this private boundary does not activate natural-language channel
+# processing. Keep false until its dedicated identity and model secret are ready.
+enable_model_gateway = false
+llm_base_url          = "https://api.openai.com/v1"
+model_classify        = "gpt-4.1-mini"
+model_converse        = "gpt-4.1"
 
 # Keep false until the credential-free egress probe, a verified paging channel,
 # and the dedicated non-production Google identity are ready.

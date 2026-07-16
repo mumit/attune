@@ -92,6 +92,61 @@ variable "worker_image" {
   }
 }
 
+variable "model_gateway_image" {
+  description = "Artifact Registry model-gateway image pinned by sha256 digest."
+  type        = string
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.model_gateway_image))
+    error_message = "model_gateway_image must be an immutable @sha256 Artifact Registry reference."
+  }
+}
+
+variable "enable_model_gateway" {
+  description = "Deploy the private fixed-task model gateway; this alone does not activate conversation."
+  type        = bool
+  default     = false
+}
+
+variable "llm_base_url" {
+  description = "Operator-fixed OpenAI-compatible HTTPS origin or base path used only by the model gateway."
+  type        = string
+  default     = "https://api.openai.com/v1"
+
+  validation {
+    condition = (
+      startswith(var.llm_base_url, "https://") &&
+      !strcontains(var.llm_base_url, "@") &&
+      !strcontains(var.llm_base_url, "?") &&
+      !strcontains(var.llm_base_url, "#") &&
+      length(var.llm_base_url) <= 1024
+    )
+    error_message = "llm_base_url must be a bounded fixed HTTPS URL without credentials, query, or fragment."
+  }
+}
+
+variable "model_classify" {
+  description = "Operator-fixed low-latency model route for bounded classification."
+  type        = string
+  default     = "gpt-4.1-mini"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_classify))
+    error_message = "model_classify must be a valid fixed model route."
+  }
+}
+
+variable "model_converse" {
+  description = "Operator-fixed model route for bounded assistant responses."
+  type        = string
+  default     = "gpt-4.1"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_converse))
+    error_message = "model_converse must be a valid fixed model route."
+  }
+}
+
 variable "enable_google_gmail_profile" {
   description = "Register the fixed Gmail profile worker route after its security gates pass."
   type        = bool

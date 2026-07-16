@@ -193,7 +193,10 @@ def test_audit_writer_is_private_intent_only_and_least_privileged():
     assert "roles/run.invoker" in terraform
     assert "allUsers" not in terraform
     assert "@sha256:[0-9a-f]{64}$" in terraform
-    assert "secret_key_ref" not in terraform
+    audit_writer = terraform.split(
+        'resource "google_cloud_run_v2_service" "audit_writer"', 1
+    )[1].split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
+    assert "secret_key_ref" not in audit_writer
     assert "write_audit_intent(uuid)" in migration
     assert "REVOKE EXECUTE ON FUNCTION" in migration
     assert "FROM attune_audit_writer" in migration
@@ -404,7 +407,11 @@ def test_initial_identity_provisioning_is_private_one_purpose_and_secret_aware()
     ).read_text()
 
     assert 'identity_provisioner = "id-prov"' in foundation
-    assert 'if !contains(["channel-reference-hmac", "identity-bootstrap"], name)' in foundation
+    broker_access = foundation.split(
+        'resource "google_secret_manager_secret_iam_member" "broker_access"', 1
+    )[1].split('resource "google_secret_manager_secret_iam_member"', 1)[0]
+    assert '"identity-bootstrap"' in broker_access
+    assert '"llm-api-key"' in broker_access
     assert 'workload["identity_provisioner"]' in foundation
     assert 'resource "google_cloud_run_v2_job" "identity_provision"' in data
     assert "google_cloud_run_v2_job_iam" not in data
@@ -418,6 +425,24 @@ def test_initial_identity_provisioning_is_private_one_purpose_and_secret_aware()
         "REVOKE CREATE ON SCHEMA attune\nFROM attune_identity_provisioning_executor"
         in migration
     )
+
+
+def test_model_gateway_is_private_fixed_and_owns_only_model_secret():
+    foundation = (ROOT / "deploy" / "gcp" / "foundation" / "iam.tf").read_text()
+    runtime = (ROOT / "deploy" / "gcp" / "runtime" / "main.tf").read_text()
+    model = runtime.split(
+        'resource "google_cloud_run_v2_service" "model_gateway"', 1
+    )[1].split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
+
+    assert 'model_gateway        = "model"' in foundation
+    assert '"llm-api-key"' in foundation
+    assert 'workload["model_gateway"]' in foundation
+    assert "INGRESS_TRAFFIC_INTERNAL_ONLY" in model
+    assert "ATTUNE_LLM_API_KEY" in model
+    assert "secret_key_ref" in model
+    assert "ATTUNE_CLOUD_SQL_INSTANCE" not in model
+    assert "vpc_access" not in model
+    assert 'workload_identities.model_gateway' in model
 
 
 def test_hosted_sign_in_prepares_binding_before_click_time_popup():

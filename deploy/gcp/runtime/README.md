@@ -7,6 +7,16 @@ content-free `platform.smoke` route. It also deploys the dispatch broker after
 the jobs queue has its reviewed fixed routing override, plus a dormant private
 OAuth exchange service used only by the credential-free callback scrubber.
 
+## Model-gateway boundary
+
+The optional private model gateway owns the platform model credential and no
+tenant database, Workspace, queue, KMS, or provider-send authority. Only the
+worker service account may invoke it. Callers select only `classify` or
+`converse` and provide a bounded role/content array; Terraform fixes the HTTPS
+base URL and both model routes. The gateway rejects redirects and returns only
+bounded assistant text. Deploying it does not register or activate a channel
+conversation route.
+
 ## Audit-writer boundary
 
 The service accepts exactly one canonical audit-intent UUID. It never accepts a
@@ -136,6 +146,7 @@ export BROKER_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/attune
 export WORKER_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/attune-worker"
 export DISPATCH_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/attune-dispatch-broker"
 export OAUTH_EXCHANGE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/attune-oauth-exchange"
+export MODEL_GATEWAY_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/attune-model-gateway"
 
 docker buildx build --platform=linux/amd64 --push \
   -f deploy/audit-writer/Dockerfile -t "${AUDIT_IMAGE}:audit-writer-v1" .
@@ -147,6 +158,8 @@ docker buildx build --platform=linux/amd64 --push \
   -f deploy/dispatch-broker/Dockerfile -t "${DISPATCH_IMAGE}:dispatch-v1" .
 docker buildx build --platform=linux/amd64 --push \
   -f deploy/oauth-exchange/Dockerfile -t "${OAUTH_EXCHANGE_IMAGE}:oauth-exchange-v1" .
+docker buildx build --platform=linux/amd64 --push \
+  -f deploy/model-gateway/Dockerfile -t "${MODEL_GATEWAY_IMAGE}:model-gateway-v1" .
 gcloud artifacts docker images describe "${AUDIT_IMAGE}:audit-writer-v1" \
   --project="$PROJECT_ID" \
   --format='value(image_summary.fully_qualified_digest)'
@@ -160,6 +173,9 @@ gcloud artifacts docker images describe "${DISPATCH_IMAGE}:dispatch-v1" \
   --project="$PROJECT_ID" \
   --format='value(image_summary.fully_qualified_digest)'
 gcloud artifacts docker images describe "${OAUTH_EXCHANGE_IMAGE}:oauth-exchange-v1" \
+  --project="$PROJECT_ID" \
+  --format='value(image_summary.fully_qualified_digest)'
+gcloud artifacts docker images describe "${MODEL_GATEWAY_IMAGE}:model-gateway-v1" \
   --project="$PROJECT_ID" \
   --format='value(image_summary.fully_qualified_digest)'
 ```

@@ -76,6 +76,19 @@ output "worker" {
   }
 }
 
+output "model_gateway" {
+  description = "Private fixed-task model-gateway identifiers; null while dormant."
+  value = var.enable_model_gateway ? {
+    project         = local.foundation.project_id
+    region          = local.foundation.region
+    name            = google_cloud_run_v2_service.model_gateway[0].name
+    uri             = google_cloud_run_v2_service.model_gateway[0].uri
+    audience        = local.model_gateway_audience
+    service_account = local.foundation.workload_identities.model_gateway
+    image           = var.model_gateway_image
+  } : null
+}
+
 output "google_gmail_profile_enabled" {
   description = "Whether the reviewed fixed Gmail profile route is active."
   value       = var.enable_google_gmail_profile
