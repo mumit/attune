@@ -1,6 +1,6 @@
 locals {
   workload_accounts = {
-    channel_broker       = "channel-broker"
+    channel_broker       = "chan-broker"
     control_plane        = "ctl"
     oauth_callback       = "oauth-cb"
     oauth_exchange       = "oauth-xchg"
