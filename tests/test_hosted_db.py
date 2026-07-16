@@ -52,6 +52,7 @@ from attune.hosted.oauth import (
 from attune.hosted.onboarding import PostgresHostedOnboardingRepository
 from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
 from attune.hosted.hosted_channels import PostgresHostedChannelRepository
+from attune.hosted.channel_setup import PostgresHostedChannelSetupRepository
 from attune.hosted.capability_gateway import (
     CapabilityDefinition,
     CapabilityDenied,
@@ -111,7 +112,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0020_hosted_channel_preferences.sql"
+    assert migrations[-1].name == "0021_hosted_channel_installation_state.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -226,7 +227,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 20
+    assert apply_migrations(admin) == 21
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -743,6 +744,80 @@ def test_hosted_channel_preferences_are_tenant_bound_recent_and_effect_free(
             interaction_channels=["slack"],
             brief_channels=["slack"],
         )
+
+
+def test_hosted_channel_setup_is_recent_single_use_and_not_directly_mutable(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    context = TenantContext(CHANNEL_TENANT)
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions SET created_at = clock_timestamp() "
+            "WHERE tenant_id = %s AND id = %s",
+            (CHANNEL_TENANT, CHANNEL_SESSION),
+        )
+    factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    setups = PostgresHostedChannelSetupRepository(factory)
+    first = setups.begin(
+        context,
+        principal_id=CHANNEL_PRINCIPAL,
+        session_id=CHANNEL_SESSION,
+        provider="google_chat",
+        mechanism="link_code",
+        secret_hash=hashlib.sha256(b"first-channel-link").digest(),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=9),
+    )
+    second = setups.begin(
+        context,
+        principal_id=CHANNEL_PRINCIPAL,
+        session_id=CHANNEL_SESSION,
+        provider="google_chat",
+        mechanism="link_code",
+        secret_hash=hashlib.sha256(b"second-channel-link").digest(),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=9),
+    )
+    assert first.state == second.state == "pending"
+    assert first.id != second.id
+    states = {state.provider: state for state in setups.read(
+        context, principal_id=CHANNEL_PRINCIPAL
+    )}
+    assert states["google_chat"].selected is True
+    assert states["google_chat"].setup_state == "pending"
+    assert states["google_chat"].destination_state == "not_started"
+    assert states["slack"].selected is True
+    assert states["slack"].setup_state == "not_started"
+
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "SELECT state FROM attune.hosted_channel_setup_transactions "
+            "WHERE tenant_id = %s AND id = %s",
+            (CHANNEL_TENANT, first.id),
+        )
+        assert cursor.fetchone()[0] == "cancelled"
+
+    control = factory()
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with tenant_transaction(control, context) as cursor:
+                cursor.execute(
+                    "UPDATE attune.hosted_channel_setup_transactions "
+                    "SET state = 'consumed' WHERE tenant_id = %s",
+                    (CHANNEL_TENANT,),
+                )
+        control.rollback()
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with tenant_transaction(control, context) as cursor:
+                cursor.execute(
+                    "UPDATE attune.installations SET status = 'revoked' "
+                    "WHERE tenant_id = %s",
+                    (CHANNEL_TENANT,),
+                )
+    finally:
+        control.rollback()
+        control.close()
 
 
 def test_rls_hides_other_tenant_rows_and_vectors(initialized_database):

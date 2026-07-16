@@ -17,6 +17,14 @@ const onboarding = document.querySelector("#onboarding-progress");
 const onboardingStart = document.querySelector("#onboarding-start");
 const channelPreferences = document.querySelector("#channel-preferences");
 const channelsSave = document.querySelector("#channels-save");
+const channelInstallations = document.querySelector("#channel-installations");
+const googleChatInstallation = document.querySelector("#google-chat-installation");
+const googleChatInstallationState = document.querySelector("#google-chat-installation-state");
+const googleChatLinkStart = document.querySelector("#google-chat-link-start");
+const googleChatLinkInstructions = document.querySelector("#google-chat-link-instructions");
+const googleChatLinkCommand = document.querySelector("#google-chat-link-command");
+const googleChatLinkExpiry = document.querySelector("#google-chat-link-expiry");
+const slackInstallation = document.querySelector("#slack-installation");
 const policyReview = document.querySelector("#policy-review");
 const policyAutomatic = document.querySelector("#policy-automatic");
 const policyExcluded = document.querySelector("#policy-excluded");
@@ -25,6 +33,7 @@ const sessionSignOut = document.querySelector("#session-sign-out");
 const status = document.querySelector("#status");
 let hostedPolicyAvailable = false;
 let hostedChannelsAvailable = false;
+let hostedChannelSetupAvailable = false;
 
 function show(message, kind = "info") {
   status.textContent = message;
@@ -254,6 +263,7 @@ async function showOnboarding(session) {
   if (session.hosted_onboarding !== "available") return;
   hostedPolicyAvailable = session.hosted_policy === "available";
   hostedChannelsAvailable = session.hosted_channels === "available";
+  hostedChannelSetupAvailable = session.hosted_channel_setup === "available";
   const state = await json(
     await fetch("/v1/onboarding", {
       credentials: "same-origin",
@@ -266,6 +276,9 @@ async function showOnboarding(session) {
   }
   if (hostedChannelsAvailable && state.status !== "not_started") {
     await showChannels();
+  }
+  if (hostedChannelSetupAvailable && state.status !== "not_started") {
+    await showChannelInstallations();
   }
 }
 
@@ -328,6 +341,7 @@ channelsSave.addEventListener("click", async () => {
     );
     renderChannels(result.channels);
     renderOnboarding(result.onboarding);
+    if (hostedChannelSetupAvailable) await showChannelInstallations();
     show("Channel choices saved. App installation and destination verification are still required.", "success");
   } catch (error) {
     channelsSave.disabled = false;
@@ -335,6 +349,74 @@ channelsSave.addEventListener("click", async () => {
       show("Sign out and sign in again before changing channel choices.", "pending");
     } else {
       show("Channel choices could not be saved. Please try again.", "error");
+    }
+  }
+});
+
+function providerState(payload, provider) {
+  return (payload.providers || []).find((item) => item.provider === provider);
+}
+
+function renderChannelInstallations(payload) {
+  const googleChat = providerState(payload, "google_chat");
+  const slack = providerState(payload, "slack");
+  const selected = Boolean(googleChat?.selected || slack?.selected);
+  channelInstallations.hidden = !selected;
+  googleChatInstallation.hidden = !googleChat?.selected;
+  slackInstallation.hidden = !slack?.selected;
+  if (googleChat?.selected) {
+    const destination = googleChat.destination_state || "not_started";
+    const setup = googleChat.setup_state || "not_started";
+    googleChatInstallationState.textContent =
+      destination === "active"
+        ? "Owner-only Google Chat destination verified."
+        : destination === "pending_test"
+          ? "Google Chat owner and direct-message destination linked; delivery test remains."
+          : setup === "pending"
+            ? "A previous link code is pending. Generate a new code to replace it."
+            : "Google Chat is selected but not linked.";
+    googleChatLinkStart.hidden = destination === "active" || destination === "pending_test";
+  }
+}
+
+async function showChannelInstallations() {
+  const payload = await json(
+    await fetch("/v1/onboarding/channel-installations", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }),
+  );
+  renderChannelInstallations(payload);
+}
+
+googleChatLinkStart.addEventListener("click", async () => {
+  googleChatLinkStart.disabled = true;
+  googleChatLinkInstructions.hidden = true;
+  googleChatLinkCommand.textContent = "";
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    const result = await json(
+      await fetch("/v1/onboarding/channel-installations/google-chat/link", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "X-Attune-CSRF": csrf },
+      }),
+    );
+    googleChatLinkCommand.textContent = result.link_command;
+    googleChatLinkExpiry.textContent = `Expires at ${new Date(result.expires_at).toLocaleTimeString()}.`;
+    googleChatLinkInstructions.hidden = false;
+    googleChatInstallationState.textContent =
+      "Link code created. It is shown once and does not contain provider authority.";
+    googleChatLinkStart.textContent = "Generate a new link code";
+    googleChatLinkStart.disabled = false;
+    show("Google Chat link code ready. Send it only in an owner direct message.", "success");
+  } catch (error) {
+    googleChatLinkStart.disabled = false;
+    if (error.code === "recent_authentication_required") {
+      show("Sign out and sign in again before linking Google Chat.", "pending");
+    } else {
+      show("Google Chat linking could not be started. Please try again.", "error");
     }
   }
 });

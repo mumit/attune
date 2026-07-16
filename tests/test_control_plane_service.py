@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -174,6 +174,55 @@ class Channels:
         )()
         return self.preferences
 
+
+class ChannelSetup:
+    def __init__(self, failure=None):
+        self.failure = failure
+        self.calls = []
+        self.states = (
+            type(
+                "ProviderState",
+                (),
+                {
+                    "provider": "google_chat",
+                    "selected": True,
+                    "setup_state": "not_started",
+                    "destination_state": "not_started",
+                },
+            )(),
+            type(
+                "ProviderState",
+                (),
+                {
+                    "provider": "slack",
+                    "selected": True,
+                    "setup_state": "not_started",
+                    "destination_state": "not_started",
+                },
+            )(),
+        )
+
+    def read(self, context, *, principal_id):
+        self.calls.append(("read", context, principal_id))
+        if self.failure:
+            raise self.failure
+        return self.states
+
+    def begin(self, context, **kwargs):
+        self.calls.append(("begin", context, kwargs))
+        if self.failure:
+            raise self.failure
+        transaction = type(
+            "Transaction",
+            (),
+            {
+                "state": "pending",
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=9),
+            },
+        )()
+        return type(
+            "Started", (), {"transaction": transaction, "one_time_secret": "x" * 43}
+        )()
 
 def verified(_token, project_id):
     assert project_id == PROJECT
@@ -807,3 +856,88 @@ def test_hosted_channels_reject_invalid_or_stale_configuration():
     )
     assert stale.status_code == 409
     assert stale.get_json() == {"error": "recent_authentication_required"}
+
+
+def test_hosted_channel_setup_is_recent_bound_and_returns_one_time_code():
+    onboarding = Onboarding(OnboardingState())
+    setup = ChannelSetup()
+    client, _sessions = signed_in_client(
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_channels_enabled=True,
+        hosted_channels=Channels(onboarding),
+        hosted_channel_setup_enabled=True,
+        hosted_channel_setup=setup,
+    )
+    review = client.get(
+        "/v1/onboarding/channel-installations", base_url=f"https://{HOST}"
+    )
+    assert review.status_code == 200
+    assert review.get_json() == {
+        "schema_version": 1,
+        "providers": [
+            {
+                "provider": "google_chat",
+                "selected": True,
+                "setup_state": "not_started",
+                "destination_state": "not_started",
+            },
+            {
+                "provider": "slack",
+                "selected": True,
+                "setup_state": "not_started",
+                "destination_state": "not_started",
+            },
+        ],
+        "destination_policy": "owner_dm_only",
+        "test_delivery": "required",
+    }
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    started = client.post(
+        "/v1/onboarding/channel-installations/google-chat/link",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert started.status_code == 201
+    payload = started.get_json()
+    assert payload["schema_version"] == 1
+    assert payload["provider"] == "google_chat"
+    assert payload["state"] == "pending"
+    assert payload["link_command"] == "/link " + "x" * 43
+    assert "transaction" not in payload
+    assert setup.calls[-1][2]["principal_id"] == PRINCIPAL_ID
+    assert setup.calls[-1][2]["session_id"] == SESSION_ID
+
+
+def test_hosted_channel_setup_dependency_body_and_stale_auth_fail_closed():
+    with pytest.raises(ValueError, match="channel setup"):
+        identity_client(hosted_channel_setup_enabled=True)
+
+    onboarding = Onboarding(OnboardingState())
+    setup = ChannelSetup()
+    client, _sessions = signed_in_client(
+        sessions=Sessions(recent=False),
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_channels_enabled=True,
+        hosted_channels=Channels(onboarding),
+        hosted_channel_setup_enabled=True,
+        hosted_channel_setup=setup,
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    path = "/v1/onboarding/channel-installations/google-chat/link"
+    stale = client.post(
+        path,
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert stale.status_code == 409
+    assert stale.get_json() == {"error": "recent_authentication_required"}
+    body = client.post(
+        path,
+        data=b"{}",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert body.status_code == 400
+    assert setup.calls == []

@@ -36,6 +36,7 @@ FUNCTION_OWNER_ROLES = (
     "attune_identity_provisioning_executor",
     "attune_policy_executor",
     "attune_channel_config_executor",
+    "attune_channel_link_executor",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -113,6 +114,43 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
             "attune.hosted_channel_preferences",
             "UPDATE",
         ),
+        ("attune_channel_link_executor", "attune.tenants", "SELECT"),
+        ("attune_channel_link_executor", "attune.principals", "SELECT"),
+        (
+            "attune_channel_link_executor",
+            "attune.identity_sessions",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_onboarding_states",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_preferences",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_destinations",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_setup_transactions",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_setup_transactions",
+            "INSERT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_setup_transactions",
+            "UPDATE",
+        ),
     }
 )
 
@@ -152,6 +190,8 @@ TENANT_TABLES = (
     "identity_sessions",
     "hosted_onboarding_states",
     "hosted_channel_preferences",
+    "hosted_channel_setup_transactions",
+    "hosted_channel_destinations",
 )
 
 
@@ -412,6 +452,7 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             ),
             "attune_policy_executor": (True, False, True, False),
             "attune_channel_config_executor": (True, False, False, False),
+            "attune_channel_link_executor": (True, False, False, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
@@ -595,6 +636,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune_control_plane",
                 "attune_channel_config_executor",
             ),
+            (
+                "attune.begin_hosted_channel_setup(uuid,uuid,text,text,bytea,timestamp with time zone)",
+                "attune_control_plane",
+                "attune_channel_link_executor",
+            ),
         )
         for signature, role, expected_owner in privileged_functions:
             cursor.execute(
@@ -681,6 +727,39 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
         )
         if tuple(cursor.fetchone()) != (False, True, True, False):
             raise RuntimeError("OAuth transaction privileges do not match policy")
+
+        cursor.execute(
+            """
+            SELECT
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane', 'attune.installations', 'SELECT'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane', 'attune.installations',
+                    'INSERT,UPDATE,DELETE,TRUNCATE'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane',
+                    'attune.hosted_channel_setup_transactions', 'SELECT'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane',
+                    'attune.hosted_channel_setup_transactions',
+                    'INSERT,UPDATE,DELETE,TRUNCATE'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane',
+                    'attune.hosted_channel_destinations', 'SELECT'
+                ),
+                pg_catalog.has_table_privilege(
+                    'attune_control_plane',
+                    'attune.hosted_channel_destinations',
+                    'INSERT,UPDATE,DELETE,TRUNCATE'
+                )
+            """
+        )
+        if tuple(cursor.fetchone()) != (True, False, True, False, True, False):
+            raise RuntimeError("channel installation privileges do not match policy")
 
         cursor.execute(
             """

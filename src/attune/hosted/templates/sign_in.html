@@ -61,6 +61,32 @@
         <p class="channel-note">The selected apps and owner-only destinations must be installed and verified before this step is complete.</p>
         <button id="channels-save" type="button">Save channel choices</button>
       </section>
+      <section id="channel-installations" hidden>
+        <h2>Connect your selected apps</h2>
+        <p>
+          Each app must prove its installation, owner-only destination,
+          verified ingress, and a fixed-content test separately.
+        </p>
+        <div id="google-chat-installation" hidden>
+          <h3>Google Chat</h3>
+          <p id="google-chat-installation-state"></p>
+          <button id="google-chat-link-start" type="button">
+            Generate Google Chat link code
+          </button>
+          <div id="google-chat-link-instructions" hidden>
+            <p>In a direct message with the Attune Chat app, send this command within ten minutes:</p>
+            <code id="google-chat-link-command"></code>
+            <p id="google-chat-link-expiry"></p>
+          </div>
+        </div>
+        <div id="slack-installation" hidden>
+          <h3>Slack</h3>
+          <p id="slack-installation-state">
+            Slack OAuth installation is being prepared. No Slack authority has
+            been granted yet.
+          </p>
+        </div>
+      </section>
       <section id="policy-review" hidden>
         <h2>Review assistant policy</h2>
         <p>

@@ -60,6 +60,8 @@ serializes changes, and is idempotent.
 Slack OAuth/app installation, Google Chat app installation, verified callbacks,
 owner-only destination binding, test delivery, replacement, and disconnection
 remain separate ceremonies. None may infer completion from this preference.
+Their shared state and distinct provider proofs are specified in
+[`hosted-channel-installation.md`](hosted-channel-installation.md).
 
 ## Development rollout evidence
 

@@ -63,6 +63,13 @@ a default-off gate. It preserves independent interaction and brief choices and
 advances only to `authorized`; live app installation, destination binding,
 verified ingress/test delivery, replacement, and disconnection still remain.
 
+The following slice is specified in
+[`hosted-channel-installation.md`](hosted-channel-installation.md): a shared
+forced-RLS installation/destination state machine, Google Chat owner-DM link
+codes, Slack OAuth installation, private opaque route resolution, and explicit
+fixed-content tests. Provider ingress and callback consumption remain
+default-off until their separate activation gates pass.
+
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does
 not authorize customer data or constitute a hosted launch.

@@ -287,6 +287,17 @@ authenticated, and audited.
   ingress, and test delivery may produce `validated`. The ordinary control
   plane MUST NOT directly mutate preferences, and validated routes MUST NOT be
   silently retargeted. See the [hosted channel ceremony](hosted-channels.md).
+- **SEC-120.** Hosted channel installation MUST prove provider ingress,
+  platform-app identity, owner actor, owner-only destination, and bounded test
+  delivery as separate facts. Google Chat linking MUST consume a one-use
+  high-entropy code only from a verified `DIRECT_MESSAGE` event. Slack linking
+  MUST use one-use browser-bound OAuth, verify the app/team/bot/installer and
+  exact granted scopes, and retain bot credentials only through the encrypted
+  private broker. Public ingress MUST NOT receive tenant or provider authority;
+  a private broker MUST derive domain-separated opaque references and resolve
+  the tenant. The ordinary control plane MUST NOT mutate installations,
+  destination bindings, or validation state. See the
+  [hosted channel installation design](hosted-channel-installation.md).
 
 ### 5.2 Authorization model
 

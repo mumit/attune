@@ -126,6 +126,16 @@ final edge plan was empty. After global policy convergence, an unauthenticated
 request reached the application and returned 401. No owner preference was
 submitted by deployment automation.
 
+Hosted channel installation state has a further independent default-off
+`enable_hosted_channel_setup` gate. It adds only the exact authenticated GET
+`/v1/onboarding/channel-installations` and POST
+`/v1/onboarding/channel-installations/google-chat/link` paths at Cloud Armor
+priority `887`. Apply and verify migration 0021 first. Enabling this gate may
+create a hash-only, expiring Google Chat link attempt; it does not enable a
+provider callback, consume the link, create a destination, store a provider
+credential, or send a test. Keep it false until the private channel broker and
+verified Google Chat ingress have passed their separate activation gates.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate

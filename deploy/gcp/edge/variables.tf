@@ -105,6 +105,12 @@ variable "enable_hosted_channels" {
   default     = false
 }
 
+variable "enable_hosted_channel_setup" {
+  description = "Expose the effect-free hosted channel installation setup boundary."
+  type        = bool
+  default     = false
+}
+
 variable "google_oauth_provider_ready" {
   description = "Explicit operator attestation that the separate Workspace web client, exact redirect, consent screen, secret version, and negative tests are ready."
   type        = bool

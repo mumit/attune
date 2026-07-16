@@ -90,6 +90,12 @@ class HostedChannels(Protocol):
     def configure(self, context, **kwargs): ...
 
 
+class HostedChannelSetup(Protocol):
+    def read(self, context, *, principal_id): ...
+
+    def begin(self, context, **kwargs): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -111,6 +117,8 @@ def create_app(
     hosted_policy: HostedPolicy | None = None,
     hosted_channels_enabled: bool = False,
     hosted_channels: HostedChannels | None = None,
+    hosted_channel_setup_enabled: bool = False,
+    hosted_channel_setup: HostedChannelSetup | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -168,6 +176,13 @@ def create_app(
     ):
         raise ValueError(
             "enabled hosted channels require hosted onboarding and an audited service"
+        )
+    if hosted_channel_setup_enabled and (
+        not hosted_channels_enabled or hosted_channel_setup is None
+    ):
+        raise ValueError(
+            "enabled hosted channel setup requires channel preferences and an "
+            "audited setup service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -332,6 +347,11 @@ def create_app(
                     ),
                     "hosted_channels": (
                         "available" if hosted_channels_enabled else "not_configured"
+                    ),
+                    "hosted_channel_setup": (
+                        "available"
+                        if hosted_channel_setup_enabled
+                        else "not_configured"
                     ),
                 }
             )
@@ -667,6 +687,64 @@ def create_app(
                     }
                 )
 
+        if hosted_channel_setup_enabled:
+
+            @app.get("/v1/onboarding/channel-installations")
+            def read_hosted_channel_installations():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    states = hosted_channel_setup.read(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except Exception:
+                    return jsonify({"error": "channel_setup_unavailable"}), 503
+                return jsonify(_public_channel_installations(states))
+
+            @app.post("/v1/onboarding/channel-installations/google-chat/link")
+            def begin_google_chat_link():
+                if request.content_length not in {None, 0}:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify({"error": "recent_authentication_required"}), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    started = hosted_channel_setup.begin(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        provider="google_chat",
+                    )
+                except ValueError:
+                    return jsonify({"error": "invalid_channel_setup"}), 400
+                except Exception:
+                    return jsonify({"error": "channel_setup_unavailable"}), 503
+                return (
+                    jsonify(
+                        {
+                            "schema_version": 1,
+                            "provider": "google_chat",
+                            "state": started.transaction.state,
+                            "link_command": f"/link {started.one_time_secret}",
+                            "expires_at": started.transaction.expires_at.isoformat(),
+                        }
+                    ),
+                    201,
+                )
+
     @app.errorhandler(400)
     def bad_request(_error):
         return jsonify({"error": "invalid_request"}), 400
@@ -762,4 +840,21 @@ def _public_channels(preferences, status: str) -> dict:
             {"id": "slack", "label": "Slack"},
         ],
         "installation": "required",
+    }
+
+
+def _public_channel_installations(states) -> dict:
+    return {
+        "schema_version": 1,
+        "providers": [
+            {
+                "provider": state.provider,
+                "selected": state.selected,
+                "setup_state": state.setup_state,
+                "destination_state": state.destination_state,
+            }
+            for state in states
+        ],
+        "destination_policy": "owner_dm_only",
+        "test_delivery": "required",
     }

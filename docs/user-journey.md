@@ -89,6 +89,13 @@ Slack and Google Chat may be selected independently for interaction and briefs;
 the step becomes `validated` only after the selected installations and exact
 owner-only destinations pass bounded live tests.
 
+For Google Chat, the owner generates a ten-minute link code in Attune and sends
+it only in a direct message to the Attune Chat app. For Slack, the owner follows
+the browser-bound Slack installation flow; Attune binds the verified installer
+to a one-user DM. Each provider then shows installation, ingress, destination,
+and fixed-content test as separate checks. Shared spaces and channels are not
+accepted by the initial hosted release.
+
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed
 connector is verified instead of silently starting a replacement. A temporary
