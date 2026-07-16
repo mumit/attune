@@ -60,3 +60,21 @@ serializes changes, and is idempotent.
 Slack OAuth/app installation, Google Chat app installation, verified callbacks,
 owner-only destination binding, test delivery, replacement, and disconnection
 remain separate ceremonies. None may infer completion from this preference.
+
+## Development rollout evidence
+
+Development rollout on 2026-07-16 UTC used immutable migrator digest
+`sha256:9720b34f541a5bcc7e0a2e9a30a91058e8248e3dd5db12e3db4b09253365634a`
+and control-plane digest
+`sha256:a955271a12d185a734b0d130f54cff659f7e6d34862007fb3535fa7e7685d2af`.
+Migration execution `attune-development-database-migrate-pcpm9` applied exactly
+one migration and verified 29 tenant tables forced through RLS. The data plan
+was then empty.
+
+The control plane was first deployed with the channel gate explicitly false.
+A second reviewed plan enabled only the application gate and exact Cloud Armor
+priority `886`; it changed two resources in place and created or destroyed
+none. After global policy convergence, an unauthenticated request reached
+application authorization and returned `401 {"error":"invalid_session"}`.
+The final edge plan was empty. Deployment did not create or save a channel
+preference; that remains a distinct, recently authenticated owner ceremony.

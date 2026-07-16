@@ -117,6 +117,15 @@ gate exposes preference review/configuration only; it does not install Slack or
 Google Chat, choose a destination, enable ingress, send a test, or validate the
 channel step.
 
+Development rollout on 2026-07-16 UTC first deployed control-plane digest
+`sha256:a955271a12d185a734b0d130f54cff659f7e6d34862007fb3535fa7e7685d2af`
+with the channel gate explicitly false. After migration 0020 passed, a second
+saved plan enabled only the application gate and Cloud Armor priority `886`.
+The apply changed two resources in place, created or destroyed none, and the
+final edge plan was empty. After global policy convergence, an unauthenticated
+request reached the application and returned 401. No owner preference was
+submitted by deployment automation.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate

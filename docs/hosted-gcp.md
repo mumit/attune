@@ -256,6 +256,16 @@ Slack/Google Chat interaction and brief choices. The result is only
 `authorized`; provider app installation, exact destination binding, verified
 ingress and test delivery remain mandatory before `validated`.
 
+Development rollout evidence was collected on 2026-07-16 UTC from commit
+`1585ded`. Migration 0020 applied exactly once and the live verifier reported
+29 tenant tables forced through RLS. The reviewed control-plane image was
+deployed first with the feature gate false, then a second plan enabled only the
+gate and exact edge path. The activation changed two resources in place and
+created or destroyed none. After Cloud Armor convergence, unauthenticated
+access reached application authorization and returned 401; both Terraform
+roots were empty after deployment. No channel preference, installation,
+destination, ingress, or message was created during rollout.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

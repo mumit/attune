@@ -182,6 +182,14 @@ canonical Slack/Google Chat purpose choices and advances channels to
 `authorized`; it creates no app, destination, credential, ingress, or message.
 Apply and verify it before enabling the separate edge gate.
 
+Development rollout evidence was collected on 2026-07-16 UTC. Immutable
+migrator digest
+`sha256:9720b34f541a5bcc7e0a2e9a30a91058e8248e3dd5db12e3db4b09253365634a`
+was applied to both private jobs. Execution
+`attune-development-database-migrate-pcpm9` applied exactly one migration and
+reported 29 tenant tables forced through RLS; the following data plan was
+empty. The migration created no channel preference or provider authority.
+
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value
 belongs in these migrations, Terraform state, Cloud Run environment variables,
