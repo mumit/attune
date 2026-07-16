@@ -173,6 +173,14 @@ def test_dispatch_broker_boundary_is_documented_and_fail_closed():
     assert "A private broker exclusively owns hosted task dispatch" in decisions
 
 
+def test_channel_service_images_include_the_web_runtime():
+    for service in ("channel-broker", "google-chat-ingress"):
+        dockerfile = (ROOT / "deploy" / service / "Dockerfile").read_text()
+        assert '".[hosted-service]"' in dockerfile
+        assert "USER 65532:65532" in dockerfile
+        assert "ENV PORT=8080" in dockerfile
+
+
 def test_audit_writer_is_private_intent_only_and_least_privileged():
     root = ROOT / "deploy" / "gcp" / "runtime"
     terraform = "\n".join(path.read_text() for path in sorted(root.glob("*.tf")))
