@@ -294,8 +294,11 @@ authenticated, and audited.
   MUST use one-use browser-bound OAuth, verify the app/team/bot/installer and
   exact granted scopes, and retain bot credentials only through the encrypted
   private broker. Public ingress MUST NOT receive tenant or provider authority;
-  a private broker MUST derive domain-separated opaque references and resolve
-  the tenant. The ordinary control plane MUST NOT mutate installations,
+  a private broker MUST derive domain-separated HMAC references with a
+  broker-only 256-bit key and resolve the tenant. Link consumption MUST use a
+  short database claim: a durable pre-effect audit is written before canonical
+  installation/destination mutation, audit failure releases the claim, and
+  replay cannot consume it. The ordinary control plane MUST NOT mutate installations,
   destination bindings, or validation state. See the
   [hosted channel installation design](hosted-channel-installation.md).
 

@@ -19,6 +19,7 @@ _LOCK_ID = 5_746_885_417_301_991_188
 
 RUNTIME_ROLES = (
     "attune_control_plane",
+    "attune_channel_broker",
     "attune_dispatch_broker",
     "attune_worker",
     "attune_secret_broker",
@@ -136,6 +137,15 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
             "attune.hosted_channel_destinations",
             "SELECT",
         ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_destinations",
+            "INSERT",
+        ),
+        ("attune_channel_link_executor", "attune.installations", "SELECT"),
+        ("attune_channel_link_executor", "attune.installations", "INSERT"),
+        ("attune_channel_link_executor", "attune.audit_intents", "SELECT"),
+        ("attune_channel_link_executor", "attune.audit_intents", "INSERT"),
         (
             "attune_channel_link_executor",
             "attune.hosted_channel_setup_transactions",
@@ -639,6 +649,21 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             (
                 "attune.begin_hosted_channel_setup(uuid,uuid,text,text,bytea,timestamp with time zone)",
                 "attune_control_plane",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.claim_google_chat_link(bytea,bytea,timestamp with time zone)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.release_google_chat_link_claim(bytea,bytea)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.consume_google_chat_link(bytea,bytea,bytea,bytea,bytea)",
+                "attune_channel_broker",
                 "attune_channel_link_executor",
             ),
         )

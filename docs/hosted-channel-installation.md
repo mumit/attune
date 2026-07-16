@@ -73,7 +73,11 @@ The shared state comprises:
   observed delivery, replacement, and revocation.
 
 Link codes and OAuth state are 256-bit random values, returned once, stored only
-as hashes, expire after ten minutes, and are single-use. Starting a new attempt
+as hashes, expire after ten minutes, and are single-use. Google Chat
+consumption first places a 60-second-or-shorter claim and creates a durable
+pre-effect audit intent. The broker writes that audit through the private audit
+writer before it may finalize the installation and destination; audit failure
+releases the claim without consuming the link. Starting a new attempt
 cancels any older pending attempt for that owner/provider. Database functions
 independently require the provider to remain selected at the same preference
 revision. Callback consumption serializes against preference changes and
@@ -89,8 +93,9 @@ refuses expired, cancelled, consumed, ambiguous, or externally modified state.
   to consume setup transactions or resolve opaque routes. Public input never
   supplies a tenant identifier.
 - A memberless database function owner performs cross-tenant link lookup and
-  mutation. Its consume function is not granted to any runtime identity until
-  the private broker and verified ingress are deployed and reviewed.
+  mutation. Only the dedicated, unprivileged channel-broker database role may
+  execute its claim, release, and consume functions; that role has no direct
+  table access.
 - The ordinary control plane may create a bounded setup attempt through one
   fixed function and read public status. It cannot mutate installations,
   destinations, consumed links, or validation state directly.
@@ -100,7 +105,9 @@ refuses expired, cancelled, consumed, ambiguous, or externally modified state.
 
 ## State machine
 
-`pending` setup can become only `consumed`, `expired`, or `cancelled`.
+`pending` setup can become `claimed`, `expired`, or `cancelled`; a short
+`claimed` lease can return to `pending` on pre-audit failure or expiry, or move
+once to `consumed` after the canonical checks pass.
 Consumption creates a destination in `pending_test` and advances onboarding
 from `authorized` to `applied`. A separately audited, explicit test may advance
 that destination to `active`. The channel step becomes `validated` only when

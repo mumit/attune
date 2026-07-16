@@ -390,7 +390,7 @@ def test_initial_identity_provisioning_is_private_one_purpose_and_secret_aware()
     ).read_text()
 
     assert 'identity_provisioner = "id-prov"' in foundation
-    assert 'if name != "identity-bootstrap"' in foundation
+    assert 'if !contains(["channel-reference-hmac", "identity-bootstrap"], name)' in foundation
     assert 'workload["identity_provisioner"]' in foundation
     assert 'resource "google_cloud_run_v2_job" "identity_provision"' in data
     assert "google_cloud_run_v2_job_iam" not in data

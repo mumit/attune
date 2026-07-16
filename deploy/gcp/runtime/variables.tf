@@ -29,6 +29,22 @@ variable "dispatch_broker_image" {
   }
 }
 
+variable "channel_broker_image" {
+  description = "Artifact Registry channel-broker image pinned by sha256 digest."
+  type        = string
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.channel_broker_image))
+    error_message = "channel_broker_image must be an immutable @sha256 Artifact Registry reference."
+  }
+}
+
+variable "enable_channel_broker" {
+  description = "Deploy the private channel broker after migration 0022 and its security gates pass."
+  type        = bool
+  default     = false
+}
+
 variable "enable_dispatch_broker" {
   description = "Deploy dispatch only after the jobs queue fixed override is applied."
   type        = bool

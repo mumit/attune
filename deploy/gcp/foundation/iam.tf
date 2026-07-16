@@ -1,5 +1,6 @@
 locals {
   workload_accounts = {
+    channel_broker       = "channel-broker"
     control_plane        = "ctl"
     oauth_callback       = "oauth-cb"
     oauth_exchange       = "oauth-xchg"
@@ -40,6 +41,7 @@ resource "google_project_iam_member" "runtime_metrics" {
 resource "google_project_iam_member" "database_client" {
   for_each = toset([
     "audit_writer",
+    "channel_broker",
     "control_plane",
     "dispatch_broker",
     "oauth_exchange",
@@ -55,6 +57,7 @@ resource "google_project_iam_member" "database_client" {
 resource "google_project_iam_member" "database_instance_user" {
   for_each = toset([
     "audit_writer",
+    "channel_broker",
     "control_plane",
     "dispatch_broker",
     "oauth_exchange",
@@ -70,6 +73,7 @@ resource "google_project_iam_member" "database_instance_user" {
 resource "google_sql_user" "workload" {
   for_each = toset([
     "audit_writer",
+    "channel_broker",
     "control_plane",
     "dispatch_broker",
     "oauth_exchange",
@@ -124,12 +128,19 @@ resource "google_service_account_iam_member" "cloud_tasks_token_creator" {
 resource "google_secret_manager_secret_iam_member" "broker_access" {
   for_each = {
     for name, secret in google_secret_manager_secret.platform : name => secret
-    if name != "identity-bootstrap"
+    if !contains(["channel-reference-hmac", "identity-bootstrap"], name)
   }
   project   = var.project_id
   secret_id = each.value.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.workload["secret_broker"].email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "channel_broker_hmac_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.platform["channel-reference-hmac"].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.workload["channel_broker"].email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "identity_bootstrap_access" {

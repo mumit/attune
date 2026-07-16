@@ -34,6 +34,7 @@ locals {
   ])
 
   platform_secret_ids = toset([
+    "channel-reference-hmac",
     "google-oauth-client",
     "identity-bootstrap",
     "llm-api-key",

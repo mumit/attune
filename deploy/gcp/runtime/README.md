@@ -232,6 +232,17 @@ Verify that no runtime service account has a user-managed key. Do not place
 tenant data, tokens, or credentials in Terraform variables, state, labels,
 probes, or deployment logs.
 
+The channel broker is a separate default-off service. Before setting
+`enable_channel_broker=true`, apply migration 0022 and verify its dedicated
+Cloud SQL IAM user is the sole member of `attune_channel_broker`. Create one
+random 256-bit value, store only its base64url encoding as the first version of
+the foundation-managed `channel-reference-hmac` secret, and never place that
+value in Terraform, environment variables, logs, or support output. Only the
+channel-broker workload may read this secret; only the ingress workload may
+invoke the service. A reviewed dormant plan must show the broker, its single
+invoker grant, and the audit-writer grant without enabling a public provider
+route.
+
 Worker deployment does not enable delivery. Copy the worker output's URI
 hostname and custom audience into the two nullable jobs-worker variables in the
 foundation root, review the queue-only in-place plan, and apply it. Confirm the

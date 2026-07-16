@@ -23,6 +23,19 @@ output "dispatch_broker" {
   } : null
 }
 
+output "channel_broker" {
+  description = "Private one-use channel-link broker service identifiers."
+  value = var.enable_channel_broker ? {
+    project         = local.foundation.project_id
+    region          = local.foundation.region
+    name            = google_cloud_run_v2_service.channel_broker[0].name
+    uri             = google_cloud_run_v2_service.channel_broker[0].uri
+    audience        = local.channel_broker_audience
+    service_account = local.foundation.workload_identities.channel_broker
+    image           = var.channel_broker_image
+  } : null
+}
+
 output "secret_broker" {
   description = "Private secret-broker service identifiers."
   value = {

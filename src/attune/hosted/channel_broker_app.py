@@ -1,0 +1,48 @@
+"""Production composition root for the private channel broker."""
+
+from __future__ import annotations
+
+import base64
+import os
+
+from .audit_client import AuditWriterClient
+from .channel_broker import (
+    ChannelReferenceHasher,
+    GoogleChatLinkBroker,
+    PostgresChannelBrokerRepository,
+)
+from .channel_broker_service import create_app
+from .cloud_sql import iam_connection
+
+
+def _hmac_key(secret_resource: str) -> bytes:
+    from google.cloud import secretmanager
+
+    response = secretmanager.SecretManagerServiceClient().access_secret_version(
+        request={"name": f"{secret_resource}/versions/latest"}
+    )
+    try:
+        key = base64.b64decode(
+            response.payload.data.strip() + b"==", altchars=b"-_", validate=True
+        )
+    except Exception as exc:
+        raise RuntimeError("channel reference HMAC secret is invalid") from exc
+    if len(key) != 32:
+        raise RuntimeError("channel reference HMAC secret must encode 32 bytes")
+    return key
+
+
+def create_production_app():
+    broker = GoogleChatLinkBroker(
+        PostgresChannelBrokerRepository(iam_connection),
+        AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
+        ChannelReferenceHasher(_hmac_key(os.environ["ATTUNE_CHANNEL_HMAC_SECRET"])),
+    )
+    return create_app(
+        broker,
+        expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
+        expected_ingress=os.environ["ATTUNE_INGRESS_SERVICE_ACCOUNT"],
+    )
+
+
+app = create_production_app()

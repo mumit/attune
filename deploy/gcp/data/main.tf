@@ -19,6 +19,10 @@ locals {
     var.labels,
   )
   runtime_database_users = {
+    attune_channel_broker = trimsuffix(
+      local.foundation.workload_identities.channel_broker,
+      ".gserviceaccount.com",
+    )
     attune_control_plane = trimsuffix(
       local.foundation.workload_identities.control_plane,
       ".gserviceaccount.com",

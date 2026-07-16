@@ -53,6 +53,7 @@ from attune.hosted.onboarding import PostgresHostedOnboardingRepository
 from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
 from attune.hosted.hosted_channels import PostgresHostedChannelRepository
 from attune.hosted.channel_setup import PostgresHostedChannelSetupRepository
+from attune.hosted.channel_broker import PostgresChannelBrokerRepository
 from attune.hosted.capability_gateway import (
     CapabilityDefinition,
     CapabilityDenied,
@@ -97,6 +98,7 @@ CHANNEL_SESSION = UUID("30000000-0000-4000-8000-000000000086")
 
 ROLE_BINDINGS = {
     "attune_control_plane": "attune_test_control",
+    "attune_channel_broker": "attune_test_channel_broker",
     "attune_dispatch_broker": "attune_test_dispatch",
     "attune_worker": "attune_test_worker",
     "attune_secret_broker": "attune_test_broker",
@@ -112,7 +114,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0021_hosted_channel_installation_state.sql"
+    assert migrations[-1].name == "0022_google_chat_link_broker.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -227,7 +229,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 21
+    assert apply_migrations(admin) == 22
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -818,6 +820,70 @@ def test_hosted_channel_setup_is_recent_single_use_and_not_directly_mutable(
     finally:
         control.rollback()
         control.close()
+
+
+def test_google_chat_link_broker_is_one_use_audited_and_function_only(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    broker = PostgresChannelBrokerRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_channel_broker"])
+    )
+    writer = PostgresAuditWriterRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_audit_writer"])
+    )
+    secret_hash = hashlib.sha256(b"second-channel-link").digest()
+    claim_hash = hashlib.sha256(b"broker-claim").digest()
+    claim = broker.claim(
+        secret_hash=secret_hash,
+        claim_hash=claim_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert claim.tenant_id == CHANNEL_TENANT
+    assert claim.owner_principal_id == CHANNEL_PRINCIPAL
+    assert writer.write(claim.pre_audit_intent_id) is not None
+
+    linked = broker.consume(
+        secret_hash=secret_hash,
+        claim_hash=claim_hash,
+        installation_ref_hash=hashlib.sha256(b"google-chat-app").digest(),
+        actor_ref_hash=hashlib.sha256(b"google-chat-owner").digest(),
+        destination_ref_hash=hashlib.sha256(b"google-chat-dm").digest(),
+    )
+    assert linked.tenant_id == CHANNEL_TENANT
+    assert linked.destination_status == "pending_test"
+    assert writer.write(linked.outcome_audit_intent_id) is not None
+
+    with pytest.raises(psycopg.errors.NoDataFound):
+        broker.claim(
+            secret_hash=secret_hash,
+            claim_hash=hashlib.sha256(b"replay").digest(),
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+        )
+
+    direct = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_channel_broker"]
+    )()
+    try:
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT * FROM attune.hosted_channel_destinations")
+        direct.rollback()
+    finally:
+        direct.close()
+
+    setups = PostgresHostedChannelSetupRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_control_plane"])
+    )
+    states = {
+        state.provider: state
+        for state in setups.read(
+            TenantContext(CHANNEL_TENANT), principal_id=CHANNEL_PRINCIPAL
+        )
+    }
+    assert states["google_chat"].setup_state == "consumed"
+    assert states["google_chat"].destination_state == "pending_test"
 
 
 def test_rls_hides_other_tenant_rows_and_vectors(initialized_database):
