@@ -20,3 +20,14 @@ output "identity_provisioning_job" {
     bootstrap_secret = local.foundation.platform_secret_ids["identity-bootstrap"]
   }
 }
+
+output "protocol_retention_job" {
+  description = "Dormant, manually invoked expired-protocol retention job identifiers."
+  value = {
+    project         = local.foundation.project_id
+    region          = local.foundation.region
+    name            = google_cloud_run_v2_job.protocol_retention.name
+    service_account = local.foundation.workload_identities.retention
+    image           = var.migrator_image
+  }
+}

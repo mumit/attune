@@ -51,6 +51,10 @@ locals {
       local.foundation.workload_identities.identity_provisioner,
       ".gserviceaccount.com",
     )
+    attune_retention = trimsuffix(
+      local.foundation.workload_identities.retention,
+      ".gserviceaccount.com",
+    )
   }
 }
 
@@ -229,6 +233,73 @@ resource "google_cloud_run_v2_job" "identity_provision" {
           network    = local.foundation.network_id
           subnetwork = local.foundation.subnetwork_id
           tags       = ["attune-identity-provisioning"]
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_cloud_run_v2_job" "protocol_retention" {
+  project             = local.foundation.project_id
+  name                = "${local.prefix}-protocol-retention"
+  location            = local.foundation.region
+  deletion_protection = true
+  labels = merge(local.labels, {
+    component = "protocol-retention"
+  })
+
+  template {
+    task_count  = 1
+    parallelism = 1
+
+    template {
+      service_account = local.foundation.workload_identities.retention
+      max_retries     = 0
+      timeout         = "300s"
+
+      containers {
+        name    = "protocol-retention"
+        image   = var.migrator_image
+        command = ["python", "-m", "attune.hosted.protocol_retention"]
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+
+        env {
+          name  = "ATTUNE_CLOUD_SQL_INSTANCE"
+          value = local.foundation.database_instance
+        }
+        env {
+          name  = "ATTUNE_DB_NAME"
+          value = local.foundation.database_name
+        }
+        env {
+          name = "ATTUNE_DB_USER"
+          value = trimsuffix(
+            local.foundation.workload_identities.retention,
+            ".gserviceaccount.com",
+          )
+        }
+        env {
+          name  = "ATTUNE_RETENTION_BATCH_SIZE"
+          value = tostring(var.protocol_retention_batch_size)
+        }
+      }
+
+      vpc_access {
+        egress = "PRIVATE_RANGES_ONLY"
+        network_interfaces {
+          network    = local.foundation.network_id
+          subnetwork = local.foundation.subnetwork_id
+          tags       = ["attune-protocol-retention"]
         }
       }
     }

@@ -8,6 +8,7 @@ locals {
     ingress              = "ingress"
     identity_provisioner = "id-prov"
     model_gateway        = "model"
+    retention            = "retention"
     worker               = "worker"
     secret_broker        = "secrets"
     task_dispatch        = "dispatch"
@@ -47,6 +48,7 @@ resource "google_project_iam_member" "database_client" {
     "dispatch_broker",
     "oauth_exchange",
     "identity_provisioner",
+    "retention",
     "secret_broker",
     "worker",
   ])
@@ -63,6 +65,7 @@ resource "google_project_iam_member" "database_instance_user" {
     "dispatch_broker",
     "oauth_exchange",
     "identity_provisioner",
+    "retention",
     "secret_broker",
     "worker",
   ])
@@ -79,6 +82,7 @@ resource "google_sql_user" "workload" {
     "dispatch_broker",
     "oauth_exchange",
     "identity_provisioner",
+    "retention",
     "secret_broker",
     "worker",
   ])

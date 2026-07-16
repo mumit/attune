@@ -98,8 +98,10 @@ same Calendar question proving that prior email context no longer supplies the
 date.
 Workspace disconnect/reconnect was already live. The first retention safety
 slice is implemented: the live database verifier now requires an exact,
-reviewed lifecycle classification for every tenant-bearing relation. Retention
-executors and customer controls are not active yet. Slack installation/lifecycle,
+reviewed lifecycle classification for every tenant-bearing relation. A bounded,
+audited expired-protocol retention executor and manual Cloud Run job are
+implemented but remain dormant pending live synthetic verification; customer
+content retention and controls are not active yet. Slack installation/lifecycle,
 export/deletion, support repair, customer-visible audit, adversarial assurance,
 and external security review remain later independent slices.
 

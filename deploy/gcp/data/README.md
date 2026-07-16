@@ -395,6 +395,42 @@ privileges, then require an empty data plan. Keep the independent edge
 `enable_hosted_channel_lifecycle` gate false until the new control-plane image
 is Ready and the destructive owner ceremony is approved.
 
+## Dormant protocol-retention job
+
+Migration `0028_protocol_retention.sql` and this module add
+`attune-<environment>-protocol-retention` with its own Cloud SQL IAM identity.
+The identity has no table privileges and may call only
+`attune.prune_expired_protocol_records(uuid, integer)`. A separate memberless
+`BYPASSRLS` function owner can select/delete the four reviewed protocol tables
+and insert content-free audit intents; it cannot log in and has no members.
+
+Each invocation is transactionally bounded to the configured batch size
+(default 500, maximum 1,000) per table and prunes only:
+
+- OAuth transactions more than 24 hours past protocol expiry;
+- Google Chat/Slack setup transactions more than 24 hours past expiry;
+- expired or revoked identity sessions older than 24 hours when no setup
+  transaction still references them; and
+- processed provider events older than seven days.
+
+The job is deliberately unscheduled. After applying migration 0028, verify an
+empty or synthetic development run explicitly:
+
+```bash
+gcloud run jobs execute attune-development-protocol-retention \
+  --project="$PROJECT_ID" \
+  --region="$REGION" \
+  --wait
+```
+
+The execution must succeed once, return only aggregate counts in logs, create
+the expected per-tenant audit intents when synthetic expired records exist, and
+leave recent records intact. Then run the database migrator again to prove the
+role/privilege verifier remains clean. Do not add Cloud Scheduler until this
+evidence is recorded and alerting for job failure and an accumulating expired
+backlog exists. Scheduling this job does not activate conversation or memory
+retention.
+
 ## Production gates
 
 Before this job or schema is promoted beyond development:

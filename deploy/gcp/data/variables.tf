@@ -34,3 +34,14 @@ variable "labels" {
   type        = map(string)
   default     = {}
 }
+
+variable "protocol_retention_batch_size" {
+  description = "Maximum rows pruned from each expired protocol table per execution."
+  type        = number
+  default     = 500
+
+  validation {
+    condition     = floor(var.protocol_retention_batch_size) == var.protocol_retention_batch_size && var.protocol_retention_batch_size >= 1 && var.protocol_retention_batch_size <= 1000
+    error_message = "protocol_retention_batch_size must be an integer between 1 and 1000."
+  }
+}

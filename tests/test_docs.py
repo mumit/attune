@@ -40,6 +40,19 @@ def test_hosted_lifecycle_contract_is_fail_closed_and_not_overstated():
     assert "outside the deletable tenant graph" in normalized
     assert "A missing, stale, unavailable, or unverifiable suppression ledger blocks" in normalized
     assert "must not present a decorative control" in normalized
+    assert "first slice implemented, dormant" in normalized
+
+
+def test_protocol_retention_job_is_dormant_and_least_privileged():
+    foundation = (ROOT / "deploy" / "gcp" / "foundation" / "iam.tf").read_text()
+    data_main = (ROOT / "deploy" / "gcp" / "data" / "main.tf").read_text()
+    data_guide = (ROOT / "deploy" / "gcp" / "data" / "README.md").read_text()
+
+    assert 'retention            = "retention"' in foundation
+    assert 'service_account = local.foundation.workload_identities.retention' in data_main
+    assert 'command = ["python", "-m", "attune.hosted.protocol_retention"]' in data_main
+    assert "google_cloud_scheduler" not in data_main
+    assert "deliberately unscheduled" in data_guide
 
 
 def test_qdrant_compose_images_are_pinned_and_loopback_bound():

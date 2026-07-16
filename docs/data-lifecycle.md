@@ -129,9 +129,14 @@ restore. It never falls back to activating the snapshot.
 
 1. **Inventory gate (implemented):** exact executable relational inventory and
    fail-closed live-schema verification.
-2. **Retention executor:** terminal-state pruning for protocol and operational
-   records, then conversation/memory policies across database, vectors, caches,
-   and task payloads.
+2. **Retention executor (first slice implemented, dormant):** a dedicated
+   identity and memberless function owner can prune at most 1,000 rows per
+   table from expired OAuth transactions, channel-link transactions, identity
+   sessions, and processed provider events. The database function holds a
+   singleton transaction lock and atomically emits per-tenant, content-free
+   audit intents. Its Cloud Run job has no schedule until live synthetic
+   verification. Operational records and conversation/memory policies across
+   database, vectors, caches, and task payloads remain later slices.
 3. **Export path:** dedicated identity, temporary encrypted object store,
    recent-auth request/download surfaces, and secret-negative tests.
 4. **Deletion authority:** independent restore-suppression ledger and complete

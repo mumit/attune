@@ -115,6 +115,7 @@ ROLE_BINDINGS = {
     "attune_audit_writer": "attune_test_audit",
     "attune_oauth_exchange": "attune_test_oauth_exchange",
     "attune_identity_provisioner": "attune_test_identity_provisioner",
+    "attune_retention": "attune_test_retention",
 }
 
 
@@ -124,26 +125,26 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0027_google_chat_relink_route_context.sql"
+    assert migrations[-1].name == "0028_protocol_retention.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
     )
-    channel_broker = migrations[-5].sql
+    channel_broker = migrations[-6].sql
     assert "GRANT attune_channel_link_executor TO %I" in channel_broker
     assert "GRANT CREATE ON SCHEMA attune TO attune_channel_link_executor" in channel_broker
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in channel_broker
     assert "REVOKE attune_channel_link_executor FROM %I" in channel_broker
-    conversation = migrations[-4].sql
+    conversation = migrations[-5].sql
     assert "LIMIT 2" in conversation
     assert "GRANT attune_channel_message_executor TO %I" in conversation
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_message_executor" in conversation
     assert "TO attune_channel_broker" in conversation
-    delivery = migrations[-3].sql
+    delivery = migrations[-4].sql
     assert "hosted_channel_deliveries" in delivery
     assert "already_delivered boolean" in delivery
     assert "TO attune_channel_broker" in delivery
-    lifecycle = migrations[-2].sql
+    lifecycle = migrations[-3].sql
     assert "attune_channel_lifecycle_executor" in lifecycle
     assert "disconnect_hosted_channel_destination" in lifecycle
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_lifecycle_executor" in lifecycle
@@ -152,9 +153,16 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     assert lifecycle.index("SET LOCAL ROLE attune_channel_link_executor") < replace_link
     assert lifecycle.index("RESET ROLE", replace_link) > replace_link
-    relink_context = migrations[-1].sql
+    relink_context = migrations[-2].sql
     assert "destination.status = 'revoked'" in relink_context
     assert "SET LOCAL ROLE attune_channel_link_executor" in relink_context
+    retention = migrations[-1].sql
+    assert "CREATE ROLE attune_retention_executor" in retention
+    assert "prune_expired_protocol_records" in retention
+    assert "pg_try_advisory_xact_lock" in retention
+    assert "FOR UPDATE" not in retention
+    assert "interval '24 hours'" in retention
+    assert "interval '7 days'" in retention
 
 
 def test_tenant_context_rejects_non_uuid_values():
@@ -285,7 +293,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 27
+    assert apply_migrations(admin) == 28
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -2658,3 +2666,97 @@ def test_initial_identity_provisioning_is_idempotent_conflict_closed_and_functio
         connection.rollback()
     finally:
         connection.close()
+
+
+def test_protocol_retention_prunes_only_expired_records_and_audits_per_tenant(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    installation_b = UUID("20000000-0000-4000-8000-000000000090")
+    old_event = UUID("20000000-0000-4000-8000-000000000091")
+    recent_event = UUID("20000000-0000-4000-8000-000000000092")
+    _reset_role(initialized_database)
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO attune.installations
+                (tenant_id, id, provider, kind, external_ref_hash)
+            VALUES (%s, %s, 'google', 'workspace', %s)
+            ON CONFLICT (tenant_id, id) DO NOTHING
+            """,
+            (
+                TENANT_B,
+                installation_b,
+                hashlib.sha256(b"retention-installation-b").digest(),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.provider_events
+                (tenant_id, id, installation_id, provider, kind,
+                 deduplication_key, signal, processed_at)
+            VALUES
+                (%s, %s, %s, 'google', 'retention-old', %s, '{}',
+                 clock_timestamp() - interval '8 days'),
+                (%s, %s, %s, 'google', 'retention-recent', %s, '{}',
+                 clock_timestamp() - interval '6 days')
+            """,
+            (
+                TENANT_B,
+                old_event,
+                installation_b,
+                hashlib.sha256(b"retention-old").digest(),
+                TENANT_B,
+                recent_event,
+                installation_b,
+                hashlib.sha256(b"retention-recent").digest(),
+            ),
+        )
+    initialized_database.commit()
+
+    retention = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_retention"]
+    )()
+    try:
+        with retention.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute("SELECT id FROM attune.provider_events")
+        retention.rollback()
+        with retention.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.prune_expired_protocol_records(%s, %s)",
+                (UUID("20000000-0000-4000-8000-000000000093"), 100),
+            )
+            counts = cursor.fetchone()
+        retention.commit()
+        assert counts[3] >= 1
+        with retention.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InvalidParameterValue):
+                cursor.execute(
+                    "SELECT * FROM attune.prune_expired_protocol_records(%s, 0)",
+                    (UUID("20000000-0000-4000-8000-000000000094"),),
+                )
+        retention.rollback()
+    finally:
+        retention.close()
+
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "SELECT id FROM attune.provider_events WHERE tenant_id = %s "
+            "AND id IN (%s, %s) ORDER BY id",
+            (TENANT_B, old_event, recent_event),
+        )
+        assert cursor.fetchall() == [(recent_event,)]
+        cursor.execute(
+            "SELECT producer_kind, action, metadata FROM attune.audit_intents "
+            "WHERE tenant_id = %s "
+            "AND action = 'retention.provider_events.pruned'",
+            (TENANT_B,),
+        )
+        audit = cursor.fetchone()
+        assert audit[0:2] == (
+            "retention",
+            "retention.provider_events.pruned",
+        )
+        assert audit[2]["records"] >= 1
+    initialized_database.commit()

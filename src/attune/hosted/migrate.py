@@ -28,6 +28,7 @@ RUNTIME_ROLES = (
     "attune_audit_writer",
     "attune_oauth_exchange",
     "attune_identity_provisioner",
+    "attune_retention",
 )
 
 FUNCTION_OWNER_ROLES = (
@@ -42,6 +43,7 @@ FUNCTION_OWNER_ROLES = (
     "attune_channel_link_executor",
     "attune_channel_message_executor",
     "attune_channel_lifecycle_executor",
+    "attune_retention_executor",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -249,6 +251,16 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
         ("attune_channel_lifecycle_executor", "attune.hosted_onboarding_states", "UPDATE"),
         ("attune_channel_lifecycle_executor", "attune.hosted_channel_routes", "SELECT"),
         ("attune_channel_lifecycle_executor", "attune.hosted_channel_routes", "DELETE"),
+        ("attune_retention_executor", "attune.oauth_transactions", "SELECT"),
+        ("attune_retention_executor", "attune.oauth_transactions", "DELETE"),
+        ("attune_retention_executor", "attune.hosted_channel_setup_transactions", "SELECT"),
+        ("attune_retention_executor", "attune.hosted_channel_setup_transactions", "DELETE"),
+        ("attune_retention_executor", "attune.identity_sessions", "SELECT"),
+        ("attune_retention_executor", "attune.identity_sessions", "DELETE"),
+        ("attune_retention_executor", "attune.provider_events", "SELECT"),
+        ("attune_retention_executor", "attune.provider_events", "DELETE"),
+        ("attune_retention_executor", "attune.audit_intents", "SELECT"),
+        ("attune_retention_executor", "attune.audit_intents", "INSERT"),
     }
 )
 
@@ -559,6 +571,7 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             "attune_channel_link_executor": (True, False, False, False),
             "attune_channel_message_executor": (True, False, True, False),
             "attune_channel_lifecycle_executor": (True, False, False, False),
+            "attune_retention_executor": (True, False, True, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
