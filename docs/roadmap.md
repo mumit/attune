@@ -78,12 +78,16 @@ identity and audience verification. Unauthenticated, invalid-token,
 wrong-method, and wrong-path live probes are denied, and the post-activation
 Terraform plan is empty. Owner-DM linking and one-use replay rejection now
 have live evidence. Encrypted route adoption and fixed-content delivery are
-also live and verified. The remaining Google Chat interaction gate is a
-replay-safe durable conversation job that resolves only the active tenant
-binding, uses brokered Workspace/model credentials, and sends its response
-through the private channel broker. The public ingress remains link-only until
-that complete path passes its security and live-delivery gates. Slack
-installation is still a later independent slice.
+also live and verified. The replay-safe durable conversation route is now
+active for the verified development owner DM. It resolves tenant and active
+destination only from provider facts, dispatches through the private broker,
+uses fixed model tasks and brokered bounded Gmail/Calendar reads, refuses
+free-form writes, and delivers the stored response through the private channel
+broker. General, Gmail, Calendar, and mutation-refusal journeys have live
+end-to-end evidence with content-free audits and empty Terraform plans. This is
+a development activation, not an operated-production launch gate. Slack
+installation, customer-visible lifecycle controls, adversarial assurance, and
+external security review remain later independent slices.
 
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does
