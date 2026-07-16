@@ -149,7 +149,7 @@ private broker the transient app, actor, DM, and code values—but never a tenan
 or database identifier. The broker alone derives keyed references and resolves
 the tenant through the one-use claim ceremony.
 
-## Development dormant rollout
+## Development rollout
 
 On 2026-07-16 UTC, commit `27cda78` was deployed dormant-first. Migration
 0021 ran once in execution `attune-development-database-migrate-rlc6q`; the
@@ -184,3 +184,20 @@ converged empty. No setup, link, claim, destination, provider app event, or
 message was created. This satisfies the private-boundary and dormant-ingress
 parts of gate 3; provider configuration, adversarial evidence, route
 activation, and a real owner-DM ceremony remain separate gates.
+
+The Google Chat provider and edge gate were activated later on 2026-07-16.
+The platform-owned app is named `Attune`, uses the first-party hosted avatar,
+accepts direct messages only, and is visible only to `khan@mumit.org`. Its
+exact endpoint and HTTP-endpoint authentication audience are both
+`https://dev.attune.mumit.org/v1/provider/google-chat/events`. Group spaces,
+App Home, commands, and link previews remain disabled.
+
+The reviewed Terraform activation plan added only the exact-path Cloud Armor
+throttle rule and the URL-map rule to the dedicated ingress backend: zero
+resources added, two changed in place, and zero destroyed. After apply,
+unauthenticated and invalid-bearer POSTs, GET on the exact path, and POST on a
+near-miss path all returned 403; health remained 200; and Terraform converged
+empty. `enable_google_chat_ingress` and
+`google_chat_provider_ready` are now true in development. A real Google Chat
+delivery and owner-DM link ceremony are still required before gate 3 is
+complete.

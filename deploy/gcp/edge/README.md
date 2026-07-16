@@ -210,19 +210,35 @@ terraform output -json edge
 the callback reads the private OAuth exchange URI and audience from remote
 state. This is non-secret routing metadata.
 
-## Dormant Google Chat ingress evidence
+## Google Chat ingress activation evidence
 
 Development deployed the Google Chat ingress backend on 2026-07-16 UTC with
 immutable digest
 `sha256:abd3ff681cf4f576f00bcdc7ed509de7f3e3ddd3e0c85d22ab7acfac2411ad94`.
 Revision `attune-development-google-chat-ingress-00001-sql` is Ready with its
 default URL disabled and `internal-and-cloud-load-balancing` ingress. The
-serverless NEG and backend exist with request logging disabled, while the
-dedicated Cloud Armor policy contains only its default-deny rule. The URL map
-contains no Google Chat path, and an external POST to the intended endpoint
-returned 403. `enable_google_chat_ingress=false` and
-`google_chat_provider_ready=false`; the final edge plan was empty. Do not
-interpret backend readiness as provider or channel activation.
+serverless NEG and dedicated backend retain request logging disabled.
+
+The platform-owned Chat app was saved with app name `Attune`, the first-party
+avatar at `https://dev.attune.mumit.org/assets/attune-chat-avatar.png`, exact
+HTTP endpoint
+`https://dev.attune.mumit.org/v1/provider/google-chat/events`, HTTP-endpoint
+URL authentication audience, interactive direct messages only, and visibility
+restricted to `khan@mumit.org`. Group spaces, App Home, commands, and link
+previews were not enabled. Google Chat error logging was enabled for the
+development app.
+
+After provider configuration, the reviewed activation plan contained exactly
+two in-place changes: one Cloud Armor throttle rule permitting only `POST` on
+the exact host and path at 60 requests per minute per source IP, and one URL
+map rule targeting only the dedicated Google Chat backend. It contained zero
+adds and zero destroys. The saved plan was applied with
+`enable_google_chat_ingress=true` and
+`google_chat_provider_ready=true`. Live negative probes returned 403 for an
+unauthenticated exact-path POST, an invalid bearer token, GET on the exact
+path, and POST on a near-miss path; `/healthz` remained 200. The post-apply
+Terraform plan was empty. These facts establish provider and edge activation,
+not successful owner linking or message delivery.
 
 ## Workspace OAuth activation
 
