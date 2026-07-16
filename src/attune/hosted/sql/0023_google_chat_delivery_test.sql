@@ -432,7 +432,6 @@ $function$;
 REVOKE ALL ON FUNCTION
     attune.begin_hosted_channel_setup_v2(uuid,uuid,text,text,bytea,timestamptz),
     attune.resolve_google_chat_link_destination(bytea,bytea,uuid),
-    attune.consume_google_chat_link(bytea,bytea,bytea,bytea,bytea),
     attune.consume_google_chat_link_v2(bytea,bytea,bytea,bytea,bytea,uuid,bytea,bytea,bytea,text,integer),
     attune.claim_google_chat_delivery_test(uuid,bytea,timestamptz),
     attune.complete_google_chat_delivery_test(uuid,bytea,boolean)
@@ -455,6 +454,11 @@ BEGIN
     EXECUTE pg_catalog.format('GRANT attune_channel_link_executor TO %I', current_user);
 END
 $grant_owner$;
+SET LOCAL ROLE attune_channel_link_executor;
+REVOKE ALL ON FUNCTION
+    attune.consume_google_chat_link(bytea,bytea,bytea,bytea,bytea)
+FROM attune_channel_broker;
+RESET ROLE;
 GRANT CREATE ON SCHEMA attune TO attune_channel_link_executor;
 ALTER FUNCTION attune.consume_google_chat_link_v2(bytea,bytea,bytea,bytea,bytea,uuid,bytea,bytea,bytea,text,integer)
 OWNER TO attune_channel_link_executor;
