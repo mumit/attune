@@ -12,5 +12,10 @@ output "edge" {
     oauth_callback              = "https://${var.hostname}/oauth/google/callback"
     oauth_is_enabled            = var.enable_google_workspace_oauth
     identity_sign_in_enabled    = var.enable_identity_sign_in
+    google_chat_ingress = var.deploy_google_chat_ingress ? {
+      service  = google_cloud_run_v2_service.google_chat_ingress[0].name
+      endpoint = "https://${var.hostname}/v1/provider/google-chat/events"
+      routed   = var.enable_google_chat_ingress
+    } : null
   }
 }

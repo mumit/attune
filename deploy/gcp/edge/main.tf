@@ -29,6 +29,15 @@ locals {
   )
 }
 
+check "google_chat_ingress_activation" {
+  assert {
+    condition = !var.enable_google_chat_ingress || (
+      var.deploy_google_chat_ingress && var.google_chat_provider_ready
+    )
+    error_message = "Google Chat route activation requires deployed ingress and provider-readiness attestation."
+  }
+}
+
 resource "google_cloud_run_v2_service" "control_plane" {
   project              = local.foundation.project_id
   name                 = "${local.prefix}-control-plane"
@@ -395,6 +404,121 @@ resource "google_cloud_run_v2_service" "oauth_callback" {
   depends_on = [google_logging_project_exclusion.oauth_callback_requests]
 }
 
+resource "google_cloud_run_v2_service" "google_chat_ingress" {
+  count                = var.deploy_google_chat_ingress ? 1 : 0
+  project              = local.foundation.project_id
+  name                 = "${local.prefix}-google-chat-ingress"
+  location             = local.foundation.region
+  deletion_protection  = true
+  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  default_uri_disabled = true
+  invoker_iam_disabled = true
+  labels               = merge(local.labels, { component = "google-chat-ingress" })
+
+  template {
+    service_account                  = local.foundation.workload_identities.ingress
+    timeout                          = "15s"
+    max_instance_request_concurrency = 8
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 3
+    }
+
+    containers {
+      name  = "google-chat-ingress"
+      image = var.google_chat_ingress_image
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "256Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+
+      env {
+        name  = "ATTUNE_GOOGLE_CHAT_AUDIENCE"
+        value = "https://${var.hostname}/v1/provider/google-chat/events"
+      }
+      env {
+        name  = "ATTUNE_GOOGLE_CHAT_PROJECT_NUMBER"
+        value = var.google_chat_project_number
+      }
+      env {
+        name = "ATTUNE_CHANNEL_BROKER_URL"
+        value = (
+          local.runtime.channel_broker == null
+          ? ""
+          : local.runtime.channel_broker.uri
+        )
+      }
+      env {
+        name = "ATTUNE_CHANNEL_BROKER_AUDIENCE"
+        value = (
+          local.runtime.channel_broker == null
+          ? ""
+          : local.runtime.channel_broker.audience
+        )
+      }
+
+      startup_probe {
+        initial_delay_seconds = 1
+        timeout_seconds       = 2
+        period_seconds        = 3
+        failure_threshold     = 10
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+
+      liveness_probe {
+        timeout_seconds   = 2
+        period_seconds    = 10
+        failure_threshold = 3
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+    }
+
+    vpc_access {
+      egress = "ALL_TRAFFIC"
+      network_interfaces {
+        network    = local.foundation.network_id
+        subnetwork = local.foundation.subnetwork_id
+        tags       = ["attune-google-chat-ingress"]
+      }
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition = !var.deploy_google_chat_ingress || (
+        local.runtime.channel_broker != null &&
+        var.google_chat_project_number != ""
+      )
+      error_message = "Google Chat ingress deployment requires the private channel broker and Chat project number."
+    }
+
+    precondition {
+      condition = !var.enable_google_chat_ingress || (
+        var.deploy_google_chat_ingress && var.google_chat_provider_ready
+      )
+      error_message = "Google Chat route activation requires deployed ingress and provider-readiness attestation."
+    }
+  }
+}
+
 resource "google_compute_region_network_endpoint_group" "control_plane" {
   project               = local.foundation.project_id
   name                  = "${local.prefix}-control-plane"
@@ -414,6 +538,18 @@ resource "google_compute_region_network_endpoint_group" "oauth_callback" {
 
   cloud_run {
     service = google_cloud_run_v2_service.oauth_callback.name
+  }
+}
+
+resource "google_compute_region_network_endpoint_group" "google_chat_ingress" {
+  count                 = var.deploy_google_chat_ingress ? 1 : 0
+  project               = local.foundation.project_id
+  name                  = "${local.prefix}-google-chat-ingress"
+  region                = local.foundation.region
+  network_endpoint_type = "SERVERLESS"
+
+  cloud_run {
+    service = google_cloud_run_v2_service.google_chat_ingress[0].name
   }
 }
 
@@ -725,6 +861,49 @@ resource "google_compute_security_policy" "oauth_callback" {
   }
 }
 
+resource "google_compute_security_policy" "google_chat_ingress" {
+  count       = var.deploy_google_chat_ingress ? 1 : 0
+  project     = local.foundation.project_id
+  name        = "${local.prefix}-google-chat-ingress-edge"
+  description = "Exact verified Google Chat event route with bounded source rate"
+  type        = "CLOUD_ARMOR"
+
+  dynamic "rule" {
+    for_each = var.enable_google_chat_ingress && var.deploy_google_chat_ingress ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 1000
+      description = "Permit only POST on the exact Google Chat event endpoint"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.method == 'POST' && request.path == '/v1/provider/google-chat/events'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 60
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  rule {
+    action      = "deny(403)"
+    priority    = 2147483647
+    description = "Default deny"
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config {
+        src_ip_ranges = ["*"]
+      }
+    }
+  }
+}
+
 resource "google_compute_backend_service" "control_plane" {
   project               = local.foundation.project_id
   name                  = "${local.prefix}-control-plane"
@@ -755,6 +934,24 @@ resource "google_compute_backend_service" "oauth_callback" {
   }
 
   # This must remain disabled: callback URLs carry authorization codes.
+  log_config {
+    enable = false
+  }
+}
+
+resource "google_compute_backend_service" "google_chat_ingress" {
+  count                 = var.deploy_google_chat_ingress ? 1 : 0
+  project               = local.foundation.project_id
+  name                  = "${local.prefix}-google-chat-ingress"
+  protocol              = "HTTPS"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  timeout_sec           = 15
+  security_policy       = google_compute_security_policy.google_chat_ingress[0].id
+
+  backend {
+    group = google_compute_region_network_endpoint_group.google_chat_ingress[0].id
+  }
+
   log_config {
     enable = false
   }
@@ -804,6 +1001,14 @@ resource "google_compute_url_map" "https" {
     path_rule {
       paths   = ["/oauth/google/callback"]
       service = google_compute_backend_service.oauth_callback.id
+    }
+
+    dynamic "path_rule" {
+      for_each = var.enable_google_chat_ingress && var.deploy_google_chat_ingress ? [1] : []
+      content {
+        paths   = ["/v1/provider/google-chat/events"]
+        service = google_compute_backend_service.google_chat_ingress[0].id
+      }
     }
   }
 }

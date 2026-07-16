@@ -284,6 +284,15 @@ Terraform roots converged empty. No link, destination, provider credential,
 ingress, or message was created. The private channel broker and verified
 provider ingress remain prerequisites to enabling edge priority `887`.
 
+The following implementation slice separates Google Chat ingress from channel
+authority. A dedicated ingress identity verifies Google at the exact public
+audience and can invoke only the internal channel broker. A distinct broker
+identity owns the broker-only HMAC secret and three fixed database functions,
+but has no direct table privileges. The broker uses a short claim and durable
+pre-effect audit before creating the canonical installation and owner-DM
+binding. Both the private broker and public route default off; deployment of an
+unrouted ingress backend is separate from provider-route activation.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

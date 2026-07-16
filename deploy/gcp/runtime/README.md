@@ -223,8 +223,9 @@ metric propagation and rerun the same reviewed Terraform apply. The existing
 metric refreshes from state and only the policy is then created.
 
 Verify that all services have internal ingress and reject unauthenticated
-invocation. The audit-writer IAM policy must list only its four expected
-workloads; the broker policy must list only control plane, worker, and OAuth
+invocation. The audit-writer IAM policy must list only control plane, dispatch
+broker, secret broker, worker, and channel broker; the secret-broker policy
+must list only control plane, worker, and OAuth
 exchange. Verify the broker custom audience and route-specific application
 checks; the OAuth exchange policy must list only the callback identity, and the
 worker policy must list only the task-delivery identity.

@@ -35,6 +35,16 @@ variable "oauth_callback_image" {
   }
 }
 
+variable "google_chat_ingress_image" {
+  description = "Artifact Registry Google Chat ingress image pinned by sha256 digest."
+  type        = string
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.google_chat_ingress_image))
+    error_message = "google_chat_ingress_image must be an immutable @sha256 Artifact Registry reference."
+  }
+}
+
 variable "hostname" {
   description = "Exact lower-case public DNS hostname for the development edge."
   type        = string
@@ -109,6 +119,35 @@ variable "enable_hosted_channel_setup" {
   description = "Expose the effect-free hosted channel installation setup boundary."
   type        = bool
   default     = false
+}
+
+variable "deploy_google_chat_ingress" {
+  description = "Deploy the verified Google Chat ingress behind an unrouted load-balancer backend."
+  type        = bool
+  default     = false
+}
+
+variable "enable_google_chat_ingress" {
+  description = "Route the exact Google Chat event endpoint after provider and adversarial evidence."
+  type        = bool
+  default     = false
+}
+
+variable "google_chat_provider_ready" {
+  description = "Operator attestation that the platform Chat app uses the exact endpoint audience and passed negative tests."
+  type        = bool
+  default     = false
+}
+
+variable "google_chat_project_number" {
+  description = "Public numeric project identity of the platform-owned Google Chat app."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.google_chat_project_number == "" || can(regex("^[1-9][0-9]{5,20}$", var.google_chat_project_number))
+    error_message = "google_chat_project_number must be empty or a 6-21 digit nonzero project number."
+  }
 }
 
 variable "google_oauth_provider_ready" {

@@ -144,6 +144,23 @@ setting; it added or destroyed no resources. Health returned 200, the exact
 installation-status path remained denied by Cloud Armor with 403, and the
 following edge plan was empty. Priority `887` was not activated.
 
+Verified Google Chat events use a separate two-stage edge gate. With
+`deploy_google_chat_ingress=true` and `enable_google_chat_ingress=false`,
+Terraform may create the no-default-URI Cloud Run service, serverless NEG,
+backend, and default-deny Cloud Armor policy, but the public URL map contains
+no Chat path. The service verifies Google's bearer token against the exact
+`https://HOST/v1/provider/google-chat/events` audience and requires
+`chat@system.gserviceaccount.com`; only a canonical human `MESSAGE` whose
+top-level and message-level spaces agree on `DIRECT_MESSAGE` may reach the
+private channel broker. Request logging is disabled on the dedicated backend.
+
+Set `enable_google_chat_ingress=true` only after migration 0022, private broker
+activation, a platform-owned Chat app configured with that exact endpoint and
+audience, signature/audience negative tests, replay tests, paging, and an
+explicit `google_chat_provider_ready=true` attestation. The saved activation
+plan must add only the exact URL-map path and Cloud Armor allow rule. Never
+route the provider path to the ordinary control-plane backend.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate

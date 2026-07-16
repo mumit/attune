@@ -139,6 +139,16 @@ fails closed and moves the affected route out of active service.
 Successful Terraform, OAuth redirect, app addition, inbound event, or outbound
 API response alone is never activation evidence.
 
+The Google Chat implementation preserves these stages as independent flags.
+The ingress can be deployed behind a serverless NEG and a default-deny Cloud
+Armor policy while absent from the public URL map. Its public handler accepts
+only Google's verified service identity at the exact endpoint audience,
+requires matching human sender and `DIRECT_MESSAGE` space facts at both event
+levels, and recognizes only the exact `/link CODE` command. It sends the
+private broker the transient app, actor, DM, and code values—but never a tenant
+or database identifier. The broker alone derives keyed references and resolves
+the tenant through the one-use claim ceremony.
+
 ## Development dormant rollout
 
 On 2026-07-16 UTC, commit `27cda78` was deployed dormant-first. Migration
