@@ -99,9 +99,11 @@ date.
 Workspace disconnect/reconnect was already live. The first retention safety
 slice is implemented: the live database verifier now requires an exact,
 reviewed lifecycle classification for every tenant-bearing relation. A bounded,
-audited expired-protocol retention executor and manual Cloud Run job are
-implemented but remain dormant pending live synthetic verification; customer
-content retention and controls are not active yet. Slack installation/lifecycle,
+audited expired-protocol retention executor and manual Cloud Run job are live;
+its empty execution, IAM boundary, migration verifier, and drift convergence
+are verified. It remains unscheduled pending live synthetic deletion/audit
+evidence and failure/backlog alerting. Customer content retention and controls
+are not active yet. Slack installation/lifecycle,
 export/deletion, support repair, customer-visible audit, adversarial assurance,
 and external security review remain later independent slices.
 

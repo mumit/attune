@@ -431,6 +431,30 @@ evidence is recorded and alerting for job failure and an accumulating expired
 backlog exists. Scheduling this job does not activate conversation or memory
 retention.
 
+Development evidence on 2026-07-16:
+
+- Foundation apply created only the retention service account, Cloud SQL IAM
+  user, and its logging, metrics, client, and instance-user grants (`6 added,
+  0 changed, 0 destroyed`).
+- The data apply used migrator manifest digest
+  `sha256:4137a24dc9eaa09595b0732983a3853985fa37d946a56552def09f2a372a5b09`,
+  created the dormant retention job, and updated the two existing operator jobs
+  in place (`1 added, 2 changed, 0 destroyed`).
+- Migration execution `attune-development-database-migrate-9bzpz` applied
+  exactly migration 0028 and verified all 33 tenant tables plus the exact
+  function-owner privilege policy.
+- Manual execution `attune-development-protocol-retention-nvlk6` succeeded with
+  zero OAuth, setup, session, and provider-event deletions and logged no
+  identifiers or content.
+- Verification execution `attune-development-database-migrate-8zdz7` applied
+  zero migrations and passed the same boundary verifier. The foundation and
+  data plans were both empty afterward.
+
+This proves deployment, IAM login, the fixed function boundary, empty-run
+behavior, and drift convergence. It does not replace the real-PostgreSQL
+synthetic deletion/audit regression and does not satisfy the remaining live
+synthetic-delete, alerting, or scheduling gates.
+
 ## Production gates
 
 Before this job or schema is promoted beyond development:
