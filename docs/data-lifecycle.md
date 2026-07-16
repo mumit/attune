@@ -136,9 +136,11 @@ restore. It never falls back to activating the snapshot.
    singleton transaction lock and atomically emits per-tenant, content-free
    audit intents. Its Cloud Run job is deployed and a content-free empty run is
    verified in development, but it has no schedule pending live synthetic
-   deletion/audit evidence plus failure and backlog alerting. Operational
-   records and conversation/memory policies across database, vectors, caches,
-   and task payloads remain later slices.
+   deletion/audit evidence plus live alert verification. The implementation
+   emits aggregate structured output, bounds both rows and batches, and defines
+   paged failure and possible-backlog policies. Operational records and
+   conversation/memory policies across database, vectors, caches, and task
+   payloads remain later slices.
 3. **Export path:** dedicated identity, temporary encrypted object store,
    recent-auth request/download surfaces, and secret-negative tests.
 4. **Deletion authority:** independent restore-suppression ledger and complete

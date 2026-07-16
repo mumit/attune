@@ -292,6 +292,10 @@ resource "google_cloud_run_v2_job" "protocol_retention" {
           name  = "ATTUNE_RETENTION_BATCH_SIZE"
           value = tostring(var.protocol_retention_batch_size)
         }
+        env {
+          name  = "ATTUNE_RETENTION_MAX_BATCHES"
+          value = tostring(var.protocol_retention_max_batches)
+        }
       }
 
       vpc_access {
@@ -308,4 +312,101 @@ resource "google_cloud_run_v2_job" "protocol_retention" {
   lifecycle {
     prevent_destroy = true
   }
+}
+
+resource "google_logging_metric" "protocol_retention_failure" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-protocol-retention-failure"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.job_name=\"${google_cloud_run_v2_job.protocol_retention.name}\"",
+    "severity>=ERROR",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune protocol-retention failures"
+  }
+}
+
+resource "google_logging_metric" "protocol_retention_backlog" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-protocol-retention-backlog"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.job_name=\"${google_cloud_run_v2_job.protocol_retention.name}\"",
+    "jsonPayload.event=\"attune_protocol_retention\"",
+    "jsonPayload.backlog_possible=true",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune protocol-retention possible backlog"
+  }
+}
+
+resource "google_monitoring_alert_policy" "protocol_retention_failure" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} protocol-retention failure"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The bounded protocol-retention job logged an error. Keep scheduling disabled or pause it, inspect the execution and database verifier, and do not broaden the retention identity."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "At least one retention error"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.protocol_retention_failure.name}\" AND resource.type=\"cloud_run_job\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
+resource "google_monitoring_alert_policy" "protocol_retention_backlog" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} protocol-retention possible backlog"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The bounded protocol-retention job saturated every configured batch and expired records may remain. Run it again after investigation; do not raise limits without storage and load review."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Retention batch ceiling reached"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.protocol_retention_backlog.name}\" AND resource.type=\"cloud_run_job\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
 }

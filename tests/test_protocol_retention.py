@@ -50,6 +50,8 @@ def test_protocol_retention_is_bounded_and_returns_content_free_counts(monkeypat
         "channel_setup_transactions": 2,
         "identity_sessions": 3,
         "provider_events": 4,
+        "batches": 1,
+        "backlog_possible": False,
     }
     sql, parameters = connection.cursor_instance.executed
     assert sql == "SELECT * FROM attune.prune_expired_protocol_records(%s, %s)"
@@ -72,3 +74,21 @@ def test_protocol_retention_rolls_back_invalid_database_result(monkeypatch):
         protocol_retention.run_protocol_retention()
     assert connection.commits == 0
     assert connection.rollbacks == 1
+
+
+def test_protocol_retention_bounds_saturated_batches_and_signals_backlog(monkeypatch):
+    connection = _Connection(row=(10, 0, 0, 0))
+    monkeypatch.setattr(protocol_retention, "iam_connection", lambda: connection)
+
+    result = protocol_retention.run_protocol_retention(
+        batch_size=10, max_batches=2
+    )
+    assert result["oauth_transactions"] == 20
+    assert result["batches"] == 2
+    assert result["backlog_possible"] is True
+
+
+@pytest.mark.parametrize("max_batches", [0, 11, True, 1.5])
+def test_protocol_retention_rejects_invalid_max_batches(max_batches):
+    with pytest.raises((TypeError, ValueError)):
+        protocol_retention.run_protocol_retention(max_batches=max_batches)

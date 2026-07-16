@@ -45,3 +45,28 @@ variable "protocol_retention_batch_size" {
     error_message = "protocol_retention_batch_size must be an integer between 1 and 1000."
   }
 }
+
+variable "protocol_retention_max_batches" {
+  description = "Maximum function calls per retention execution."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = floor(var.protocol_retention_max_batches) == var.protocol_retention_max_batches && var.protocol_retention_max_batches >= 1 && var.protocol_retention_max_batches <= 10
+    error_message = "protocol_retention_max_batches must be an integer between 1 and 10."
+  }
+}
+
+variable "alert_notification_channels" {
+  description = "Monitoring notification-channel resource names for retention alerts."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for channel in var.alert_notification_channels :
+      can(regex("^projects/[^/]+/notificationChannels/[0-9]+$", channel))
+    ])
+    error_message = "alert_notification_channels entries must be full Monitoring notification-channel resource names."
+  }
+}

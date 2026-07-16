@@ -52,6 +52,9 @@ def test_protocol_retention_job_is_dormant_and_least_privileged():
     assert 'service_account = local.foundation.workload_identities.retention' in data_main
     assert 'command = ["python", "-m", "attune.hosted.protocol_retention"]' in data_main
     assert "google_cloud_scheduler" not in data_main
+    assert 'resource "google_logging_metric" "protocol_retention_failure"' in data_main
+    assert 'jsonPayload.backlog_possible=true' in data_main
+    assert 'notification_channels = var.alert_notification_channels' in data_main
     assert "deliberately unscheduled" in data_guide
 
 

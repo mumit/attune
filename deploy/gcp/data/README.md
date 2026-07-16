@@ -423,13 +423,23 @@ gcloud run jobs execute attune-development-protocol-retention \
   --wait
 ```
 
-The execution must succeed once, return only aggregate counts in logs, create
+The execution must succeed once, return only aggregate counts in a structured
+`attune_protocol_retention` log, create
 the expected per-tenant audit intents when synthetic expired records exist, and
 leave recent records intact. Then run the database migrator again to prove the
 role/privilege verifier remains clean. Do not add Cloud Scheduler until this
 evidence is recorded and alerting for job failure and an accumulating expired
 backlog exists. Scheduling this job does not activate conversation or memory
 retention.
+
+The executor runs at most `protocol_retention_max_batches` (default four,
+maximum ten) per invocation. If every bounded batch remains saturated, it sets
+only `backlog_possible=true`; it does not expose tenant identifiers. The data
+root creates two paging policies using `alert_notification_channels`: any
+error-severity job log, and a structured possible-backlog signal. Google Cloud
+documents that a single JSON line on Cloud Run stdout becomes `jsonPayload`,
+which is why the metric filters use the fixed `event` and boolean fields. An
+empty channel list may create incidents but is not acceptable before scheduling.
 
 Development evidence on 2026-07-16:
 
