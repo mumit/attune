@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import os
 
 from .audit_client import AuditWriterClient
@@ -10,6 +9,7 @@ from .channel_broker import (
     ChannelReferenceHasher,
     GoogleChatLinkBroker,
     PostgresChannelBrokerRepository,
+    decode_channel_reference_key,
 )
 from .channel_broker_service import create_app
 from .cloud_sql import iam_connection
@@ -22,14 +22,9 @@ def _hmac_key(secret_resource: str) -> bytes:
         request={"name": f"{secret_resource}/versions/latest"}
     )
     try:
-        key = base64.b64decode(
-            response.payload.data.strip() + b"==", altchars=b"-_", validate=True
-        )
-    except Exception as exc:
+        return decode_channel_reference_key(response.payload.data)
+    except ValueError as exc:
         raise RuntimeError("channel reference HMAC secret is invalid") from exc
-    if len(key) != 32:
-        raise RuntimeError("channel reference HMAC secret must encode 32 bytes")
-    return key
 
 
 def create_production_app():

@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -8,6 +9,7 @@ from attune.hosted.channel_broker import (
     ClaimedGoogleChatLink,
     GoogleChatLinkBroker,
     LinkedGoogleChatDestination,
+    decode_channel_reference_key,
 )
 
 NOW = datetime(2026, 7, 16, tzinfo=timezone.utc)
@@ -63,6 +65,24 @@ def broker(repository=None, writer=None):
         writer or Writer(),
         ChannelReferenceHasher(b"k" * 32),
     )
+
+
+@pytest.mark.parametrize("padding", [True, False])
+def test_channel_reference_key_accepts_canonical_secret_manager_payload(padding):
+    key = bytes(range(32))
+    encoded = base64.b64encode(key)
+    if not padding:
+        encoded = encoded.rstrip(b"=")
+    assert decode_channel_reference_key(b"\n " + encoded + b"\r\n") == key
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    [b"not base64", base64.b64encode(b"short"), base64.b64encode(bytes(32)) + b"="],
+)
+def test_channel_reference_key_rejects_invalid_or_noncanonical_payload(encoded):
+    with pytest.raises(ValueError):
+        decode_channel_reference_key(encoded)
 
 
 def test_link_hashes_references_by_domain_and_writes_both_audits():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import re
@@ -18,6 +19,29 @@ _LINK_CODE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _APP_REF = re.compile(r"^projects/[1-9][0-9]{5,20}$")
 _ACTOR_REF = re.compile(r"^users/[A-Za-z0-9._-]{1,180}$")
 _DESTINATION_REF = re.compile(r"^spaces/[A-Za-z0-9_-]{1,180}$")
+
+
+def decode_channel_reference_key(value: bytes) -> bytes:
+    """Decode a canonical 32-byte base64 key with transport whitespace."""
+    if not isinstance(value, bytes):
+        raise ValueError("channel reference HMAC secret must be bytes")
+    encoded = value.strip()
+    padded = encoded + (b"=" * (-len(encoded) % 4))
+    try:
+        key = base64.b64decode(padded, altchars=b"-_", validate=True)
+    except Exception as exc:
+        raise ValueError("channel reference HMAC secret is invalid") from exc
+    if len(key) != 32:
+        raise ValueError("channel reference HMAC secret must encode 32 bytes")
+    unpadded = encoded.rstrip(b"=")
+    standard = base64.b64encode(key).rstrip(b"=")
+    urlsafe = base64.urlsafe_b64encode(key).rstrip(b"=")
+    if not (
+        hmac.compare_digest(unpadded, standard)
+        or hmac.compare_digest(unpadded, urlsafe)
+    ):
+        raise ValueError("channel reference HMAC secret is not canonical base64")
+    return key
 
 
 class AuditWriter(Protocol):
