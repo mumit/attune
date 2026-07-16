@@ -751,7 +751,7 @@ resource "google_compute_security_policy" "edge" {
       description = "Permit only staged identity configuration and fixed assets"
       match {
         expr {
-          expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/identity/config' || request.path == '/assets/attune.css' || request.path == '/assets/identity.js')"
+          expression = "request.headers['host'] == '${var.hostname}' && request.method == 'GET' && (request.path == '/v1/identity/config' || request.path == '/assets/attune.css' || request.path == '/assets/identity.js' || request.path == '/assets/attune-chat-avatar.png')"
         }
       }
       rate_limit_options {

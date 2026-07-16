@@ -279,6 +279,7 @@ def test_control_plane_edge_is_locked_before_oauth_activation():
     assert 'resource "google_compute_backend_service" "oauth_callback"' in terraform
     assert "enable = false" in terraform
     assert "request.method == 'GET'" in terraform
+    assert "request.path == '/assets/attune-chat-avatar.png'" in terraform
     assert "request.query_string" in callback
     assert 'redirect("/", code=303)' in callback
     assert "OAUTH_BINDING_COOKIE" in callback
