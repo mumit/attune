@@ -36,13 +36,20 @@ The first hosted connection journey is:
    authority.
 4. Return to a credential-free Attune URL. The page reports connected, denied,
    or failed without exposing the authorization code or provider error.
-5. Configure delivery and interaction channels, run bounded live Gmail and
-   Calendar checks, then activate briefs. Later capability upgrades such as
-   Gmail draft creation are separate, explicit consent and policy changes.
+5. Attune automatically performs one fixed, read-only Gmail profile check. The
+   browser receives only queued, running, succeeded, or failed—not mailbox
+   counts, a connector identifier, a Google account identifier, or provider
+   error details. The page reports **Google Workspace is connected and
+   verified** only after the private worker succeeds.
+6. Configure delivery and interaction channels, run the later bounded Calendar
+   check, then activate briefs. Capability upgrades such as Gmail draft
+   creation are separate, explicit consent and policy changes.
 
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed
-connector is shown as connected instead of silently starting a replacement.
+connector is verified instead of silently starting a replacement. A temporary
+verification failure does not discard or replace the connector; a later
+signed-in visit safely retries the fixed check.
 
 ## 1. Start the day
 

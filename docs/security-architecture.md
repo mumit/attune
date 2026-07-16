@@ -245,6 +245,17 @@ authenticated, and audited.
   exception text MUST NOT enter logs. An operated synchronous consent chain
   SHOULD keep its callback, exchange, broker, and mandatory audit dependency
   warm rather than extending credential-bearing request timeouts.
+- **SEC-116.** A browser-initiated connector test MUST be bound to a valid
+  application session and CSRF token. Tenant, principal, connector, scopes,
+  capability, provider operation, and dispatch destination MUST be resolved
+  from canonical server-side state. The browser MUST receive only an opaque job
+  reference and a bounded public state; provider data, mailbox counters,
+  connector identifiers, credentials, and provider errors MUST remain behind
+  the worker and secret-broker boundaries. A job identifier is a reference, not
+  authority: status reads MUST rebind it to the session principal and active
+  connector. Test failure MUST NOT expand authority or silently replace a
+  connector, and repeated provider failures MUST page through content-free
+  telemetry.
 
 ### 5.2 Authorization model
 

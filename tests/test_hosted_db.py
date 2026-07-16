@@ -1506,6 +1506,26 @@ def test_google_oauth_start_is_atomic_principal_bound_and_refuses_replacement(
     )
     assert stored is not None
     assert repository.is_connected(context, principal_id=PRINCIPAL_B)
+    assert (
+        repository.active_connector(
+            context, principal_id=PRINCIPAL_B, required_scopes=scopes
+        )
+        == first.connector_id
+    )
+    assert (
+        repository.active_connector(
+            context, principal_id=PRINCIPAL_B, required_scopes=scopes[:-1]
+        )
+        is None
+    )
+    assert (
+        repository.active_connector(
+            TenantContext(TENANT_A),
+            principal_id=PRINCIPAL_B,
+            required_scopes=scopes,
+        )
+        is None
+    )
     with initialized_database.cursor() as cursor:
         cursor.execute(
             "SELECT granted_scopes FROM attune.connectors "

@@ -20,6 +20,7 @@ WORKSPACE_CLIENT_ID = "123456789012-" + "a" * 32 + ".apps.googleusercontent.com"
 TENANT_ID = UUID("10000000-0000-4000-8000-000000000001")
 PRINCIPAL_ID = UUID("20000000-0000-4000-8000-000000000001")
 SESSION_ID = UUID("30000000-0000-4000-8000-000000000001")
+JOB_ID = UUID("40000000-0000-4000-8000-000000000001")
 
 
 class Sessions:
@@ -64,6 +65,28 @@ class OAuthStarts:
         return self.connected
 
 
+class ConnectionTests:
+    def __init__(self, started=True, state="succeeded", failure=None):
+        self.started = started
+        self.state = state
+        self.failure = failure
+        self.calls = []
+
+    def start(self, context, *, principal_id):
+        self.calls.append(("start", context, principal_id))
+        if self.failure:
+            raise self.failure
+        if not self.started:
+            return None
+        return type("Started", (), {"job_id": JOB_ID, "state": "queued"})()
+
+    def status(self, context, *, principal_id, job_id):
+        self.calls.append(("status", context, principal_id, job_id))
+        if self.failure:
+            raise self.failure
+        return self.state
+
+
 def verified(_token, project_id):
     assert project_id == PROJECT
     return VerifiedIdentity(
@@ -88,6 +111,20 @@ def identity_client(sessions=None, verifier=verified, **kwargs):
 
 def same_origin():
     return {"Origin": f"https://{HOST}", "Sec-Fetch-Site": "same-origin"}
+
+
+def signed_in_client(**kwargs):
+    sessions = kwargs.pop("sessions", Sessions())
+    client = identity_client(sessions, **kwargs)
+    bootstrap = client.get("/v1/session/bootstrap", base_url=f"https://{HOST}").get_json()
+    response = client.post(
+        "/v1/session",
+        json={"id_token": "signed", "login_challenge": bootstrap["login_challenge"]},
+        headers=same_origin(),
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 200
+    return client, sessions
 
 
 def test_locked_shell_exposes_only_health_and_unavailable_root():
@@ -317,3 +354,79 @@ def test_google_workspace_start_fails_closed_without_configuration_or_csrf():
             google_oauth_client_id="invalid",
             google_oauth_starts=OAuthStarts(),
         )
+
+
+def test_google_connection_test_is_session_csrf_and_principal_bound():
+    tests = ConnectionTests()
+    client, _sessions = signed_in_client(
+        google_oauth_enabled=True,
+        google_oauth_client_id=WORKSPACE_CLIENT_ID,
+        google_oauth_starts=OAuthStarts(connected=True),
+        google_connection_test_enabled=True,
+        google_connection_tests=tests,
+    )
+    assert (
+        client.post(
+            "/v1/connectors/google/test",
+            headers=same_origin(),
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 401
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    started = client.post(
+        "/v1/connectors/google/test",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert started.status_code == 202
+    assert started.get_json() == {"job_id": str(JOB_ID), "state": "queued"}
+    status = client.get(
+        f"/v1/connectors/google/tests/{JOB_ID}", base_url=f"https://{HOST}"
+    )
+    assert status.get_json() == {"job_id": str(JOB_ID), "state": "succeeded"}
+    assert tests.calls == [
+        ("start", TenantContext(TENANT_ID), PRINCIPAL_ID),
+        ("status", TenantContext(TENANT_ID), PRINCIPAL_ID, JOB_ID),
+    ]
+
+
+def test_google_connection_test_fails_closed_and_returns_only_opaque_state():
+    for tests, expected in (
+        (ConnectionTests(started=False), 409),
+        (ConnectionTests(failure=RuntimeError("provider secret")), 503),
+    ):
+        client, _sessions = signed_in_client(
+            google_oauth_enabled=True,
+            google_oauth_client_id=WORKSPACE_CLIENT_ID,
+            google_oauth_starts=OAuthStarts(connected=True),
+            google_connection_test_enabled=True,
+            google_connection_tests=tests,
+        )
+        csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+        response = client.post(
+            "/v1/connectors/google/test",
+            headers={**same_origin(), "X-Attune-CSRF": csrf},
+            base_url=f"https://{HOST}",
+        )
+        assert response.status_code == expected
+        assert b"provider secret" not in response.data
+
+    client, _sessions = signed_in_client(
+        google_oauth_enabled=True,
+        google_oauth_client_id=WORKSPACE_CLIENT_ID,
+        google_oauth_starts=OAuthStarts(connected=True),
+        google_connection_test_enabled=True,
+        google_connection_tests=ConnectionTests(state=None),
+    )
+    assert (
+        client.get(
+            f"/v1/connectors/google/tests/{JOB_ID}", base_url=f"https://{HOST}"
+        ).status_code
+        == 404
+    )
+
+
+def test_google_connection_test_configuration_fails_closed():
+    with pytest.raises(ValueError, match="connection test"):
+        identity_client(google_connection_test_enabled=True)

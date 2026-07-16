@@ -111,6 +111,20 @@ Newest first. This log records decisions that constrain current implementation.
   separate worker/dispatch toggles, or treating a successful Terraform plan as
   authorization for customer traffic.
 
+## 2026-07 — Connector verification is a principal-bound fixed job
+
+- A signed-in browser may request only the fixed
+  `google.gmail.profile.read` connection test. Tenant, principal, active Google
+  connector, exact scope set, capability, and worker destination are resolved
+  from the Attune session and canonical server-side state.
+- The browser receives an opaque job UUID and only queued, running, succeeded,
+  or failed. Status resolution rebinds the job to the session principal and
+  active connector; the UUID alone conveys no authority. Mailbox counters and
+  provider details never cross the worker boundary.
+- This was selected over a privileged operator smoke command, returning Gmail
+  profile data to the UI, or treating successful OAuth token storage as proof
+  that the granted credential can perform the reviewed provider read.
+
 ## 2026-07 — Fixed Google egress uses exact private DNS without NAT
 
 - The GCP application subnet uses Private Google Access and no Cloud NAT.

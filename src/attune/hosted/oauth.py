@@ -165,6 +165,38 @@ class PostgresGoogleOAuthStartRepository:
                 )
                 return bool(cursor.fetchone()[0])
 
+    def active_connector(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        required_scopes: tuple[str, ...],
+    ) -> UUID | None:
+        """Resolve server-side authority for one reviewed provider capability."""
+
+        if not isinstance(principal_id, UUID):
+            raise TypeError("principal_id must be a UUID")
+        if not required_scopes or any(
+            not isinstance(scope, str) or not scope for scope in required_scopes
+        ):
+            raise ValueError("required_scopes must be non-empty strings")
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT id
+                      FROM attune.connectors
+                     WHERE tenant_id = %s AND principal_id = %s
+                       AND provider = 'google' AND status = 'active'
+                       AND granted_scopes = %s
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                    """,
+                    (context.tenant_id, principal_id, list(required_scopes)),
+                )
+                row = cursor.fetchone()
+                return row[0] if row is not None else None
+
     def start(
         self,
         context: TenantContext,

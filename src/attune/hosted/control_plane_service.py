@@ -62,6 +62,12 @@ class GoogleOAuthStartRepository(Protocol):
     def is_connected(self, context, *, principal_id): ...
 
 
+class GoogleConnectionTester(Protocol):
+    def start(self, context, *, principal_id): ...
+
+    def status(self, context, *, principal_id, job_id): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -73,6 +79,8 @@ def create_app(
     google_oauth_enabled: bool = False,
     google_oauth_client_id: str | None = None,
     google_oauth_starts: GoogleOAuthStartRepository | None = None,
+    google_connection_test_enabled: bool = False,
+    google_connection_tests: GoogleConnectionTester | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -102,6 +110,13 @@ def create_app(
         raise ValueError(
             "enabled Google Workspace OAuth requires identity, a public client ID, "
             "and a transaction repository"
+        )
+    if google_connection_test_enabled and (
+        not google_oauth_enabled or google_connection_tests is None
+    ):
+        raise ValueError(
+            "enabled Google connection test requires Google Workspace OAuth "
+            "and a fixed test service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -326,6 +341,50 @@ def create_app(
             )
             return response
 
+        @app.post("/v1/connectors/google/test")
+        def test_google_connector():
+            if not google_connection_test_enabled:
+                return jsonify({"error": "test_not_configured"}), 503
+            if request.content_length not in {None, 0}:
+                return jsonify({"error": "invalid_request"}), 400
+            authorized = _authorize_mutation(
+                request, expected_origin, sessions  # type: ignore[arg-type]
+            )
+            if authorized is None:
+                return jsonify({"error": "invalid_session"}), 401
+            try:
+                started = google_connection_tests.start(  # type: ignore[union-attr]
+                    authorized.context,
+                    principal_id=authorized.principal_id,
+                )
+            except Exception:
+                return jsonify({"error": "test_unavailable"}), 503
+            if started is None:
+                return jsonify({"error": "connector_not_connected"}), 409
+            return jsonify({"job_id": str(started.job_id), "state": started.state}), 202
+
+        @app.get("/v1/connectors/google/tests/<uuid:job_id>")
+        def google_connector_test_status(job_id):
+            token = request.cookies.get(SESSION_COOKIE, "")
+            try:
+                session = sessions.read(token)  # type: ignore[union-attr]
+                state = (
+                    google_connection_tests.status(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        job_id=job_id,
+                    )
+                    if session is not None and google_connection_test_enabled
+                    else None
+                )
+            except Exception:
+                return jsonify({"error": "test_unavailable"}), 503
+            if session is None:
+                return jsonify({"error": "invalid_session"}), 401
+            if state is None:
+                return jsonify({"error": "test_not_found"}), 404
+            return jsonify({"job_id": str(job_id), "state": state})
+
         @app.delete("/v1/session")
         def delete_session():
             if not _same_origin_request(request, expected_origin):
@@ -371,3 +430,14 @@ def _same_origin_request(request, expected_origin: str) -> bool:
         request.headers.get("Origin") == expected_origin
         and request.headers.get("Sec-Fetch-Site") == "same-origin"
     )
+
+
+def _authorize_mutation(request, expected_origin: str, sessions: SessionRepository):
+    if not _same_origin_request(request, expected_origin):
+        return None
+    token = request.cookies.get(SESSION_COOKIE, "")
+    csrf_cookie = request.cookies.get(CSRF_COOKIE, "")
+    csrf_header = request.headers.get("X-Attune-CSRF", "")
+    if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_header):
+        return None
+    return sessions.authorize(token, csrf_cookie)

@@ -124,12 +124,57 @@ function cookie(name) {
   return item ? decodeURIComponent(item.slice(prefix.length)) : null;
 }
 
-function showWorkspace(session) {
+function wait(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function verifyWorkspaceConnection() {
+  const csrf = cookie("__Host-attune_csrf");
+  if (!csrf) throw new Error("missing session binding");
+  workspaceButton.disabled = true;
+  workspaceButton.textContent = "Verifying Gmail access…";
+  show("Checking the read-only Google Workspace connection…");
+  const started = await json(
+    await fetch("/v1/connectors/google/test", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        "X-Attune-CSRF": csrf,
+      },
+    }),
+  );
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await wait(1000);
+    const result = await json(
+      await fetch(`/v1/connectors/google/tests/${encodeURIComponent(started.job_id)}`, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      }),
+    );
+    if (result.state === "succeeded") {
+      workspaceButton.textContent = "Gmail and Calendar connected";
+      show("Google Workspace is connected and verified.", "success");
+      return;
+    }
+    if (result.state === "failed") throw new Error("connection test failed");
+  }
+  throw new Error("connection test timed out");
+}
+
+async function showWorkspace(session) {
   workspace.hidden = false;
   if (session.google_workspace_oauth === "connected") {
-    workspaceButton.disabled = true;
-    workspaceButton.textContent = "Gmail and Calendar connected";
-    show("Google Workspace is connected.", "success");
+    try {
+      await verifyWorkspaceConnection();
+    } catch {
+      workspaceButton.disabled = true;
+      workspaceButton.textContent = "Workspace connected; verification unavailable";
+      show(
+        "Google Workspace is connected, but Attune could not verify Gmail access. Try again later.",
+        "error",
+      );
+    }
     return;
   }
   if (session.google_workspace_oauth !== "available") {
@@ -180,7 +225,7 @@ async function main() {
     const result = messages[outcome] || ["Signed in to Attune.", "success"];
     show(result[0], result[1]);
     button.hidden = true;
-    showWorkspace(session);
+    await showWorkspace(session);
     return;
   }
   const auth = await configure();
@@ -197,7 +242,7 @@ async function main() {
       show("Signed in to Attune.", "success");
       button.hidden = true;
       const session = await existingSession();
-      if (session) showWorkspace(session);
+      if (session) await showWorkspace(session);
     } catch (error) {
       if (error.status === 409) {
         show(

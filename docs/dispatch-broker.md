@@ -169,6 +169,11 @@ worker's exact HTTPS method, path, delivery identity, and OIDC audience.
 The fixed `google.gmail.profile.read` route exists behind one activation
 variable that updates both dispatch and worker registries; Terraform rejects
 activation without the dispatch broker and a paging notification channel.
+Once active, the signed-in control plane can create only that fixed test. It
+derives the principal's exact-scope active connector server-side, persists a
+canonical job and dispatch intent, and sends only the intent UUID to the
+private broker. Browser status polling is rebound to the same principal and
+connector and returns only queued, running, succeeded, or failed.
 
 The broker must not receive customer traffic until all of the following pass:
 
@@ -183,7 +188,7 @@ The broker must not receive customer traffic until all of the following pass:
    content or secret material.
 
 The content-free `platform.smoke` route now passes this infrastructure gate in
-development. The dormant Gmail profile route does not authorize a provider
-credential or customer traffic; test identity, verified paging, authenticated
-effect, revocation, and reconciliation evidence remain required before
-activation.
+development. The Gmail profile route must remain dormant in a new environment
+until test identity, verified paging, authenticated effect, revocation, and
+reconciliation evidence are complete. Activation in one environment is not
+evidence for another.

@@ -188,6 +188,12 @@ Activation is an operator release gate, not an end-user setting:
    `google.gmail.profile.read`, then run the bounded end-to-end test before any
    wider rollout.
 
+The runtime output `google_gmail_profile_enabled` is consumed by the edge root.
+After the runtime apply, the edge enables the session/CSRF-bound connection-test
+API, gives the control plane only private broker invocation, and exposes the two
+exact rate-limited browser paths. Apply runtime before edge when changing this
+gate; do not manually add an untracked route or environment variable.
+
 Do not activate merely because Terraform accepts the variables. The control
 plane and dedicated test installation must exist, the page must be observed,
 and the evidence must be attached to the release record. End users eventually
