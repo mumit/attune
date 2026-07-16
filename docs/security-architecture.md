@@ -549,8 +549,8 @@ minimal event, and returns promptly.
 - **SEC-701A.** Google Chat command parsing MUST prefer the provider's
   mention-stripped `message.argumentText`, require the complete selected field
   to match the single command grammar, and accept `message.text` only as an
-  exact fallback when `argumentText` is absent. It MUST NOT strip, trim, or
-  otherwise normalize attacker-controlled text into a valid command.
+  exact fallback when `argumentText` is absent or empty. It MUST NOT strip,
+  trim, or otherwise normalize attacker-controlled text into a valid command.
 - **SEC-702.** Ingress MUST apply TLS, body/header limits, content-type checks,
   strict schemas, event-type allowlists, rate limits, deduplication, and safe
   parser configuration before queueing.

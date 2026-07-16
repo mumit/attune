@@ -214,8 +214,8 @@ state. This is non-secret routing metadata.
 
 Development deployed the Google Chat ingress backend on 2026-07-16 UTC. The
 current immutable digest is
-`sha256:0939fb4e023eaff6dfe00bdaebfa137ca9e6fa8a89e7c6e016a899975662a638`.
-Revision `attune-development-google-chat-ingress-00002-7rg` receives 100% of
+`sha256:680346f9a5ef83daabd8ecda41f5f5da476f81a10f645c7c6c4cf7f38dbf8841`.
+Revision `attune-development-google-chat-ingress-00003-j5j` receives 100% of
 traffic with its
 default URL disabled and `internal-and-cloud-load-balancing` ingress. The
 serverless NEG and dedicated backend retain request logging disabled.
@@ -246,9 +246,16 @@ that Google puts the mention-stripped command body in `message.argumentText`;
 `message.text` can retain Chat-app addressing. The corrected ingress prefers
 the provider-canonical `argumentText`, applies the same exact `/link CODE`
 regex to it, and falls back to exact `text` only when the output-only field is
-absent. The image-only plan contained zero adds, one in-place change, and zero
-destroys. After deployment, unauthenticated and invalid-bearer requests still
-returned 403, health returned 200, and Terraform converged empty.
+absent or empty. The image-only plan contained zero adds, one in-place change,
+and zero destroys. After deployment, unauthenticated and invalid-bearer
+requests still returned 403, health returned 200, and Terraform converged
+empty.
+
+The next live attempt showed that `argumentText` can be present as an empty
+protobuf string in a direct message. The parser therefore treats absent and
+empty identically for fallback purposes; a whitespace or otherwise non-empty
+value remains authoritative and must match exactly. The service now emits only
+one of four bounded rejection categories, never event content or identifiers.
 
 ## Workspace OAuth activation
 

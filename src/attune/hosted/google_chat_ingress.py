@@ -21,17 +21,23 @@ class GoogleChatOwnerDmLink:
 
 
 def decode_owner_dm_link(event: object) -> GoogleChatOwnerDmLink | None:
+    return decode_owner_dm_link_diagnostic(event)[0]
+
+
+def decode_owner_dm_link_diagnostic(
+    event: object,
+) -> tuple[GoogleChatOwnerDmLink | None, str]:
     if not isinstance(event, dict) or event.get("type") != "MESSAGE":
-        return None
+        return None, "event_envelope"
     user = event.get("user")
     space = event.get("space")
     message = event.get("message")
     if not all(isinstance(value, dict) for value in (user, space, message)):
-        return None
+        return None, "identity_envelope"
     sender = message.get("sender")
     message_space = message.get("space")
     if not isinstance(sender, dict) or not isinstance(message_space, dict):
-        return None
+        return None, "identity_envelope"
     actor_ref = user.get("name")
     destination_ref = space.get("name")
     if (
@@ -46,15 +52,21 @@ def decode_owner_dm_link(event: object) -> GoogleChatOwnerDmLink | None:
         or not isinstance(destination_ref, str)
         or not _SPACE_REF.fullmatch(destination_ref)
     ):
-        return None
+        return None, "actor_space_binding"
     # Google supplies argumentText with Chat-app mentions removed.  Prefer that
-    # provider-canonical command body when present; text can contain the app
-    # mention even in a direct-message interaction.  Retain the exact-text
-    # fallback for valid events from clients that omit the output-only field.
-    text = message.get("argumentText", message.get("text"))
+    # provider-canonical command body when non-empty; text can contain the app
+    # mention even in a direct-message interaction. Protobuf string fields do
+    # not distinguish omission from an empty value, so retain the exact-text
+    # fallback in either case.
+    argument_text = message.get("argumentText")
+    text = (
+        argument_text
+        if isinstance(argument_text, str) and argument_text
+        else message.get("text")
+    )
     if not isinstance(text, str):
-        return None
+        return None, "command_body"
     matched = _LINK_MESSAGE.fullmatch(text)
     if matched is None:
-        return None
-    return GoogleChatOwnerDmLink(matched.group(1), actor_ref, destination_ref)
+        return None, "command_body"
+    return GoogleChatOwnerDmLink(matched.group(1), actor_ref, destination_ref), "accepted"

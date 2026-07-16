@@ -152,10 +152,10 @@ the tenant through the one-use claim ceremony.
 For an interactive `MESSAGE`, the command parser prefers Google Chat's
 `message.argumentText`, whose contract removes Chat-app mentions. It never
 strips or normalizes user text itself: the selected field must still match the
-single exact `/link CODE` grammar. If the output-only field is absent, the
-parser accepts only an exact `message.text` fallback. Sender and space equality,
-human actor type, direct-message type, token identity, and exact audience are
-validated independently of the command body.
+single exact `/link CODE` grammar. If the output-only field is absent or empty,
+the parser accepts only an exact `message.text` fallback. Sender and space
+equality, human actor type, direct-message type, token identity, and exact
+audience are validated independently of the command body.
 
 ## Development rollout
 
@@ -215,8 +215,16 @@ unlinked response without invoking the private broker. The first link attempt
 then revealed the provider-field distinction above: the old revision parsed
 `message.text` instead of the mention-stripped `message.argumentText`. No code
 was consumed. The corrected image is pinned to
-`sha256:0939fb4e023eaff6dfe00bdaebfa137ca9e6fa8a89e7c6e016a899975662a638`
-on revision `attune-development-google-chat-ingress-00002-7rg`. All 897 tests
+`sha256:680346f9a5ef83daabd8ecda41f5f5da476f81a10f645c7c6c4cf7f38dbf8841`
+on revision `attune-development-google-chat-ingress-00003-j5j`. All 898 tests
 passed; live unauthenticated and invalid-bearer probes remained 403; health was
 200; and the post-deployment Terraform plan was empty. A fresh one-time code is
 required for the resumed ceremony.
+
+The second live attempt established that direct-message `argumentText` can be
+present as an empty protobuf string. The current parser treats only absence or
+empty string as permission to try the exact `text` fallback. It does not trim
+whitespace or fall back after any other non-empty value. Content-free reason
+codes (`event_envelope`, `identity_envelope`, `actor_space_binding`, or
+`command_body`) provide bounded live diagnostics without retaining message,
+code, actor, or destination data.

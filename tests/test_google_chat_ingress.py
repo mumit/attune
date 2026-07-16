@@ -1,4 +1,7 @@
-from attune.hosted.google_chat_ingress import decode_owner_dm_link
+from attune.hosted.google_chat_ingress import (
+    decode_owner_dm_link,
+    decode_owner_dm_link_diagnostic,
+)
 
 CODE = "A" * 43
 
@@ -69,3 +72,17 @@ def test_decode_prefers_provider_canonical_argument_text_and_supports_exact_fall
     value = event()
     value["message"]["argumentText"] = None
     assert decode_owner_dm_link(value) is None
+
+    value = event()
+    value["message"]["argumentText"] = ""
+    value["message"]["text"] = f"/link {CODE}"
+    assert decode_owner_dm_link(value) is not None
+
+
+def test_decode_diagnostics_are_bounded_and_content_free():
+    value = event()
+    value["message"]["argumentText"] = "not a link command"
+    decoded, reason = decode_owner_dm_link_diagnostic(value)
+    assert decoded is None
+    assert reason == "command_body"
+    assert "not a link command" not in reason
