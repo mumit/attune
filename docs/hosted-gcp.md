@@ -236,6 +236,18 @@ IDs, step states, resource references, provider choices, or arbitrary details.
 Later channel and activation ceremonies will advance this record through fixed
 server-side operations rather than a generic step-update endpoint.
 
+Development activation evidence was collected on 2026-07-16 UTC. Migration
+`0018_hosted_onboarding.sql` applied successfully and the migration verifier
+reported 28 tenant tables forced through RLS. The edge then converged from its
+default deny to application authorization: an unauthenticated onboarding read
+received 401, while the signed-in owner received 200. The owner started setup
+through the empty-body route (201), reloaded the page, and recovered the same
+state. Workspace was `validated` from the canonical verified connector;
+channels, policy, and activation remained `not_started`. Data and edge
+Terraform plans were both empty after deployment. This evidence authorizes the
+development slice only; it does not authorize hosted production signup or a
+generic browser-controlled state transition.
+
 ## GCP implementation references
 
 - [Cloud Run service identities](https://cloud.google.com/run/docs/securing/service-identity)

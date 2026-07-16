@@ -151,6 +151,13 @@ a disabled-by-default runtime gate. Development activation produced
 authenticated provider, audit, and browser evidence on 2026-07-16; every new
 environment must reproduce the operational gates before activation.
 
+Migration `0018_hosted_onboarding.sql` was applied in development on
+2026-07-16 UTC before its edge gate was enabled. The migration job reported one
+new migration and verified 28 tenant tables forced through RLS. The subsequent
+data plan was empty. This ordering is mandatory for rebuilds and new
+environments: deploy and execute the immutable migrator, require successful
+boundary verification, and only then enable hosted onboarding at the edge.
+
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value
 belongs in these migrations, Terraform state, Cloud Run environment variables,

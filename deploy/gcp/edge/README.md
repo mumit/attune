@@ -78,6 +78,13 @@ session authorization remain authoritative. The browser receives no tenant,
 principal, connector, provider, or resource identifiers. Apply migration
 `0018_hosted_onboarding.sql` before activating this edge gate.
 
+Development activation on 2026-07-16 UTC followed that order. Cloud Armor
+priority `884` first propagated to the exact two paths; an unauthenticated read
+then reached the application and failed with 401. A signed-session read
+returned 200, the CSRF-protected empty-body start returned 201, and a reload
+recovered the persisted state with the already verified Workspace step derived
+as `validated`. The post-apply edge plan was empty.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate
