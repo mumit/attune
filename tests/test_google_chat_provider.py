@@ -51,3 +51,14 @@ def test_provider_fails_closed_on_refusal_or_wrong_resource(response):
             space="spaces/AAAA-test",
             request_id=UUID("10000000-0000-4000-8000-000000000109"),
         )
+
+
+def test_provider_sends_bounded_conversation_text_with_deterministic_request_id():
+    session = Session()
+    job_id = UUID("10000000-0000-4000-8000-000000000112")
+    name = GoogleChatProvider(credentials=object(), session=session).send_message(
+        space="spaces/AAAA-test", text="Assistant response", request_id=job_id
+    )
+    assert name == "spaces/AAAA-test/messages/BBBB"
+    assert session.calls[0][1]["json"] == {"text": "Assistant response"}
+    assert session.calls[0][1]["params"] == {"requestId": str(job_id)}

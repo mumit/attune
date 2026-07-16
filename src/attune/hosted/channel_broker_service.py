@@ -20,6 +20,7 @@ def create_app(
     expected_audience: str,
     expected_ingress: str,
     expected_control_plane: str,
+    expected_worker: str,
     token_verifier: Callable[[str, str], Mapping[str, Any]] | None = None,
 ):
     from flask import Flask, jsonify, request
@@ -30,6 +31,10 @@ def create_app(
         raise ValueError("expected ingress must be a service account")
     if not expected_control_plane.endswith(".gserviceaccount.com"):
         raise ValueError("expected control plane must be a service account")
+    if not expected_worker.endswith(".gserviceaccount.com"):
+        raise ValueError("expected worker must be a service account")
+    if len({expected_ingress, expected_control_plane, expected_worker}) != 3:
+        raise ValueError("channel broker callers must use distinct identities")
     verifier = token_verifier or _google_token_verifier
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
@@ -135,5 +140,35 @@ def create_app(
             "dispatch_intent_id": str(result.dispatch_intent_id),
             "accepted_new": result.accepted_new,
         })
+
+    @app.post("/v1/google-chat/deliver-reply")
+    def deliver_reply():
+        if not authorized(expected_worker):
+            return jsonify({"error": "forbidden"}), 403
+        if not request.is_json:
+            return jsonify({"error": "invalid_request"}), 400
+        body = request.get_json(silent=True)
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"version", "destination_id", "job_id"}
+            or body.get("version") != 1
+        ):
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            destination_id = UUID(body["destination_id"])
+            job_id = UUID(body["job_id"])
+            if str(destination_id) != body["destination_id"] or str(job_id) != body["job_id"]:
+                raise ValueError("non-canonical UUID")
+            delivered = broker.deliver_reply(
+                destination_id=destination_id, job_id=job_id
+            )
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_request"}), 400
+        except Exception as error:
+            LOG.warning("channel reply failed (%s)", type(error).__name__)
+            return jsonify({"error": "delivery_unavailable"}), 503
+        return jsonify({"status": "delivered"}) if delivered else (
+            jsonify({"error": "delivery_unavailable"}), 503
+        )
 
     return app

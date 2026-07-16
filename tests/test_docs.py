@@ -239,8 +239,10 @@ def test_worker_is_private_deterministic_and_queue_routed():
     assert "platform.smoke" in routes
     assert "google_gmail_profile: JobExecutor | None = None" in routes
     assert "google_workspace_verification: JobExecutor | None = None" in routes
+    assert "google_chat_conversation: JobExecutor | None = None" in routes
     assert "enable_google_gmail_profile" in terraform
     assert "enable_google_workspace_verification" in terraform
+    assert "enable_google_chat_conversation" in terraform
     assert "length(var.alert_notification_channels) > 0" in terraform
     assert "var.enable_dispatch_broker" in terraform
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
@@ -167,3 +168,29 @@ def test_default_session_ignores_ambient_proxy_and_netrc(monkeypatch):
         token_provider=lambda audience: "token",
     ).google_gmail_profile(INTENT)
     assert session.trust_env is False
+
+
+def test_conversation_read_clients_validate_bounded_collection_contracts():
+    gmail_response = Response(body={"threads": [{
+        "thread_id": "thread_1", "subject": "Subject", "sender": "From",
+        "date": "Date", "snippet": "Snippet",
+    }]})
+    gmail = SecretBrokerClient(
+        URL, AUDIENCE, token_provider=lambda audience: "token",
+        session=Session(gmail_response),
+    ).google_gmail_threads(INTENT, query="newer_than:7d")
+    assert gmail[0].thread_id == "thread_1"
+
+    calendar_response = Response(body={"events": [{
+        "event_id": "event_1", "summary": "Appointment", "start": "start",
+        "end": "end", "location": "Office", "status": "confirmed",
+    }]})
+    lower = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    events = SecretBrokerClient(
+        URL, AUDIENCE, token_provider=lambda audience: "token",
+        session=Session(calendar_response),
+    ).google_calendar_events(
+        INTENT, time_min=lower,
+        time_max=datetime(2026, 7, 18, tzinfo=timezone.utc),
+    )
+    assert events[0].summary == "Appointment"

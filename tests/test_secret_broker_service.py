@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
@@ -39,6 +40,14 @@ class Broker:
     def google_calendar_primary(self, intent_id):
         self.calls.append(("google_calendar_primary", intent_id))
         return SimpleNamespace(status_code=204, body=None)
+
+    def google_gmail_threads(self, intent_id, **kwargs):
+        self.calls.append(("google_gmail_threads", intent_id, kwargs))
+        return SimpleNamespace(status_code=200, body={"threads": []})
+
+    def google_calendar_events(self, intent_id, **kwargs):
+        self.calls.append(("google_calendar_events", intent_id, kwargs))
+        return SimpleNamespace(status_code=200, body={"events": []})
 
     def google_oauth_exchange(self, intent_id, **kwargs):
         self.calls.append(("google_oauth_exchange", intent_id, kwargs))
@@ -188,10 +197,33 @@ def test_worker_cannot_install_or_add_provider_arguments():
         ).status_code
         == 403
     )
+
+
+def test_conversation_provider_reads_require_exact_bounded_contracts():
+    broker = Broker()
+    app = client(broker)
+    headers = {"Authorization": "Bearer valid-worker"}
+    gmail = app.post(
+        "/v1/providers/google/gmail/threads", headers=headers,
+        json={"intent_id": str(INTENT), "query": "newer_than:7d", "limit": 10},
+    )
+    assert gmail.status_code == 200 and gmail.get_json() == {"threads": []}
+    lower = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    upper = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    calendar = app.post(
+        "/v1/providers/google/calendar/events", headers=headers,
+        json={"intent_id": str(INTENT), "time_min": lower.isoformat(),
+              "time_max": upper.isoformat(), "limit": 25},
+    )
+    assert calendar.status_code == 200 and calendar.get_json() == {"events": []}
+    assert app.post(
+        "/v1/providers/google/gmail/threads", headers=headers,
+        json={"intent_id": str(INTENT), "query": "x", "limit": 11},
+    ).status_code == 400
     assert (
         app.post(
             "/v1/providers/google/gmail/profile",
-            headers=worker,
+            headers=headers,
             json={"intent_id": str(INTENT), "user_id": "victim@example.com"},
         ).status_code
         == 400

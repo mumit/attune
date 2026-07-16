@@ -59,3 +59,12 @@ def test_workspace_verification_route_requires_explicit_executor():
     assert set(routes) == {"platform.smoke", "google.workspace.connection.verify"}
     route = routes["google.workspace.connection.verify"]
     assert route.capability == "google.workspace.connection.verify"
+
+
+def test_google_chat_conversation_route_requires_explicit_executor():
+    calls = []
+    routes = registered_routes(
+        google_chat_conversation=lambda *args: calls.append(args)
+    )
+    route = routes["channel.google_chat.converse"]
+    assert route.capability == "assistant.conversation.read"

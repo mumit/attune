@@ -8,8 +8,10 @@ from attune.hosted.channel_broker import (
     AcceptedGoogleChatMessage,
     ChannelReferenceHasher,
     ClaimedGoogleChatDelivery,
+    ClaimedGoogleChatConversationDelivery,
     ClaimedGoogleChatLink,
     CompletedGoogleChatDelivery,
+    CompletedGoogleChatConversationDelivery,
     GoogleChatLinkBroker,
     LinkedGoogleChatDestination,
     decode_channel_reference_key,
@@ -24,6 +26,7 @@ DELIVERY_PRE_AUDIT = UUID("10000000-0000-4000-8000-000000000108")
 DELIVERY_OUTCOME_AUDIT = UUID("10000000-0000-4000-8000-000000000109")
 MESSAGE_AUDIT = UUID("10000000-0000-4000-8000-000000000110")
 MESSAGE_DISPATCH = UUID("10000000-0000-4000-8000-000000000111")
+CONVERSATION_JOB = UUID("10000000-0000-4000-8000-000000000112")
 
 
 class Repository:
@@ -34,6 +37,8 @@ class Repository:
         self.delivery_claims = []
         self.delivery_completions = []
         self.messages = []
+        self.reply_claims = []
+        self.reply_completions = []
 
     def claim(self, **kwargs):
         self.claims.append(kwargs)
@@ -84,6 +89,21 @@ class Repository:
             MESSAGE_DISPATCH, MESSAGE_AUDIT, True
         )
 
+    def claim_conversation_delivery(self, **kwargs):
+        self.reply_claims.append(kwargs)
+        return ClaimedGoogleChatConversationDelivery(
+            UUID("10000000-0000-4000-8000-000000000104"),
+            TEST_ENCRYPTED, "Canonical assistant response", DELIVERY_PRE_AUDIT,
+            False,
+        )
+
+    def complete_conversation_delivery(self, **kwargs):
+        self.reply_completions.append(kwargs)
+        return CompletedGoogleChatConversationDelivery(
+            "delivered" if kwargs["succeeded"] else "failed",
+            DELIVERY_OUTCOME_AUDIT,
+        )
+
 
 class Writer:
     def __init__(self, results=(True, True)):
@@ -114,6 +134,12 @@ class Sender:
         self.calls.append(kwargs)
         if self.error:
             raise self.error
+
+    def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return f'{kwargs["space"]}/messages/reply-123'
 
 
 DESTINATION = UUID("10000000-0000-4000-8000-000000000107")
@@ -259,3 +285,18 @@ def test_message_acceptance_hashes_all_provider_authority_and_writes_audit():
         call["installation_ref_hash"], call["actor_ref_hash"],
         call["destination_ref_hash"], call["message_ref_hash"],
     }) == 4
+
+
+def test_conversation_reply_uses_canonical_stored_text_and_job_request_id():
+    repository, writer, sender = Repository(), Writer(), Sender()
+    assert broker(repository, writer, sender).deliver_reply(
+        destination_id=DESTINATION, job_id=CONVERSATION_JOB, now=NOW
+    )
+    assert sender.calls == [{
+        "space": "spaces/AAAA-test",
+        "text": "Canonical assistant response",
+        "request_id": CONVERSATION_JOB,
+    }]
+    assert repository.reply_completions[0]["succeeded"] is True
+    assert len(repository.reply_completions[0]["provider_message_ref_hash"]) == 32
+    assert writer.calls == [DELIVERY_PRE_AUDIT, DELIVERY_OUTCOME_AUDIT]

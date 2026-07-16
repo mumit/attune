@@ -96,3 +96,16 @@ def test_client_message_acceptance_returns_only_opaque_dispatch_intent():
     assert intent == UUID("10000000-0000-4000-8000-000000000111")
     assert session.calls[0][0] == f"{URL}/v1/google-chat/accept-message"
     assert "tenant_id" not in session.calls[0][1]["json"]
+
+
+def test_client_reply_delivery_sends_only_server_resolved_ids():
+    destination = UUID("10000000-0000-4000-8000-000000000107")
+    job = UUID("10000000-0000-4000-8000-000000000112")
+    session = Session(Response(body={"status": "delivered"}))
+    assert ChannelBrokerClient(
+        URL, AUDIENCE, token_provider=lambda _: "token", session=session
+    ).deliver_google_chat_reply(destination_id=destination, job_id=job)
+    assert session.calls[0][0] == f"{URL}/v1/google-chat/deliver-reply"
+    assert session.calls[0][1]["json"] == {
+        "version": 1, "destination_id": str(destination), "job_id": str(job),
+    }

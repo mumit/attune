@@ -54,6 +54,9 @@ from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
 from attune.hosted.hosted_channels import PostgresHostedChannelRepository
 from attune.hosted.channel_setup import PostgresHostedChannelSetupRepository
 from attune.hosted.channel_broker import PostgresChannelBrokerRepository
+from attune.hosted.google_chat_conversation_executor import (
+    PostgresGoogleChatConversationWorkRepository,
+)
 from attune.hosted.capability_gateway import (
     CapabilityDefinition,
     CapabilityDenied,
@@ -114,21 +117,25 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0024_google_chat_conversation_acceptance.sql"
+    assert migrations[-1].name == "0025_google_chat_conversation_delivery.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
     )
-    channel_broker = migrations[-2].sql
+    channel_broker = migrations[-3].sql
     assert "GRANT attune_channel_link_executor TO %I" in channel_broker
     assert "GRANT CREATE ON SCHEMA attune TO attune_channel_link_executor" in channel_broker
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in channel_broker
     assert "REVOKE attune_channel_link_executor FROM %I" in channel_broker
-    conversation = migrations[-1].sql
+    conversation = migrations[-2].sql
     assert "LIMIT 2" in conversation
     assert "GRANT attune_channel_message_executor TO %I" in conversation
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_message_executor" in conversation
     assert "TO attune_channel_broker" in conversation
+    delivery = migrations[-1].sql
+    assert "hosted_channel_deliveries" in delivery
+    assert "already_delivered boolean" in delivery
+    assert "TO attune_channel_broker" in delivery
 
 
 def test_tenant_context_rejects_non_uuid_values():
@@ -239,7 +246,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 24
+    assert apply_migrations(admin) == 25
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -943,6 +950,159 @@ def test_google_chat_link_broker_is_one_use_audited_and_function_only(
     }
     assert states["google_chat"].setup_state == "consumed"
     assert states["google_chat"].destination_state == "active"
+
+
+def test_google_chat_conversation_delivery_is_canonical_replay_safe_and_broker_only(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    conversation_id = UUID("30000000-0000-4000-8000-000000000101")
+    connector_id = UUID("30000000-0000-4000-8000-000000000102")
+    job_id = UUID("30000000-0000-4000-8000-000000000103")
+    event_id = UUID("30000000-0000-4000-8000-000000000105")
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, installation_id FROM attune.hosted_channel_destinations "
+            "WHERE tenant_id = %s AND provider = 'google_chat' AND status = 'active'",
+            (CHANNEL_TENANT,),
+        )
+        destination_id, installation_id = cursor.fetchone()
+        cursor.execute(
+            """
+            INSERT INTO attune.connectors
+                (tenant_id, id, principal_id, installation_id, provider,
+                 credential_ref, status)
+            VALUES (%s, %s, %s, %s, 'google', %s, 'active')
+            """,
+            (CHANNEL_TENANT, connector_id, CHANNEL_PRINCIPAL, installation_id,
+             UUID("30000000-0000-4000-8000-000000000104")),
+        )
+        cursor.execute(
+            "INSERT INTO attune.policies "
+            "(tenant_id, version, document, active, created_by) "
+            "VALUES (%s, 1, '{}'::jsonb, true, %s)",
+            (CHANNEL_TENANT, CHANNEL_PRINCIPAL),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.conversations
+                (tenant_id, id, installation_id, principal_id, surface,
+                 external_ref_hash)
+            VALUES (%s, %s, %s, %s, 'google_chat', %s)
+            """,
+            (CHANNEL_TENANT, conversation_id, installation_id, CHANNEL_PRINCIPAL,
+             hashlib.sha256(b"conversation-delivery").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.provider_events
+                (tenant_id, id, installation_id, provider, kind,
+                 deduplication_key, signal)
+            VALUES (%s, %s, %s, 'google', 'google_chat.message', %s,
+                    jsonb_build_object('schema_version', 1,
+                        'conversation_id', %s::text,
+                        'destination_id', %s::text,
+                        'principal_id', %s::text,
+                        'user_sequence', 1))
+            """,
+            (CHANNEL_TENANT, event_id, installation_id,
+             hashlib.sha256(b"conversation-event").digest(), conversation_id,
+             destination_id, CHANNEL_PRINCIPAL),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.jobs
+                (tenant_id, id, kind, state, idempotency_key, capability,
+                 payload, attempts, lease_expires_at)
+            VALUES (%s, %s, 'channel.google_chat.converse', 'leased', %s,
+                    'assistant.conversation.read',
+                    jsonb_build_object('schema_version', 1,
+                        'conversation_id', %s::text,
+                        'destination_id', %s::text,
+                        'provider_event_id', %s::text,
+                        'user_sequence', 1),
+                    1, clock_timestamp() + interval '5 minutes')
+            """,
+            (CHANNEL_TENANT, job_id, hashlib.sha256(b"conversation-job").digest(),
+             conversation_id, destination_id,
+             event_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.conversation_turns
+                (tenant_id, conversation_id, sequence, actor_type, content, provenance)
+            VALUES (%s, %s, 1, 'user', 'What is tomorrow?', '{}'),
+                   (%s, %s, 2, 'assistant', 'Canonical answer',
+                    jsonb_build_object('schema_version', 1, 'job_id', %s::text))
+            """,
+            (CHANNEL_TENANT, conversation_id, CHANNEL_TENANT, conversation_id, job_id),
+        )
+    initialized_database.commit()
+
+    worker_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_worker"]
+    )
+    canonical_job = PostgresJobRepository(worker_factory).get(
+        TenantContext(CHANNEL_TENANT), job_id
+    )
+    assert canonical_job is not None
+    work = PostgresGoogleChatConversationWorkRepository(worker_factory).resolve(
+        TenantContext(CHANNEL_TENANT), canonical_job
+    )
+    assert (work.conversation_id, work.connector_id, work.destination_id) == (
+        conversation_id, connector_id, destination_id,
+    )
+
+    broker = PostgresChannelBrokerRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_channel_broker"])
+    )
+    writer = PostgresAuditWriterRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_audit_writer"])
+    )
+    first_hash = hashlib.sha256(b"conversation-delivery-first").digest()
+    first = broker.claim_conversation_delivery(
+        destination_id=destination_id, job_id=job_id, claim_hash=first_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert first.reply_text == "Canonical answer" and not first.already_delivered
+    assert writer.write(first.pre_audit_intent_id) is not None
+    failed = broker.complete_conversation_delivery(
+        job_id=job_id, claim_hash=first_hash, succeeded=False,
+        provider_message_ref_hash=None,
+    )
+    assert failed.delivery_state == "failed"
+    assert writer.write(failed.outcome_audit_intent_id) is not None
+
+    second_hash = hashlib.sha256(b"conversation-delivery-second").digest()
+    second = broker.claim_conversation_delivery(
+        destination_id=destination_id, job_id=job_id, claim_hash=second_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert writer.write(second.pre_audit_intent_id) is not None
+    completed = broker.complete_conversation_delivery(
+        job_id=job_id, claim_hash=second_hash, succeeded=True,
+        provider_message_ref_hash=hashlib.sha256(b"provider-message").digest(),
+    )
+    assert completed.delivery_state == "delivered"
+    assert writer.write(completed.outcome_audit_intent_id) is not None
+    replay = broker.claim_conversation_delivery(
+        destination_id=destination_id, job_id=job_id,
+        claim_hash=hashlib.sha256(b"conversation-delivery-replay").digest(),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert replay.already_delivered and replay.reply_text is None
+
+    direct = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_channel_broker"]
+    )()
+    try:
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT * FROM attune.hosted_channel_deliveries")
+        direct.rollback()
+    finally:
+        direct.close()
 
 
 def test_rls_hides_other_tenant_rows_and_vectors(initialized_database):

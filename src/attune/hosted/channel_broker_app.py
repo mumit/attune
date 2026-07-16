@@ -42,6 +42,7 @@ def create_production_app():
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_ingress=os.environ["ATTUNE_INGRESS_SERVICE_ACCOUNT"],
         expected_control_plane=os.environ["ATTUNE_CONTROL_PLANE_SERVICE_ACCOUNT"],
+        expected_worker=os.environ["ATTUNE_WORKER_SERVICE_ACCOUNT"],
     )
 
 

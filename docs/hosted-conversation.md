@@ -103,8 +103,8 @@ obvious live-read question from silently becoming memory-only conversation.
 
 The initial read limits are:
 
-- at most ten Gmail thread summaries from a query no longer than 300
-  characters, with detail for at most three threads;
+- at most ten Gmail thread metadata summaries from a query no longer than 300
+  characters; message bodies are not returned in the initial hosted release;
 - a Calendar window no longer than 31 days and at most 25 events;
 - at most six recent conversation turns, each truncated before model use;
 - one classifier call and one answer call per accepted message; and

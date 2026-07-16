@@ -91,8 +91,24 @@ class AcceptedGoogleChatMessage:
     accepted_new: bool
 
 
+@dataclass(frozen=True)
+class ClaimedGoogleChatConversationDelivery:
+    tenant_id: UUID
+    encrypted: EncryptedCredential | None
+    reply_text: str | None
+    pre_audit_intent_id: UUID | None
+    already_delivered: bool
+
+
+@dataclass(frozen=True)
+class CompletedGoogleChatConversationDelivery:
+    delivery_state: str
+    outcome_audit_intent_id: UUID
+
+
 class GoogleChatSender(Protocol):
     def send_connection_test(self, *, space: str, request_id: UUID) -> None: ...
+    def send_message(self, *, space: str, text: str, request_id: UUID) -> str: ...
 
 
 class PostgresChannelBrokerRepository:
@@ -240,6 +256,40 @@ class PostgresChannelBrokerRepository:
             ),
         )
         return AcceptedGoogleChatMessage(*row)
+
+    def claim_conversation_delivery(
+        self, *, destination_id: UUID, job_id: UUID, claim_hash: bytes,
+        expires_at: datetime,
+    ) -> ClaimedGoogleChatConversationDelivery:
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        _fixed_hash("claim_hash", claim_hash)
+        row = self._call(
+            "SELECT * FROM attune.claim_google_chat_conversation_delivery(%s, %s, %s, %s)",
+            (destination_id, job_id, claim_hash, expires_at),
+        )
+        tenant_id, ciphertext, nonce, wrapped, key, version, text, audit, delivered = row
+        encrypted = None if delivered else EncryptedCredential(
+            ciphertext, nonce, wrapped, key, version
+        )
+        return ClaimedGoogleChatConversationDelivery(
+            tenant_id, encrypted, text, audit, delivered
+        )
+
+    def complete_conversation_delivery(
+        self, *, job_id: UUID, claim_hash: bytes, succeeded: bool,
+        provider_message_ref_hash: bytes | None,
+    ) -> CompletedGoogleChatConversationDelivery:
+        if not isinstance(job_id, UUID) or not isinstance(succeeded, bool):
+            raise TypeError("delivery completion is invalid")
+        _fixed_hash("claim_hash", claim_hash)
+        if provider_message_ref_hash is not None:
+            _fixed_hash("provider_message_ref_hash", provider_message_ref_hash)
+        row = self._call(
+            "SELECT * FROM attune.complete_google_chat_conversation_delivery(%s, %s, %s, %s)",
+            (job_id, claim_hash, succeeded, provider_message_ref_hash),
+        )
+        return CompletedGoogleChatConversationDelivery(*row)
 
     def _call(self, statement: str, values: tuple):
         with closing(self._connect()) as connection:
@@ -425,12 +475,72 @@ class GoogleChatLinkBroker:
             raise RuntimeError("channel message pre-effect audit is unavailable")
         return accepted
 
+    def deliver_reply(
+        self, *, destination_id: UUID, job_id: UUID,
+        now: datetime | None = None,
+    ) -> bool:
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise ValueError("invalid conversation delivery")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("delivery time must be timezone-aware")
+        claim_hash = hashlib.sha256(secrets.token_bytes(32)).digest()
+        claim = self._repository.claim_conversation_delivery(
+            destination_id=destination_id, job_id=job_id,
+            claim_hash=claim_hash, expires_at=current + timedelta(seconds=45),
+        )
+        if claim.already_delivered:
+            return True
+        if (
+            claim.encrypted is None or claim.reply_text is None
+            or claim.pre_audit_intent_id is None
+        ):
+            raise RuntimeError("conversation delivery claim is invalid")
+        if not self._audit_writer.write(claim.pre_audit_intent_id):
+            self._complete_reply_failed(job_id, claim_hash)
+            raise RuntimeError("conversation delivery pre-effect audit is unavailable")
+        try:
+            route = self._cipher.decrypt(
+                claim.encrypted, tenant_id=claim.tenant_id,
+                connector_id=destination_id, provider="google_chat_route",
+                credential_version=1,
+            )
+            space = route.get("space")
+            if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
+                raise RuntimeError("stored channel route is invalid")
+            message_ref = self._sender.send_message(
+                space=space, text=claim.reply_text, request_id=job_id
+            )
+            message_hash = self._reference_hasher.hash("message", message_ref)
+        except BaseException:
+            self._complete_reply_failed(job_id, claim_hash)
+            raise
+        completed = self._repository.complete_conversation_delivery(
+            job_id=job_id, claim_hash=claim_hash, succeeded=True,
+            provider_message_ref_hash=message_hash,
+        )
+        if completed.delivery_state != "delivered":
+            raise RuntimeError("conversation delivery completion is invalid")
+        if not self._audit_writer.write(completed.outcome_audit_intent_id):
+            raise RuntimeError("conversation delivery outcome audit is unavailable")
+        return True
+
     def _complete_failed(self, destination_id: UUID, claim_hash: bytes) -> None:
         try:
             completed = self._repository.complete_delivery(
                 destination_id=destination_id,
                 claim_hash=claim_hash,
                 succeeded=False,
+            )
+            self._audit_writer.write(completed.outcome_audit_intent_id)
+        except Exception:
+            pass
+
+    def _complete_reply_failed(self, job_id: UUID, claim_hash: bytes) -> None:
+        try:
+            completed = self._repository.complete_conversation_delivery(
+                job_id=job_id, claim_hash=claim_hash, succeeded=False,
+                provider_message_ref_hash=None,
             )
             self._audit_writer.write(completed.outcome_audit_intent_id)
         except Exception:

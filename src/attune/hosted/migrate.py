@@ -182,6 +182,25 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
             "attune.hosted_channel_setup_transactions",
             "UPDATE",
         ),
+        ("attune_channel_link_executor", "attune.jobs", "SELECT"),
+        ("attune_channel_link_executor", "attune.conversation_turns", "SELECT"),
+        ("attune_channel_link_executor", "attune.connectors", "SELECT"),
+        ("attune_channel_link_executor", "attune.policies", "SELECT"),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_deliveries",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_deliveries",
+            "INSERT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_deliveries",
+            "UPDATE",
+        ),
         ("attune_channel_message_executor", "attune.tenants", "SELECT"),
         ("attune_channel_message_executor", "attune.principals", "SELECT"),
         ("attune_channel_message_executor", "attune.installations", "SELECT"),
@@ -250,6 +269,7 @@ TENANT_TABLES = (
     "hosted_channel_setup_transactions",
     "hosted_channel_destinations",
     "hosted_channel_routes",
+    "hosted_channel_deliveries",
 )
 
 
@@ -744,6 +764,16 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune.accept_google_chat_owner_message(bytea,bytea,bytea,bytea,text)",
                 "attune_channel_broker",
                 "attune_channel_message_executor",
+            ),
+            (
+                "attune.claim_google_chat_conversation_delivery(uuid,uuid,bytea,timestamp with time zone)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.complete_google_chat_conversation_delivery(uuid,bytea,boolean,bytea)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
             ),
         )
         for signature, role, expected_owner in privileged_functions:

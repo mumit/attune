@@ -660,6 +660,10 @@ resource "google_cloud_run_v2_service" "channel_broker" {
         value = local.foundation.workload_identities.control_plane
       }
       env {
+        name  = "ATTUNE_WORKER_SERVICE_ACCOUNT"
+        value = local.foundation.workload_identities.worker
+      }
+      env {
         name  = "ATTUNE_CHANNEL_HMAC_SECRET"
         value = local.foundation.platform_secret_ids["channel-reference-hmac"]
       }

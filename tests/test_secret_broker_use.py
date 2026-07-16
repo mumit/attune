@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import UUID
 
-from attune.hosted.google_provider import GmailProfile, ProviderFailure
+from attune.hosted.google_provider import (
+    CalendarEventSummary,
+    GmailProfile,
+    GmailThreadSummary,
+    ProviderFailure,
+)
 from attune.hosted.secret_broker import SecretBroker
 from attune.hosted.tenant import TenantContext
 from attune.hosted.vault import LeasedCredentialIntent
@@ -59,6 +65,16 @@ class Google:
         self.calls.append(credential)
         if self.error:
             raise self.error
+
+    def gmail_threads(self, credential, **kwargs):
+        self.calls.append((credential, kwargs))
+        return (GmailThreadSummary("thread_1", "Subject", "From", "Date", "Snippet"),)
+
+    def calendar_events(self, credential, **kwargs):
+        self.calls.append((credential, kwargs))
+        return (CalendarEventSummary(
+            "event_1", "Appointment", "start", "end", "Office", "confirmed"
+        ),)
 
 
 class Audit:
@@ -159,3 +175,26 @@ def test_calendar_failure_is_content_free_audited_and_finalized():
     ).google_calendar_primary(INTENT)
     assert result.status_code == 502 and result.body is None
     assert vault.finalized[0][1]["outcome"] == "failed"
+
+
+def test_conversation_reads_are_separate_capabilities_and_bounded_results():
+    gmail_vault = Vault(use_intent("google.gmail.threads.read"))
+    gmail = SecretBroker(
+        vault=gmail_vault, cipher=Cipher(), google=Google(), audit=Audit()
+    ).google_gmail_threads(INTENT, query="newer_than:7d", limit=10)
+    assert gmail.status_code == 200
+    assert gmail.body == {"threads": [{
+        "thread_id": "thread_1", "subject": "Subject", "sender": "From",
+        "date": "Date", "snippet": "Snippet",
+    }]}
+
+    calendar_vault = Vault(use_intent("google.calendar.events.read"))
+    lower = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    calendar = SecretBroker(
+        vault=calendar_vault, cipher=Cipher(), google=Google(), audit=Audit()
+    ).google_calendar_events(
+        INTENT, time_min=lower,
+        time_max=datetime(2026, 7, 18, tzinfo=timezone.utc), limit=25,
+    )
+    assert calendar.status_code == 200
+    assert calendar.body["events"][0]["summary"] == "Appointment"

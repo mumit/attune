@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
@@ -185,7 +186,81 @@ def create_app(
             )
         return ("", result.status_code)
 
+    @app.post("/v1/providers/google/gmail/threads")
+    def google_gmail_threads():
+        if not authorize(expected_worker):
+            return jsonify({"error": "forbidden"}), 403
+        body = body_for({"intent_id", "query", "limit"})
+        parsed = intent_id(body) if body is not None else None
+        if (
+            parsed is None
+            or not isinstance(body["query"], str)
+            or not 1 <= len(body["query"]) <= 300
+            or type(body["limit"]) is not int
+            or not 1 <= body["limit"] <= 10
+        ):
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            result = broker.google_gmail_threads(
+                parsed, query=body["query"], limit=body["limit"]
+            )
+        except Exception as error:
+            LOG.warning("credential use failed (%s)", type(error).__name__)
+            return jsonify({"error": "broker_unavailable"}), 503
+        return _provider_result(result)
+
+    @app.post("/v1/providers/google/calendar/events")
+    def google_calendar_events():
+        if not authorize(expected_worker):
+            return jsonify({"error": "forbidden"}), 403
+        body = body_for({"intent_id", "time_min", "time_max", "limit"})
+        parsed = intent_id(body) if body is not None else None
+        window = _calendar_window(body) if body is not None else None
+        if (
+            parsed is None
+            or window is None
+            or type(body["limit"]) is not int
+            or not 1 <= body["limit"] <= 25
+        ):
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            result = broker.google_calendar_events(
+                parsed, time_min=window[0], time_max=window[1], limit=body["limit"]
+            )
+        except Exception as error:
+            LOG.warning("credential use failed (%s)", type(error).__name__)
+            return jsonify({"error": "broker_unavailable"}), 503
+        return _provider_result(result)
+
     return app
+
+
+def _provider_result(result):
+    from flask import jsonify
+
+    if result.status_code != 200:
+        LOG.warning("attune_secret_broker_use_anomaly status=%d", result.status_code)
+    if result.status_code == 200 and result.body is not None:
+        return jsonify(result.body), 200
+    return ("", result.status_code)
+
+
+def _calendar_window(body: Mapping[str, Any]) -> tuple[datetime, datetime] | None:
+    try:
+        lower = datetime.fromisoformat(body["time_min"])
+        upper = datetime.fromisoformat(body["time_max"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        lower.tzinfo is None
+        or upper.tzinfo is None
+        or upper <= lower
+        or upper - lower > timedelta(days=31)
+        or lower.isoformat() != body["time_min"]
+        or upper.isoformat() != body["time_max"]
+    ):
+        return None
+    return lower, upper
 
 
 def _oauth_exchange_body_is_valid(body: Mapping[str, Any]) -> bool:

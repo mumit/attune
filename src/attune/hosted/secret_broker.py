@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping, Protocol
 from uuid import UUID
 
@@ -13,6 +14,8 @@ from .vault_crypto import EnvelopeCipher
 
 GOOGLE_GMAIL_PROFILE_ACTION = "credential.use.google.gmail.profile.read"
 GOOGLE_CALENDAR_PRIMARY_ACTION = "credential.use.google.calendar.primary.read"
+GOOGLE_GMAIL_THREADS_ACTION = "credential.use.google.gmail.threads.read"
+GOOGLE_CALENDAR_EVENTS_ACTION = "credential.use.google.calendar.events.read"
 GOOGLE_OAUTH_INSTALL_ACTION = "credential.install.google.oauth"
 GOOGLE_OAUTH_DISCONNECT_ACTION = "credential.revoke.google.oauth"
 
@@ -277,6 +280,116 @@ class SecretBroker:
         except Exception:
             finalized = False
         return SecretBrokerResult(204 if finalized else 503)
+
+    def google_gmail_threads(
+        self, intent_id: UUID, *, query: str, limit: int
+    ) -> SecretBrokerResult:
+        intent = self._lease(intent_id, "worker", "use")
+        if intent is None:
+            return SecretBrokerResult(404)
+        if (
+            intent.provider != "google"
+            or intent.capability != "google.gmail.threads.read"
+            or intent.encrypted is None
+            or intent.credential_version is None
+            or self._google is None
+        ):
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_THREADS_ACTION,
+                status_code=404, outcome="denied",
+            )
+        if not self._record(intent, action=GOOGLE_GMAIL_THREADS_ACTION, outcome="allowed"):
+            return SecretBrokerResult(503)
+        try:
+            credential = self._cipher.decrypt(
+                intent.encrypted, tenant_id=intent.tenant.tenant_id,
+                connector_id=intent.connector_id, provider=intent.provider,
+                credential_version=intent.credential_version,
+            )
+            threads = self._google.gmail_threads(
+                credential, query=query, limit=limit
+            )
+        except ProviderFailure:
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_THREADS_ACTION,
+                status_code=502, outcome="failed",
+            )
+        except Exception:
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_THREADS_ACTION,
+                status_code=503, outcome="failed",
+            )
+        return self._finish_success(
+            intent,
+            action=GOOGLE_GMAIL_THREADS_ACTION,
+            body={"threads": [thread.response() for thread in threads]},
+        )
+
+    def google_calendar_events(
+        self,
+        intent_id: UUID,
+        *,
+        time_min: datetime,
+        time_max: datetime,
+        limit: int,
+    ) -> SecretBrokerResult:
+        intent = self._lease(intent_id, "worker", "use")
+        if intent is None:
+            return SecretBrokerResult(404)
+        if (
+            intent.provider != "google"
+            or intent.capability != "google.calendar.events.read"
+            or intent.encrypted is None
+            or intent.credential_version is None
+            or self._google is None
+        ):
+            return self._finish_failure(
+                intent, action=GOOGLE_CALENDAR_EVENTS_ACTION,
+                status_code=404, outcome="denied",
+            )
+        if not self._record(intent, action=GOOGLE_CALENDAR_EVENTS_ACTION, outcome="allowed"):
+            return SecretBrokerResult(503)
+        try:
+            credential = self._cipher.decrypt(
+                intent.encrypted, tenant_id=intent.tenant.tenant_id,
+                connector_id=intent.connector_id, provider=intent.provider,
+                credential_version=intent.credential_version,
+            )
+            events = self._google.calendar_events(
+                credential, time_min=time_min, time_max=time_max, limit=limit
+            )
+        except ProviderFailure:
+            return self._finish_failure(
+                intent, action=GOOGLE_CALENDAR_EVENTS_ACTION,
+                status_code=502, outcome="failed",
+            )
+        except Exception:
+            return self._finish_failure(
+                intent, action=GOOGLE_CALENDAR_EVENTS_ACTION,
+                status_code=503, outcome="failed",
+            )
+        return self._finish_success(
+            intent,
+            action=GOOGLE_CALENDAR_EVENTS_ACTION,
+            body={"events": [event.response() for event in events]},
+        )
+
+    def _finish_success(
+        self,
+        intent: LeasedCredentialIntent,
+        *,
+        action: str,
+        body: Mapping[str, Any],
+    ) -> SecretBrokerResult:
+        if not self._record(intent, action=action, outcome="observed"):
+            return SecretBrokerResult(503)
+        try:
+            finalized = self._vault.finalize(
+                intent.id, producer_kind="worker", outcome="consumed"
+            )
+        except Exception:
+            finalized = False
+        return SecretBrokerResult(200, body) if finalized else SecretBrokerResult(503)
 
     def _finish_failure(
         self,

@@ -7,6 +7,7 @@ from attune.hosted.channel_broker_service import create_app
 AUDIENCE = "https://channel-broker.attune.internal"
 INGRESS = "ingress@example.iam.gserviceaccount.com"
 CONTROL_PLANE = "control@example.iam.gserviceaccount.com"
+WORKER = "worker@example.iam.gserviceaccount.com"
 BODY = {
     "version": 1,
     "link_code": "A" * 43,
@@ -42,6 +43,12 @@ class Broker:
             accepted_new=True,
         )
 
+    def deliver_reply(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return True
+
 
 def claims(token, audience):
     now = int(time.time())
@@ -51,6 +58,7 @@ def claims(token, audience):
         "email": (
             INGRESS if token == "ingress" else
             CONTROL_PLANE if token == "control" else
+            WORKER if token == "worker" else
             "other@example.iam.gserviceaccount.com"
         ),
         "email_verified": True,
@@ -66,6 +74,7 @@ def client(broker):
         expected_audience=AUDIENCE,
         expected_ingress=INGRESS,
         expected_control_plane=CONTROL_PLANE,
+        expected_worker=WORKER,
         token_verifier=claims,
     ).test_client()
 
@@ -157,3 +166,28 @@ def test_message_acceptance_is_ingress_only_and_rejects_tenant_authority():
         "dispatch_intent_id": "10000000-0000-4000-8000-000000000111",
         "accepted_new": True,
     }
+
+
+def test_conversation_delivery_is_worker_only_and_accepts_no_content_or_tenant():
+    broker = Broker()
+    app = client(broker)
+    body = {
+        "version": 1,
+        "destination_id": "10000000-0000-4000-8000-000000000107",
+        "job_id": "10000000-0000-4000-8000-000000000108",
+    }
+    assert app.post(
+        "/v1/google-chat/deliver-reply",
+        headers={"Authorization": "Bearer ingress"}, json=body,
+    ).status_code == 403
+    response = app.post(
+        "/v1/google-chat/deliver-reply",
+        headers={"Authorization": "Bearer worker"}, json=body,
+    )
+    assert response.get_json() == {"status": "delivered"}
+    assert set(broker.calls[-1]) == {"destination_id", "job_id"}
+    assert app.post(
+        "/v1/google-chat/deliver-reply",
+        headers={"Authorization": "Bearer worker"},
+        json={**body, "text": "attacker supplied", "tenant_id": "attacker"},
+    ).status_code == 400

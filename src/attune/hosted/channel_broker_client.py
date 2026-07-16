@@ -117,6 +117,28 @@ class ChannelBrokerClient:
             raise RuntimeError("channel message acceptance is invalid")
         return intent_id
 
+    def deliver_google_chat_reply(
+        self, *, destination_id: UUID, job_id: UUID
+    ) -> bool:
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/google-chat/deliver-reply",
+            json={"version": 1, "destination_id": str(destination_id), "job_id": str(job_id)},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            return response.json() == {"status": "delivered"}
+        except ValueError:
+            return False
+
 
 def _https_origin(value: str) -> str:
     parsed = urlsplit(value)

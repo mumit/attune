@@ -11,6 +11,12 @@ from .google_gmail_profile_executor import GoogleGmailProfileExecutor
 from .google_workspace_verification_executor import (
     GoogleWorkspaceVerificationExecutor,
 )
+from .google_chat_conversation_executor import (
+    GoogleChatConversationExecutor,
+    PostgresGoogleChatConversationWorkRepository,
+)
+from .channel_broker_client import ChannelBrokerClient
+from .model_gateway_client import ModelGatewayClient
 from .repositories import PostgresJobRepository
 from .reconciliation import PostgresJobReconciliationRepository
 from .secret_broker_client import SecretBrokerClient
@@ -63,6 +69,33 @@ def create_production_app():
                 os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
             ),
         )
+    google_chat_conversation = None
+    conversation_enabled = os.environ.get(
+        "ATTUNE_ENABLE_GOOGLE_CHAT_CONVERSATION", "false"
+    )
+    if conversation_enabled not in {"true", "false"}:
+        raise ValueError(
+            "ATTUNE_ENABLE_GOOGLE_CHAT_CONVERSATION must be true or false"
+        )
+    if conversation_enabled == "true":
+        google_chat_conversation = GoogleChatConversationExecutor(
+            PostgresGoogleChatConversationWorkRepository(iam_connection),
+            PostgresCredentialIntentRepository(
+                iam_connection, producer_kind="worker",
+            ),
+            SecretBrokerClient(
+                os.environ["ATTUNE_SECRET_BROKER_URL"],
+                os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
+            ),
+            ModelGatewayClient(
+                os.environ["ATTUNE_MODEL_GATEWAY_URL"],
+                os.environ["ATTUNE_MODEL_GATEWAY_AUDIENCE"],
+            ),
+            ChannelBrokerClient(
+                os.environ["ATTUNE_CHANNEL_BROKER_URL"],
+                os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
+            ),
+        )
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),
         audit=audit,
@@ -70,6 +103,7 @@ def create_production_app():
         routes=registered_routes(
             google_gmail_profile=google_gmail_profile,
             google_workspace_verification=google_workspace_verification,
+            google_chat_conversation=google_chat_conversation,
         ),
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_service_account=os.environ[
