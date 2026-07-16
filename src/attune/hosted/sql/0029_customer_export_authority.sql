@@ -1,15 +1,5 @@
 -- Dormant customer-export request/claim authority. This migration deliberately
 -- provides no ready/publish transition; storage and download arrive later.
-DO $legacy$
-BEGIN
-    IF EXISTS (SELECT 1 FROM attune.export_jobs) THEN
-        RAISE EXCEPTION
-            'legacy export jobs require explicit reviewed adoption before migration 0029'
-            USING ERRCODE = '55000';
-    END IF;
-END
-$legacy$;
-
 DO $roles$
 BEGIN
     IF NOT EXISTS (
@@ -27,6 +17,30 @@ BEGIN
     END IF;
 END
 $roles$;
+
+-- FORCE RLS also applies to the table owner. Temporarily assume the new,
+-- memberless BYPASS owner solely for the legacy-row preflight; any refusal
+-- rolls the grant and the entire migration back atomically.
+DO $legacy_owner$
+BEGIN
+    EXECUTE pg_catalog.format(
+        'GRANT attune_export_coordinator TO %I', current_user
+    );
+END
+$legacy_owner$;
+GRANT USAGE ON SCHEMA attune TO attune_export_coordinator;
+GRANT SELECT ON attune.export_jobs TO attune_export_coordinator;
+SET LOCAL ROLE attune_export_coordinator;
+DO $legacy$
+BEGIN
+    IF EXISTS (SELECT 1 FROM attune.export_jobs) THEN
+        RAISE EXCEPTION
+            'legacy export jobs require explicit reviewed adoption before migration 0029'
+            USING ERRCODE = '55000';
+    END IF;
+END
+$legacy$;
+RESET ROLE;
 
 REVOKE INSERT, UPDATE ON attune.export_jobs
 FROM attune_control_plane, attune_worker;
