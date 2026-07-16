@@ -3,6 +3,16 @@ foundation_state_prefix = "foundation"
 migrator_image         = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-migrator@sha256:REPLACE"
 initial_tenant_slug     = "owner-dev"
 
+# Keep false through the paused-path ceremony documented in README.md.
+enable_protocol_retention_schedule = false
+protocol_retention_schedule        = "17 3 * * *"
+protocol_retention_time_zone       = "Etc/UTC"
+
+# Required before enabling retention scheduling.
+alert_notification_channels = [
+  "projects/PROJECT/notificationChannels/REPLACE",
+]
+
 labels = {
   owner       = "platform"
   cost_center = "attune"

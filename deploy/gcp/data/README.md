@@ -395,7 +395,7 @@ privileges, then require an empty data plan. Keep the independent edge
 `enable_hosted_channel_lifecycle` gate false until the new control-plane image
 is Ready and the destructive owner ceremony is approved.
 
-## Dormant protocol-retention job
+## Paused-first protocol-retention schedule
 
 Migration `0028_protocol_retention.sql` and this module add
 `attune-<environment>-protocol-retention` with its own Cloud SQL IAM identity.
@@ -413,8 +413,16 @@ Each invocation is transactionally bounded to the configured batch size
   transaction still references them; and
 - processed provider events older than seven days.
 
-The job is deliberately unscheduled. After applying migration 0028, verify an
-empty or synthetic development run explicitly:
+The data root also creates an independent scheduler identity and Cloud
+Scheduler job. It is **deployed paused by default**. The scheduler identity has
+only `roles/run.invoker` on this one Cloud Run job; it has no Cloud SQL login,
+database role, log-writer, metric-writer, secret, queue, or service-level
+authority. Cloud Scheduler calls the Google Run Jobs API with an OAuth access
+token. The started job, not the scheduler, assumes the retention executor
+identity.
+
+After applying migration 0028, first verify an empty or synthetic development
+run directly:
 
 ```bash
 gcloud run jobs execute attune-development-protocol-retention \
@@ -423,14 +431,39 @@ gcloud run jobs execute attune-development-protocol-retention \
   --wait
 ```
 
-The execution must succeed once, return only aggregate counts in a structured
+That execution must succeed once, return only aggregate counts in a structured
 `attune_protocol_retention` log, create
 the expected per-tenant audit intents when synthetic expired records exist, and
 leave recent records intact. Then run the database migrator again to prove the
-role/privilege verifier remains clean. Do not add Cloud Scheduler until this
-evidence is recorded and alerting for job failure and an accumulating expired
-backlog exists. Scheduling this job does not activate conversation or memory
-retention.
+role/privilege verifier remains clean.
+
+Cloud Scheduler will not force-run a paused job. Use this fail-safe ceremony to
+open only the short invocation window and restore `PAUSED` on every shell exit:
+
+```bash
+JOB=attune-development-protocol-retention
+pause_retention() {
+  gcloud scheduler jobs pause "$JOB" \
+    --project="$PROJECT_ID" --location="$REGION" >/dev/null
+}
+trap pause_retention EXIT
+gcloud scheduler jobs resume "$JOB" \
+  --project="$PROJECT_ID" --location="$REGION"
+gcloud scheduler jobs run "$JOB" \
+  --project="$PROJECT_ID" --location="$REGION"
+pause_retention
+trap - EXIT
+```
+
+Require Scheduler's last attempt to succeed, a new successful Cloud Run job
+execution with content-free aggregate output, both paging policies enabled,
+and an empty Terraform plan. Only then set
+`enable_protocol_retention_schedule = true` in the reviewed environment
+configuration and apply a saved plan whose sole intended behavioral change is
+the Scheduler transition from paused to enabled. The default schedule is
+03:17 UTC daily; set `protocol_retention_time_zone` explicitly when civil-time
+operation is required. Scheduling this job does not activate conversation or
+memory retention.
 
 The executor runs at most `protocol_retention_max_batches` (default four,
 maximum ten) per invocation. If every bounded batch remains saturated, it sets
@@ -487,10 +520,32 @@ Alert evidence on 2026-07-16:
   zero migrations and passed the 33-table/privilege verifier. The data plan was
   empty afterward.
 
+Scheduler evidence on 2026-07-16:
+
+- The foundation saved plan created only the Cloud Scheduler API registration
+  and `attune-development-ret-sched` service account (`2 added, 0 changed,
+  0 destroyed`). That identity has no project-level IAM binding.
+- The data saved plan created only a job-scoped `roles/run.invoker` binding and
+  the paused Scheduler job (`2 added, 0 changed, 0 destroyed`). Its OAuth target
+  is the exact `run.googleapis.com` Run Jobs API path.
+- The first force-run attempt proved that Scheduler refuses a paused job. The
+  fail-safe ceremony kept it paused. After regional propagation, the bounded
+  resume/run/pause ceremony started execution
+  `attune-development-protocol-retention-qfz87`; it succeeded in 12.2 seconds
+  with one aggregate log, zero deletions, and `backlog_possible=false`.
+- Both retention paging policies remained enabled. Verification execution
+  `attune-development-database-migrate-lm52j` applied zero migrations and
+  verified all 33 tenant tables and privilege boundaries.
+- After an empty paused-state plan, a separate saved plan changed only
+  `paused=true` to `paused=false`. The development schedule is enabled for
+  03:17 UTC daily. The Scheduler resource uses provider-enforced `PREVENT`
+  deletion so configuration removal cannot orphan an active schedule. Both
+  foundation and data plans were empty afterward.
+
 The real-PostgreSQL suite supplies nonzero synthetic deletion, recent-record
 survival, direct-table denial, and per-tenant audit-intent evidence without
 creating a broad synthetic-data identity in the operated project. A staging
-restore/synthetic exercise remains required before production scheduling.
+restore/synthetic exercise remains required before production activation.
 
 ## Production gates
 

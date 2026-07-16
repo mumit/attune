@@ -22,12 +22,15 @@ output "identity_provisioning_job" {
 }
 
 output "protocol_retention_job" {
-  description = "Dormant, manually invoked expired-protocol retention job identifiers."
+  description = "Bounded expired-protocol retention job and independent scheduler identifiers."
   value = {
-    project         = local.foundation.project_id
-    region          = local.foundation.region
-    name            = google_cloud_run_v2_job.protocol_retention.name
-    service_account = local.foundation.workload_identities.retention
-    image           = var.migrator_image
+    project                   = local.foundation.project_id
+    region                    = local.foundation.region
+    name                      = google_cloud_run_v2_job.protocol_retention.name
+    service_account           = local.foundation.workload_identities.retention
+    image                     = var.migrator_image
+    scheduler_name            = google_cloud_scheduler_job.protocol_retention.name
+    scheduler_service_account = local.foundation.workload_identities.retention_scheduler
+    scheduler_paused          = google_cloud_scheduler_job.protocol_retention.paused
   }
 }

@@ -21,6 +21,8 @@ to the first GCP implementation.
 | Secret broker | Private Cloud Run service with the only connector-vault KMS identity | Yes | No (internal ingress and IAM) |
 | Relational/vector data | Private-IP Cloud SQL PostgreSQL with IAM authentication, RLS, and `vector` | No | No |
 | Audit writer | Private intent-only service writing canonical events to PostgreSQL and retained Cloud Storage | No | Implemented in development |
+| Retention scheduler | Cloud Scheduler OAuth call to one Cloud Run job; distinct non-database identity | No | No |
+| Protocol-retention executor | Bounded Cloud Run job with function-only database authority | No | No |
 | Images | Artifact Registry with provenance and vulnerability policy gates | No | No |
 
 Every service has a distinct user-managed service account. Google recommends
@@ -210,6 +212,13 @@ acceptable substitutes.
    reconciliation, deterministic capabilities, and kill switches.
 6. **Operations:** load balancer/WAF, alerts, SLOs, backups/restores, export,
    deletion, incident response, support controls, and supply-chain enforcement.
+   The first expired-protocol retention slice is active in development: an
+   independent identity can invoke only the bounded retention job on a daily
+   schedule, while the executor alone has its fixed database function. It was
+   deployed paused-first and activated after the exact OAuth invocation,
+   aggregate output, paging, database verifier, IAM isolation, and Terraform
+   convergence were evidenced. This does not implement customer conversation,
+   memory, export, erasure, or backup-suppression lifecycle controls.
 7. **Assurance:** tenant-isolation suite, red team, independent penetration
    test, Google OAuth verification/CASA evidence, and launch-gate review.
 

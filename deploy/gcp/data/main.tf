@@ -314,6 +314,55 @@ resource "google_cloud_run_v2_job" "protocol_retention" {
   }
 }
 
+# The scheduler can start only this job. It has no database, logging, metrics,
+# or service-level runtime role; the job itself assumes the separate retention
+# executor identity after Cloud Run accepts this authenticated control request.
+resource "google_cloud_run_v2_job_iam_member" "protocol_retention_scheduler" {
+  project  = local.foundation.project_id
+  location = google_cloud_run_v2_job.protocol_retention.location
+  name     = google_cloud_run_v2_job.protocol_retention.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.retention_scheduler}"
+}
+
+resource "google_cloud_scheduler_job" "protocol_retention" {
+  project     = local.foundation.project_id
+  region      = local.foundation.region
+  name        = "${local.prefix}-protocol-retention"
+  description = "Starts the bounded expired-protocol retention job; deploy paused and activate only after the scheduler-path ceremony."
+  schedule    = var.protocol_retention_schedule
+  time_zone   = var.protocol_retention_time_zone
+  paused      = !var.enable_protocol_retention_schedule
+
+  attempt_deadline = "300s"
+
+  retry_config {
+    retry_count          = 1
+    max_retry_duration   = "600s"
+    min_backoff_duration = "30s"
+    max_backoff_duration = "60s"
+    max_doublings        = 1
+  }
+
+  http_target {
+    uri         = "https://run.googleapis.com/v2/projects/${local.foundation.project_id}/locations/${local.foundation.region}/jobs/${google_cloud_run_v2_job.protocol_retention.name}:run"
+    http_method = "POST"
+    body        = base64encode("{}")
+    headers = {
+      "Content-Type" = "application/json"
+    }
+
+    oauth_token {
+      service_account_email = local.foundation.workload_identities.retention_scheduler
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_cloud_run_v2_job_iam_member.protocol_retention_scheduler]
+
+  deletion_policy = "PREVENT"
+}
+
 resource "google_logging_metric" "protocol_retention_failure" {
   project = local.foundation.project_id
   name    = "${local.prefix}-protocol-retention-failure"

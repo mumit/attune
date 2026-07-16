@@ -9,6 +9,7 @@ locals {
     identity_provisioner = "id-prov"
     model_gateway        = "model"
     retention            = "retention"
+    retention_scheduler  = "ret-sched"
     worker               = "worker"
     secret_broker        = "secrets"
     task_dispatch        = "dispatch"
@@ -26,7 +27,7 @@ resource "google_service_account" "workload" {
 resource "google_project_iam_member" "runtime_logging" {
   for_each = {
     for name, account in google_service_account.workload : name => account
-    if !contains(["oauth_callback", "oauth_exchange"], name)
+    if !contains(["oauth_callback", "oauth_exchange", "retention_scheduler"], name)
   }
   project = var.project_id
   role    = "roles/logging.logWriter"
@@ -34,10 +35,13 @@ resource "google_project_iam_member" "runtime_logging" {
 }
 
 resource "google_project_iam_member" "runtime_metrics" {
-  for_each = google_service_account.workload
-  project  = var.project_id
-  role     = "roles/monitoring.metricWriter"
-  member   = "serviceAccount:${each.value.email}"
+  for_each = {
+    for name, account in google_service_account.workload : name => account
+    if name != "retention_scheduler"
+  }
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${each.value.email}"
 }
 
 resource "google_project_iam_member" "database_client" {

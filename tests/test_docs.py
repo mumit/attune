@@ -40,22 +40,31 @@ def test_hosted_lifecycle_contract_is_fail_closed_and_not_overstated():
     assert "outside the deletable tenant graph" in normalized
     assert "A missing, stale, unavailable, or unverifiable suppression ledger blocks" in normalized
     assert "must not present a decorative control" in normalized
-    assert "first slice implemented, dormant" in normalized
+    assert "first slice implemented, paused-first" in normalized
 
 
-def test_protocol_retention_job_is_dormant_and_least_privileged():
+def test_protocol_retention_scheduler_is_paused_and_least_privileged():
     foundation = (ROOT / "deploy" / "gcp" / "foundation" / "iam.tf").read_text()
     data_main = (ROOT / "deploy" / "gcp" / "data" / "main.tf").read_text()
     data_guide = (ROOT / "deploy" / "gcp" / "data" / "README.md").read_text()
 
     assert 'retention            = "retention"' in foundation
+    assert 'retention_scheduler  = "ret-sched"' in foundation
+    assert 'if name != "retention_scheduler"' in foundation
+    assert '"oauth_exchange", "retention_scheduler"' in foundation
     assert 'service_account = local.foundation.workload_identities.retention' in data_main
     assert 'command = ["python", "-m", "attune.hosted.protocol_retention"]' in data_main
-    assert "google_cloud_scheduler" not in data_main
+    assert 'resource "google_cloud_scheduler_job" "protocol_retention"' in data_main
+    assert "paused      = !var.enable_protocol_retention_schedule" in data_main
+    assert 'deletion_policy = "PREVENT"' in data_main
+    assert 'role     = "roles/run.invoker"' in data_main
+    assert "workload_identities.retention_scheduler" in data_main
+    assert "oauth_token" in data_main
+    assert "https://run.googleapis.com/v2/projects/" in data_main
     assert 'resource "google_logging_metric" "protocol_retention_failure"' in data_main
     assert 'jsonPayload.backlog_possible=true' in data_main
     assert 'notification_channels = var.alert_notification_channels' in data_main
-    assert "deliberately unscheduled" in data_guide
+    assert "deployed paused" in data_guide
 
 
 def test_qdrant_compose_images_are_pinned_and_loopback_bound():
@@ -330,7 +339,7 @@ def test_oauth_callback_identity_has_no_data_or_log_writer_authority():
     iam = (ROOT / "deploy" / "gcp" / "foundation" / "iam.tf").read_text()
 
     assert re.search(r'oauth_callback\s*=\s*"oauth-cb"', iam)
-    assert 'if !contains(["oauth_callback", "oauth_exchange"], name)' in iam
+    assert 'if !contains(["oauth_callback", "oauth_exchange", "retention_scheduler"], name)' in iam
     database_identity_set = iam.split(
         'resource "google_project_iam_member" "database_client"', 1
     )[1].split('resource "google_cloud_tasks_queue_iam_member"', 1)[0]
@@ -442,7 +451,10 @@ def test_initial_identity_provisioning_is_private_one_purpose_and_secret_aware()
     assert '"llm-api-key"' in broker_access
     assert 'workload["identity_provisioner"]' in foundation
     assert 'resource "google_cloud_run_v2_job" "identity_provision"' in data
-    assert "google_cloud_run_v2_job_iam" not in data
+    identity_job = data.split(
+        'resource "google_cloud_run_v2_job" "identity_provision"', 1
+    )[1].split('resource "google_cloud_run_v2_job" "protocol_retention"', 1)[0]
+    assert "google_cloud_run_v2_job_iam" not in identity_job
     assert "ATTUNE_IDENTITY_BOOTSTRAP_SECRET" in data
     assert "ATTUNE_IDENTITY_SUBJECT_HASH" not in data
     assert "provision_initial_identity(bytea,text,text,text)" in migration

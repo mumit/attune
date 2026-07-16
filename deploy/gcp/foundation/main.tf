@@ -16,6 +16,7 @@ locals {
     "chat.googleapis.com",
     "cloudbuild.googleapis.com",
     "cloudkms.googleapis.com",
+    "cloudscheduler.googleapis.com",
     "cloudtasks.googleapis.com",
     "compute.googleapis.com",
     "dns.googleapis.com",

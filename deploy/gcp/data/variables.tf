@@ -57,6 +57,34 @@ variable "protocol_retention_max_batches" {
   }
 }
 
+variable "enable_protocol_retention_schedule" {
+  description = "Enable the independently authenticated daily protocol-retention schedule after its paused-path ceremony passes."
+  type        = bool
+  default     = false
+}
+
+variable "protocol_retention_schedule" {
+  description = "Unix-cron schedule for expired-protocol retention."
+  type        = string
+  default     = "17 3 * * *"
+
+  validation {
+    condition     = can(regex("^[0-9*/?,\\-]+ [0-9*/?,\\-]+ [0-9*/?,\\-]+ [0-9*/?,\\-]+ [0-9*/?,\\-]+$", var.protocol_retention_schedule))
+    error_message = "protocol_retention_schedule must contain exactly five non-empty unix-cron fields."
+  }
+}
+
+variable "protocol_retention_time_zone" {
+  description = "IANA time-zone name used to interpret the retention schedule."
+  type        = string
+  default     = "Etc/UTC"
+
+  validation {
+    condition     = can(regex("^[A-Za-z_+-]+(?:/[A-Za-z0-9_+.-]+)*$", var.protocol_retention_time_zone))
+    error_message = "protocol_retention_time_zone must be an IANA-style time-zone name such as Etc/UTC or America/Vancouver."
+  }
+}
+
 variable "alert_notification_channels" {
   description = "Monitoring notification-channel resource names for retention alerts."
   type        = list(string)

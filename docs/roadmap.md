@@ -102,8 +102,10 @@ reviewed lifecycle classification for every tenant-bearing relation. A bounded,
 audited expired-protocol retention executor and manual Cloud Run job are live;
 its empty execution, IAM boundary, migration verifier, and drift convergence
 are verified. Its failure and backlog incidents now page through the verified
-development channel. It remains unscheduled pending a separate scheduler
-identity and paused-first activation. Customer content retention and controls
+development channel. A separate, non-database scheduler identity now invokes
+only that job; its daily development schedule was activated after paused-first
+authenticated-path, paging, verifier, IAM, and convergence evidence. New
+environments remain paused by default. Customer content retention and controls
 are not active yet. Slack installation/lifecycle,
 export/deletion, support repair, customer-visible audit, adversarial assurance,
 and external security review remain later independent slices.

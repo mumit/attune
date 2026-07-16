@@ -524,6 +524,13 @@ arguments.
   and provider egress until the current suppression authority has been applied
   and lifecycle verification proves that suppressed data and credentials
   cannot become reachable.
+- **SEC-610.** Automated retention scheduling MUST use an identity distinct
+  from the retention executor. The scheduler may invoke only the reviewed
+  retention job and MUST have no database login, runtime telemetry writer,
+  secret, queue, or general service authority. A schedule is deployed paused,
+  its authenticated invocation path and paging controls are verified, and a
+  separately reviewed state change is required to enable it. Infrastructure
+  removal MUST fail closed rather than orphan an enabled unmanaged schedule.
 
 The lifecycle policy, complete storage inventory, customer ceremonies, and
 restore procedure are defined in [Hosted data lifecycle](data-lifecycle.md).
