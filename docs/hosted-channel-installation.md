@@ -161,3 +161,26 @@ returned 200, the installation-status route remained blocked at the edge with
 403, and both data and edge Terraform plans converged empty. No setup attempt,
 link, destination, provider credential, ingress, or message was created. This
 evidence satisfies activation gates 1 and 2 only.
+
+The next dormant stage completed on 2026-07-16 UTC. Migration 0022 ran once in
+execution `attune-development-database-migrate-tbd9h` from immutable digest
+`sha256:386ceb843a33de4594c1b438a941bfa8823d500ecf50ef6ceb5079fd9ca2f7aa`;
+the verifier again reported 31 forced-RLS tenant tables. The private broker is
+Ready on revision `attune-development-channel-broker-00003-ksw`, pinned to
+digest
+`sha256:b5df7b42ea722ae621671fbc6cd05a66a2af29034aa09ec7e2c89daaec2b63ba`.
+It has internal-only ingress, a dedicated runtime identity, and exactly one
+Cloud Run invoker: the dedicated ingress service account.
+
+Google Chat ingress is Ready on revision
+`attune-development-google-chat-ingress-00001-sql`, pinned to digest
+`sha256:abd3ff681cf4f576f00bcdc7ed509de7f3e3ddd3e0c85d22ab7acfac2411ad94`.
+Its default URL is disabled; it is attached to an unrouted serverless backend
+with request logging disabled and a default-deny Cloud Armor policy. The public
+event path still returns 403 and is absent from the URL map.
+`enable_google_chat_ingress`, `google_chat_provider_ready`, and
+`enable_hosted_channel_setup` remain false. Runtime and edge Terraform plans
+converged empty. No setup, link, claim, destination, provider app event, or
+message was created. This satisfies the private-boundary and dormant-ingress
+parts of gate 3; provider configuration, adversarial evidence, route
+activation, and a real owner-DM ceremony remain separate gates.

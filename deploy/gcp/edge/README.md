@@ -210,6 +210,20 @@ terraform output -json edge
 the callback reads the private OAuth exchange URI and audience from remote
 state. This is non-secret routing metadata.
 
+## Dormant Google Chat ingress evidence
+
+Development deployed the Google Chat ingress backend on 2026-07-16 UTC with
+immutable digest
+`sha256:abd3ff681cf4f576f00bcdc7ed509de7f3e3ddd3e0c85d22ab7acfac2411ad94`.
+Revision `attune-development-google-chat-ingress-00001-sql` is Ready with its
+default URL disabled and `internal-and-cloud-load-balancing` ingress. The
+serverless NEG and backend exist with request logging disabled, while the
+dedicated Cloud Armor policy contains only its default-deny rule. The URL map
+contains no Google Chat path, and an external POST to the intended endpoint
+returned 403. `enable_google_chat_ingress=false` and
+`google_chat_provider_ready=false`; the final edge plan was empty. Do not
+interpret backend readiness as provider or channel activation.
+
 ## Workspace OAuth activation
 
 Leave these values at their defaults during image and route rollout:

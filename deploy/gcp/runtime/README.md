@@ -244,6 +244,16 @@ invoke the service. A reviewed dormant plan must show the broker, its single
 invoker grant, and the audit-writer grant without enabling a public provider
 route.
 
+Development completed this private stage on 2026-07-16 UTC. The Ready broker
+revision `attune-development-channel-broker-00003-ksw` uses immutable digest
+`sha256:b5df7b42ea722ae621671fbc6cd05a66a2af29034aa09ec7e2c89daaec2b63ba`.
+Its IAM policy contains only
+`attune-development-ingress@attune-development-502421.iam.gserviceaccount.com`
+as `roles/run.invoker`, and the final runtime plan was empty. Two earlier
+revisions failed closed during startup—first for a missing web runtime and then
+for overly strict base64 padding handling—and never served traffic. The fixes
+are covered by image-runtime and canonical-key regression tests.
+
 Worker deployment does not enable delivery. Copy the worker output's URI
 hostname and custom audience into the two nullable jobs-worker variables in the
 foundation root, review the queue-only in-place plan, and apply it. Confirm the

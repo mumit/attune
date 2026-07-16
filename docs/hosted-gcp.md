@@ -293,6 +293,20 @@ pre-effect audit before creating the canonical installation and owner-DM
 binding. Both the private broker and public route default off; deployment of an
 unrouted ingress backend is separate from provider-route activation.
 
+Development exercised that separation on 2026-07-16 UTC. Migration 0022 used
+digest
+`sha256:386ceb843a33de4594c1b438a941bfa8823d500ecf50ef6ceb5079fd9ca2f7aa`
+and execution `attune-development-database-migrate-tbd9h`. The private broker
+is Ready at digest
+`sha256:b5df7b42ea722ae621671fbc6cd05a66a2af29034aa09ec7e2c89daaec2b63ba`
+with only the ingress identity as invoker. The Google Chat ingress is Ready at
+digest
+`sha256:abd3ff681cf4f576f00bcdc7ed509de7f3e3ddd3e0c85d22ab7acfac2411ad94`,
+but its backend remains default-deny and absent from the URL map. The intended
+public endpoint returned 403, all activation gates remained false, and runtime
+and edge Terraform converged empty. No tenant channel state or provider
+message was created.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

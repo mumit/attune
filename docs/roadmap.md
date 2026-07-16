@@ -70,6 +70,13 @@ codes, Slack OAuth installation, private opaque route resolution, and explicit
 fixed-content tests. Provider ingress and callback consumption remain
 default-off until their separate activation gates pass.
 
+The Google Chat portion now has its database broker boundary, private broker,
+and verified ingress deployed dormant in development. The public provider path
+is still absent from the URL map and returns 403. Platform-owned Chat app
+configuration, adversarial live evidence, route activation, owner-DM linking,
+and fixed-content delivery remain the next gated work; Slack installation is
+still a later independent slice.
+
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does
 not authorize customer data or constitute a hosted launch.

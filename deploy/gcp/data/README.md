@@ -205,6 +205,21 @@ reported 31 tenant tables forced through RLS; the following data plan was
 empty. No setup attempt, link, destination, provider credential, or message
 was created by the migration.
 
+Migration `0022_google_chat_link_broker.sql` adds the one-use Google Chat link
+claim/consume boundary, memberless function owner, broker-only runtime role,
+and pre-effect audit intent. Two initial development executions failed before
+the migration transaction committed: one exposed missing temporary membership
+in the function-owner role and one exposed missing temporary `CREATE` on the
+`attune` schema during ownership transfer. Both rolled back completely. The
+migrator now grants those capabilities only to the migration identity and the
+fixed functions revoke them from runtime callers.
+
+Final development evidence used immutable migrator digest
+`sha256:386ceb843a33de4594c1b438a941bfa8823d500ecf50ef6ceb5079fd9ca2f7aa`.
+Execution `attune-development-database-migrate-tbd9h` applied exactly one
+migration and reported 31 tenant tables forced through RLS. No setup attempt,
+claim, installation, destination, credential, or message was created.
+
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value
 belongs in these migrations, Terraform state, Cloud Run environment variables,

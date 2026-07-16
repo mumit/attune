@@ -22,7 +22,7 @@ _DESTINATION_REF = re.compile(r"^spaces/[A-Za-z0-9_-]{1,180}$")
 
 
 def decode_channel_reference_key(value: bytes) -> bytes:
-    """Decode a canonical 32-byte base64 key with transport whitespace."""
+    """Decode a canonical 32-byte base64 key with surrounding whitespace."""
     if not isinstance(value, bytes):
         raise ValueError("channel reference HMAC secret must be bytes")
     encoded = value.strip()
