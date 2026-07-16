@@ -17,6 +17,7 @@ locals {
     "cloudtasks.googleapis.com",
     "compute.googleapis.com",
     "dns.googleapis.com",
+    "gmail.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
     "identitytoolkit.googleapis.com",

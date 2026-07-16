@@ -143,6 +143,11 @@ Newest first. This log records decisions that constrain current implementation.
 - An ephemeral credential-free worker job proves the two endpoints return
   expected unauthenticated refusals. Adding a provider hostname is a reviewed
   infrastructure and application change, never an operational workaround.
+- Project API activation is a separate required control. The foundation
+  declaratively enables `gmail.googleapis.com` with the fixed Gmail egress
+  route; successful OAuth consent and token refresh do not prove that the API
+  is enabled. Calendar API activation remains deferred to its own capability
+  gate.
 
 ## 2026-07 — Provider credentials stay behind fixed broker operations
 

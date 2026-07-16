@@ -61,6 +61,10 @@ def test_gcp_foundation_preserves_hosted_security_boundaries():
     assert '"oauth2.googleapis.com"' in terraform
     assert '"www.googleapis.com"' in terraform
     assert '"gmail.googleapis.com"' in terraform
+    required_services = terraform.split("services = toset([", 1)[1].split(
+        "])", 1
+    )[0]
+    assert '"gmail.googleapis.com"' in required_services
     assert '"secretmanager.googleapis.com"' in terraform
     assert '"199.36.153.8"' in terraform
     assert "google_compute_router_nat" not in terraform
