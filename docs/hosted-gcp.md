@@ -216,6 +216,14 @@ acceptable substitutes.
 Production is blocked until every launch gate in `security-architecture.md` is
 evidenced. Successfully applying Terraform is not successful onboarding.
 
+The first capability-gateway admission slice now exists but is deliberately
+not deployed. It validates the exact versioned model proposal and resolves
+active policy/grant, risk ceiling, connector ownership, and provider scopes in
+one forced-RLS tenant transaction. It creates no task and performs no provider
+operation. See [`capability-gateway.md`](capability-gateway.md) for the
+remaining per-execution gates required before integration with the exclusive
+dispatch producer.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

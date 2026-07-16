@@ -50,6 +50,15 @@ from attune.hosted.oauth import (
     PostgresOAuthTransactionRepository,
 )
 from attune.hosted.onboarding import PostgresHostedOnboardingRepository
+from attune.hosted.capability_gateway import (
+    CapabilityDefinition,
+    CapabilityDenied,
+    CapabilityRegistry,
+    EmptyArguments,
+    PostgresCapabilityAuthorityRepository,
+    RiskTier,
+    TypedCapabilityGateway,
+)
 from attune.hosted.identity import VerifiedIdentity
 from attune.hosted.identity_session import (
     IdentitySessionSecrets,
@@ -209,7 +218,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 17
+    assert apply_migrations(admin) == 18
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -352,6 +361,125 @@ def _role_connection_factory(database_url: str, role: str):
         return connection
 
     return connect
+
+
+def test_capability_gateway_authority_is_one_tenant_snapshot(
+    initialized_database, database_url
+):
+    scopes = (
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+    )
+    capability = CapabilityDefinition(
+        name="google.workspace.connection.verify",
+        version=1,
+        risk=RiskTier.R0,
+        maximum_product_risk=RiskTier.R0,
+        domain="private_workspace",
+        provider="google",
+        required_scopes=scopes,
+        arguments=EmptyArguments(),
+    )
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            """
+            INSERT INTO attune.policies
+                (tenant_id, version, document, active, created_by)
+            VALUES (%s, 900, '{}'::jsonb, true, %s)
+            """,
+            (TENANT_A, PRINCIPAL_A),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.autonomy_grants
+                (tenant_id, principal_id, capability, domain, maximum_risk,
+                 policy_version, granted_by)
+            VALUES (%s, %s, %s, %s, 0, 900, %s)
+            """,
+            (
+                TENANT_A,
+                PRINCIPAL_A,
+                capability.name,
+                capability.domain,
+                PRINCIPAL_A,
+            ),
+        )
+        cursor.execute(
+            """
+            UPDATE attune.connectors SET granted_scopes = %s
+             WHERE tenant_id = %s AND id = %s
+            """,
+            (list(scopes), TENANT_A, CONNECTOR_A),
+        )
+
+    authority = PostgresCapabilityAuthorityRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_control_plane"])
+    )
+    gateway = TypedCapabilityGateway(
+        registry=CapabilityRegistry((capability,)), authority=authority
+    )
+    proposal = {
+        "version": 1,
+        "capability": capability.name,
+        "arguments": {},
+    }
+    admitted = gateway.authorize(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, proposal=proposal
+    )
+    assert admitted.connector_id == CONNECTOR_A
+    assert admitted.policy_version == 900
+
+    with pytest.raises(CapabilityDenied, match="authority_unavailable"):
+        gateway.authorize(
+            TenantContext(TENANT_B), principal_id=PRINCIPAL_B, proposal=proposal
+        )
+
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "UPDATE attune.policies SET version = 901 "
+            "WHERE tenant_id = %s AND version = 900",
+            (TENANT_A,),
+        )
+    with pytest.raises(CapabilityDenied, match="authority_unavailable"):
+        gateway.authorize(
+            TenantContext(TENANT_A), principal_id=PRINCIPAL_A, proposal=proposal
+        )
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "UPDATE attune.policies SET version = 900 "
+            "WHERE tenant_id = %s AND version = 901",
+            (TENANT_A,),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.connectors
+                (tenant_id, id, principal_id, provider, credential_ref,
+                 granted_scopes, status)
+            VALUES (%s, %s, %s, 'google', %s, %s, 'active')
+            """,
+            (
+                TENANT_A,
+                UUID("10000000-0000-4000-8000-000000000091"),
+                PRINCIPAL_A,
+                UUID("10000000-0000-4000-8000-000000000092"),
+                list(scopes),
+            ),
+        )
+    with pytest.raises(CapabilityDenied, match="authority_unavailable"):
+        gateway.authorize(
+            TenantContext(TENANT_A), principal_id=PRINCIPAL_A, proposal=proposal
+        )
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "UPDATE attune.connectors SET status = 'revoked' "
+            "WHERE tenant_id = %s AND id = %s",
+            (TENANT_A, UUID("10000000-0000-4000-8000-000000000091")),
+        )
+        cursor.execute(
+            "UPDATE attune.connectors SET granted_scopes = ARRAY[]::text[] "
+            "WHERE tenant_id = %s AND id = %s",
+            (TENANT_A, CONNECTOR_A),
+        )
 
 
 def test_missing_tenant_context_is_an_error(initialized_database):
@@ -1593,11 +1721,9 @@ def test_hosted_onboarding_is_tenant_bound_idempotent_and_server_seeded(
     assert first == second
     assert first.schema_version == 1
     assert first.revision == 1
-    assert first.workspace == "not_started"
+    assert first.workspace == "validated"
     assert first.status == "in_progress"
-    assert (
-        repository.read(TenantContext(TENANT_B), principal_id=PRINCIPAL_A) is None
-    )
+    assert repository.read(TenantContext(TENANT_B), principal_id=PRINCIPAL_A) is None
     with pytest.raises(RuntimeError, match="principal"):
         repository.start(context, principal_id=PRINCIPAL_B)
 

@@ -70,7 +70,10 @@ authority and queue delivery, while the
 [audit-writer contract](docs/audit-writer.md) defines the intent-only path to
 hosted hash-chained audit events, and the
 [secret-broker contract](docs/secret-broker.md) defines connector credential
-encryption and use. MCP server
+encryption and use. The
+[capability-gateway contract](docs/capability-gateway.md) defines how untrusted
+model proposals become typed, tenant-bound admission without becoming provider
+requests. MCP server
 implementers should use the [versioned Workspace contract](docs/mcp-contract.md).
 
 ## Development

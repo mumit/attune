@@ -404,6 +404,15 @@ For every execution, the gateway MUST validate:
 - **SEC-405.** System prompts MUST contain no credentials or controls whose
   secrecy is required for authorization.
 
+The first deterministic admission slice is implemented as described in the
+[hosted capability-gateway contract](capability-gateway.md). It accepts only an
+exact, versioned proposal; reconstructs arguments through a trusted schema; and
+atomically resolves active tenant, principal, policy/grant, risk ceiling,
+connector ownership, and scopes under forced RLS. It is not yet wired to a
+model planner or dispatch producer. Rate/cost limits, freshness, idempotency,
+content-free audit, and approval/recent-authentication enforcement remain
+activation gates, so this slice authorizes no provider effect.
+
 ### 8.2 Risk tiers
 
 | Tier | Examples | Maximum default behavior |

@@ -46,8 +46,11 @@ order:
 The first slice of step 5 is live in development: a signed-in owner can start
 and resume a tenant-bound, versioned setup record whose Workspace status is
 derived from canonical connector state. Channels, policy, and activation still
-require fixed server-side ceremonies. The next implementation boundary is
-step 6; this does not skip the remaining work or assurance gates in steps 2–5.
+require fixed server-side ceremonies. Step 6 now has a tested, non-deployed
+admission core for exact proposals, tenant-scoped policy/grant and connector
+resolution, and risk ceilings. Its dispatch integration, execution budgets,
+freshness/idempotency, audit, and approval gates remain; this does not skip the
+remaining work or assurance gates in steps 2–5.
 
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does

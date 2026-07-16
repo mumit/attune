@@ -2,6 +2,24 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Model proposals terminate at a typed capability gateway
+
+- Hosted model output may propose only an exact versioned capability name and
+  schema-bounded arguments. It cannot propose identity, tenant, connector,
+  scopes, provider routing, risk, policy, URLs, raw requests, or approval.
+- Infrastructure-owned registry definitions fix provider scopes, domain, risk
+  tier and ceiling, and trusted argument reconstruction. Unknown, duplicate,
+  malformed, oversized, and extra-field proposals fail closed.
+- Verified tenant/principal, active policy and matching autonomy grant,
+  connector ownership/scopes, and the grant risk ceiling are resolved in one
+  forced-RLS transaction. Missing, stale, cross-tenant, database-failed, or
+  ambiguous authority produces no admission.
+- Admission is immutable canonical input, not execution authority. Dispatch
+  rebinding, budgets, freshness, idempotency, audit, approvals, recent
+  authentication, and provider-specific effect controls remain independent
+  activation gates. This was selected over a generic tool loop, caller-supplied
+  policy context, or treating model JSON as a provider request.
+
 ## 2026-07 — Hosted login is separate from Workspace consent
 
 - Google Identity Platform verifies hosted login through a dedicated identity-
