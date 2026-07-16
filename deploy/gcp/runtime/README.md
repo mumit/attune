@@ -38,6 +38,9 @@ never chooses an intent or connector ID; the edge control plane creates the
 principal-bound one-use intent and sends only its UUID. Successful revocation
 atomically marks the active local credential and connector revoked. It does not
 currently revoke the upstream Google Account grant.
+The development lifecycle exercise on 2026-07-15 recorded a 204 fixed broker
+revoke, two 200 mandatory audit writes, a 204 fresh OAuth exchange, and
+successful fixed Gmail (200) and Calendar (204) verification after reconnect.
 The broker alone can use the connector credential KMS key and its narrow
 database functions. It requires the private audit writer before and after a
 mutation and fails closed on ambiguous results.

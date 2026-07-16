@@ -197,7 +197,11 @@ acceptable substitutes.
    The principal-bound, CSRF-protected Google Workspace disconnect ceremony is
    implemented: it revokes the local credential and connector through a
    one-use private-broker intent while preserving Attune membership. It does
-   not yet claim upstream Google grant revocation. Production signup,
+   not yet claim upstream Google grant revocation. The complete development
+   disconnect/reload/reconnect/reload journey was exercised on 2026-07-15:
+   the private broker returned 204 for the fixed revoke operation, both
+   mandatory audit writes returned 200, the subsequent OAuth exchange returned
+   204, and fresh Gmail/Calendar verification returned 200/204. Production signup,
    invitation/tenant-selection, and broader account-management ceremonies
    remain. Follow the separate [hosted sign-in
    operator ceremony](identity-platform.md); it deliberately uses a different

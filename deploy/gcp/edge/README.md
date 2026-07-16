@@ -64,6 +64,13 @@ URI and audience from runtime remote state; neither value grants access without
 its exact workload identity. Applying the runtime root before the edge is
 therefore also required for disconnection.
 
+Development evidence on 2026-07-15 exercised the authenticated destructive
+confirmation, durable disconnected state after reload, a fresh Google consent
+exchange, and verified connected state after a second reload. Cloud Armor
+priority `883` accepted only the exact disconnect path after global policy
+convergence; an unauthenticated request reached the application and failed with
+401 rather than the policy's default deny.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate
