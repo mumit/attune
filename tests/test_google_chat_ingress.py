@@ -1,6 +1,7 @@
 from attune.hosted.google_chat_ingress import (
     decode_owner_dm_link,
     decode_owner_dm_link_diagnostic,
+    decode_owner_dm_message_diagnostic,
 )
 
 CODE = "A" * 43
@@ -113,3 +114,15 @@ def test_decode_diagnostics_are_bounded_and_content_free():
     assert decoded is None
     assert reason == "command_body"
     assert "not a link command" not in reason
+
+
+def test_decode_owner_dm_message_preserves_untrusted_text_and_redacts_repr():
+    value = event()
+    value["message"]["argumentText"] = "what is on my calendar?"
+    decoded, reason = decode_owner_dm_message_diagnostic(value)
+    assert reason == "accepted"
+    assert decoded is not None
+    assert decoded.text == "what is on my calendar?"
+    assert decoded.actor_ref == "users/123456"
+    assert "calendar" not in repr(decoded)
+    assert "users/123456" not in repr(decoded)

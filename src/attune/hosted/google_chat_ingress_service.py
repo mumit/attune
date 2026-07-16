@@ -6,7 +6,10 @@ import logging
 import time
 from typing import Any, Callable, Mapping, Protocol
 
-from .google_chat_ingress import decode_owner_dm_link_diagnostic
+from .google_chat_ingress import (
+    decode_owner_dm_link_diagnostic,
+    decode_owner_dm_message_diagnostic,
+)
 from .task_envelope import _google_token_verifier, _verify_claims
 
 LOG = logging.getLogger(__name__)
@@ -65,12 +68,27 @@ def create_app(
         if not request.is_json:
             return jsonify({"error": "invalid_request"}), 400
         event = request.get_json(silent=True)
+        message, rejection = decode_owner_dm_message_diagnostic(event)
+        if message is None:
+            LOG.warning(
+                "Google Chat event did not match owner DM (%s)", rejection
+            )
+            return jsonify({"text": "Attune accepts messages only in the verified owner direct message."})
         link, rejection = decode_owner_dm_link_diagnostic(event)
         if link is None:
-            LOG.warning(
-                "Google Chat event did not match owner-DM link (%s)", rejection
+            if message.text.startswith(("/link", " /link")):
+                LOG.warning(
+                    "Google Chat event did not match owner-DM link (%s)", rejection
+                )
+                return jsonify({"text": "Send /link followed by your one-time Attune code in a direct message."})
+            return jsonify(
+                {
+                    "text": (
+                        "Attune conversations are not active in this development environment yet. "
+                        "Your verified Chat connection does not need a new link code."
+                    )
+                }
             )
-            return jsonify({"text": "Send /link followed by your one-time Attune code in a direct message."})
         try:
             linked = broker.link_google_chat_owner_dm(
                 link_code=link.link_code,

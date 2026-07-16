@@ -77,10 +77,13 @@ active behind method/path Cloud Armor filtering and application-level Google
 identity and audience verification. Unauthenticated, invalid-token,
 wrong-method, and wrong-path live probes are denied, and the post-activation
 Terraform plan is empty. Owner-DM linking and one-use replay rejection now
-have live evidence. The fixed-content delivery implementation and encrypted
-route-adoption migration are ready for dormant-first rollout; live delivery
-evidence remains the next gate. Slack installation is still a later
-independent slice.
+have live evidence. Encrypted route adoption and fixed-content delivery are
+also live and verified. The remaining Google Chat interaction gate is a
+replay-safe durable conversation job that resolves only the active tenant
+binding, uses brokered Workspace/model credentials, and sends its response
+through the private channel broker. The public ingress remains link-only until
+that complete path passes its security and live-delivery gates. Slack
+installation is still a later independent slice.
 
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does

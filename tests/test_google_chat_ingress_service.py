@@ -75,6 +75,21 @@ def test_non_link_and_broker_failure_are_content_bounded_and_generic():
         json=invalid,
     )
     assert response.status_code == 200
+    assert response.get_json() == {
+        "text": (
+            "Attune conversations are not active in this development environment yet. "
+            "Your verified Chat connection does not need a new link code."
+        )
+    }
+
+    malformed_link = event()
+    malformed_link["message"]["argumentText"] = "/link bad"
+    response = client(Broker()).post(
+        "/v1/provider/google-chat/events",
+        headers={"Authorization": "Bearer chat"},
+        json=malformed_link,
+    )
+    assert response.status_code == 200
     assert "/link" in response.get_json()["text"]
 
     response = client(Broker(error=RuntimeError("sensitive user and space"))).post(

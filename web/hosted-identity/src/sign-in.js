@@ -370,7 +370,7 @@ function renderChannelInstallations(payload) {
     const setup = googleChat.setup_state || "not_started";
     googleChatInstallationState.textContent =
       destination === "active"
-        ? "Owner-only Google Chat destination verified."
+        ? "Owner-only Google Chat destination verified and active. No new link code is needed."
         : destination === "pending_test"
           ? "Google Chat owner and direct-message destination linked; delivery test remains."
           : destination === "needs_relink"

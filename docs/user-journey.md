@@ -105,6 +105,16 @@ If an older development binding says its encrypted route must be adopted,
 generate a fresh link code and send it in the same owner DM first; Attune will
 adopt only an exact app, owner, and DM match.
 
+An active hosted destination hides link-code generation because linking is
+complete; signing out does not reset tenant channel state. A new code is not a
+conversation switch. The current development hosted ingress has completed
+linking and fixed-content delivery verification, but its durable
+natural-language worker path is not active yet. Until that separate gate is
+enabled, ordinary owner-DM messages receive an explicit unavailable response
+instead of misleading `/link` instructions. The local/standalone interaction
+journey below is already implemented; the hosted path must meet the additional
+tenant, replay, dispatch, model-secret, and outbound-delivery controls first.
+
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed
 connector is verified instead of silently starting a replacement. A temporary
