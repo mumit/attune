@@ -15,7 +15,13 @@ const workspaceButton = document.querySelector("#google-workspace-connect");
 const disconnectButton = document.querySelector("#google-workspace-disconnect");
 const onboarding = document.querySelector("#onboarding-progress");
 const onboardingStart = document.querySelector("#onboarding-start");
+const policyReview = document.querySelector("#policy-review");
+const policyAutomatic = document.querySelector("#policy-automatic");
+const policyExcluded = document.querySelector("#policy-excluded");
+const policyConfirm = document.querySelector("#policy-confirm");
+const sessionSignOut = document.querySelector("#session-sign-out");
 const status = document.querySelector("#status");
+let hostedPolicyAvailable = false;
 
 function show(message, kind = "info") {
   status.textContent = message;
@@ -27,6 +33,7 @@ async function json(response) {
   if (!response.ok) {
     const error = new Error("request refused");
     error.status = response.status;
+    error.code = payload.error;
     throw error;
   }
   return payload;
@@ -242,6 +249,7 @@ function renderOnboarding(state) {
 
 async function showOnboarding(session) {
   if (session.hosted_onboarding !== "available") return;
+  hostedPolicyAvailable = session.hosted_policy === "available";
   const state = await json(
     await fetch("/v1/onboarding", {
       credentials: "same-origin",
@@ -249,7 +257,84 @@ async function showOnboarding(session) {
     }),
   );
   renderOnboarding(state);
+  if (hostedPolicyAvailable && state.status !== "not_started") {
+    await showPolicy();
+  }
 }
+
+function renderItems(target, items) {
+  target.replaceChildren(
+    ...items.map((item) => {
+      const element = document.createElement("li");
+      element.textContent = item;
+      return element;
+    }),
+  );
+}
+
+function renderPolicy(policy) {
+  policyReview.hidden = false;
+  renderItems(policyAutomatic, policy.automatic || []);
+  renderItems(policyExcluded, policy.excluded || []);
+  policyConfirm.hidden = policy.status === "validated";
+  policyConfirm.disabled = false;
+}
+
+async function showPolicy() {
+  const policy = await json(
+    await fetch("/v1/onboarding/policy", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }),
+  );
+  renderPolicy(policy);
+}
+
+policyConfirm.addEventListener("click", async () => {
+  policyConfirm.disabled = true;
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    const result = await json(
+      await fetch("/v1/onboarding/policy/confirm", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "X-Attune-CSRF": csrf },
+      }),
+    );
+    renderPolicy(result.policy);
+    renderOnboarding(result.onboarding);
+    show("Read-only policy enabled. Write capabilities remain unavailable.", "success");
+  } catch (error) {
+    policyConfirm.disabled = false;
+    if (error.code === "recent_authentication_required") {
+      show("Sign out and sign in again before changing assistant policy.", "pending");
+    } else if (error.code === "policy_requires_repair") {
+      show("Policy state changed outside Attune and requires operator repair.", "error");
+    } else {
+      show("Assistant policy could not be enabled. Please try again.", "error");
+    }
+  }
+});
+
+sessionSignOut.addEventListener("click", async () => {
+  sessionSignOut.disabled = true;
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    await json(
+      await fetch("/v1/session", {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "X-Attune-CSRF": csrf },
+      }),
+    );
+    window.location.assign("/");
+  } catch {
+    sessionSignOut.disabled = false;
+    show("Sign out could not be completed. Please try again.", "error");
+  }
+});
 
 onboardingStart.addEventListener("click", async () => {
   onboardingStart.disabled = true;
@@ -264,6 +349,7 @@ onboardingStart.addEventListener("click", async () => {
       }),
     );
     renderOnboarding(state);
+    if (hostedPolicyAvailable) await showPolicy();
     show("Guided setup started. Your progress will be saved.", "success");
   } catch {
     onboardingStart.disabled = false;
@@ -309,6 +395,7 @@ async function main() {
     const result = messages[outcome] || ["Signed in to Attune.", "success"];
     show(result[0], result[1]);
     button.hidden = true;
+    sessionSignOut.hidden = false;
     await showWorkspace(session);
     await showOnboarding(session);
     return;
@@ -326,6 +413,7 @@ async function main() {
       await attempt;
       show("Signed in to Attune.", "success");
       button.hidden = true;
+      sessionSignOut.hidden = false;
       const session = await existingSession();
       if (session) {
         await showWorkspace(session);

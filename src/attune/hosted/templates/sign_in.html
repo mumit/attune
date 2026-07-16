@@ -42,6 +42,23 @@
           Start guided setup
         </button>
       </section>
+      <section id="policy-review" hidden>
+        <h2>Review assistant policy</h2>
+        <p>
+          Private alpha begins at R0: Attune may perform only bounded,
+          read-only verification automatically.
+        </p>
+        <p><strong>Automatic</strong></p>
+        <ul id="policy-automatic"></ul>
+        <p><strong>Not permitted</strong></p>
+        <ul id="policy-excluded"></ul>
+        <button id="policy-confirm" type="button">
+          Enable read-only policy
+        </button>
+      </section>
+      <button id="session-sign-out" class="secondary" type="button" hidden>
+        Sign out
+      </button>
       <p id="status" role="status" aria-live="polite">
         Preparing secure sign-in…
       </p>

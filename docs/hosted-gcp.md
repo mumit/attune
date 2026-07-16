@@ -224,6 +224,15 @@ operation. See [`capability-gateway.md`](capability-gateway.md) for the
 remaining per-execution gates required before integration with the exclusive
 dispatch producer.
 
+The next prerequisite is implemented behind a separate default-off gate: the
+fixed private-alpha R0 policy ceremony. It requires web authentication within
+ten minutes, same-origin CSRF proof, content-free pre-effect audit, and the one
+function-owned database mutation described in
+[`hosted-policy.md`](hosted-policy.md). Migration
+`0019_hosted_read_only_policy.sql` must pass boundary verification before the
+edge paths are exposed. Enabling the UI still does not connect the gateway to a
+model planner, dispatch producer, worker, or provider effect.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

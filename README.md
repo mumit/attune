@@ -73,7 +73,8 @@ hosted hash-chained audit events, and the
 encryption and use. The
 [capability-gateway contract](docs/capability-gateway.md) defines how untrusted
 model proposals become typed, tenant-bound admission without becoming provider
-requests. MCP server
+requests, and the [hosted policy ceremony](docs/hosted-policy.md) defines the
+recent-authenticated fixed R0 owner choice. MCP server
 implementers should use the [versioned Workspace contract](docs/mcp-contract.md).
 
 ## Development

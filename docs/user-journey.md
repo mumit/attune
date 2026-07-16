@@ -46,7 +46,12 @@ The first hosted connection journey is:
 6. Choose **Start guided setup**. Attune creates tenant-bound, resumable setup
    progress and marks Workspace complete from the already verified connector;
    it does not ask for configuration files or infrastructure credentials.
-7. Configure delivery and interaction channels, then activate briefs.
+7. Review the fixed private-alpha policy. It permits only R0 read-only
+   Workspace verification automatically and explicitly excludes sending,
+   calendar changes, deletion, and sharing. Choose **Enable read-only policy**
+   within ten minutes of sign-in; otherwise sign out and sign in again before
+   confirming the authority change.
+8. Configure delivery and interaction channels, then activate briefs.
    Capability upgrades such as Gmail draft
    creation are separate, explicit consent and policy changes.
 
@@ -68,6 +73,12 @@ The guided setup card always shows the next four product steps—Workspace,
 channels, policy, and activation. Closing the browser does not discard progress.
 Only fixed Attune ceremonies can advance a step; neither browser requests nor
 model-generated text can mark setup complete.
+
+Policy confirmation is resumable and idempotent. Attune audits the fixed change
+before creating the grant, derives the owner and tenant from the current
+session, and never accepts a browser-supplied policy or risk tier. An unexpected
+existing policy or grant set is shown as requiring repair instead of being
+overwritten or adopted silently.
 
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed

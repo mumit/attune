@@ -34,6 +34,7 @@ FUNCTION_OWNER_ROLES = (
     "attune_oauth_executor",
     "attune_identity_executor",
     "attune_identity_provisioning_executor",
+    "attune_policy_executor",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -66,6 +67,23 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
         ("attune_identity_provisioning_executor", "attune.tenants", "INSERT"),
         ("attune_identity_provisioning_executor", "attune.principals", "SELECT"),
         ("attune_identity_provisioning_executor", "attune.principals", "INSERT"),
+        ("attune_policy_executor", "attune.tenants", "SELECT"),
+        ("attune_policy_executor", "attune.principals", "SELECT"),
+        ("attune_policy_executor", "attune.identity_sessions", "SELECT"),
+        ("attune_policy_executor", "attune.policies", "SELECT"),
+        ("attune_policy_executor", "attune.policies", "INSERT"),
+        ("attune_policy_executor", "attune.autonomy_grants", "SELECT"),
+        ("attune_policy_executor", "attune.autonomy_grants", "INSERT"),
+        (
+            "attune_policy_executor",
+            "attune.hosted_onboarding_states",
+            "SELECT",
+        ),
+        (
+            "attune_policy_executor",
+            "attune.hosted_onboarding_states",
+            "UPDATE",
+        ),
     }
 )
 
@@ -362,6 +380,7 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 True,
                 False,
             ),
+            "attune_policy_executor": (True, False, True, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
@@ -521,6 +540,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune_identity_executor",
             ),
             (
+                "attune.authorize_recent_identity_session(bytea,bytea)",
+                "attune_control_plane",
+                "attune_identity_executor",
+            ),
+            (
                 "attune.revoke_identity_session(bytea,bytea)",
                 "attune_control_plane",
                 "attune_identity_executor",
@@ -529,6 +553,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune.provision_initial_identity(bytea,text,text,text)",
                 "attune_identity_provisioner",
                 "attune_identity_provisioning_executor",
+            ),
+            (
+                "attune.activate_hosted_read_only_policy(uuid,uuid)",
+                "attune_control_plane",
+                "attune_policy_executor",
             ),
         )
         for signature, role, expected_owner in privileged_functions:

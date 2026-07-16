@@ -2,6 +2,23 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07 — Hosted policy starts with one recent-authenticated R0 profile
+
+- Private alpha exposes a fixed read-only profile rather than a generic policy
+  editor. The browser reviews bounded automatic/excluded behavior and submits
+  no policy, capability, grant, risk, identity, or resource fields.
+- Confirmation requires same-origin CSRF proof and a session created within ten
+  minutes. An eight-hour session remains sufficient for ordinary reads but is
+  not recent authentication for an autonomy change.
+- A content-free allowed audit must be durably written before effect. One
+  memberless function owner atomically creates the exact policy/grant and
+  advances onboarding; the ordinary control-plane role cannot directly mutate
+  policy or grant rows. A separate observed/failed audit completes the attempt.
+- Existing state must match the exact profile and sole grant. Mismatch becomes
+  `externally_modified` and requires repair; Attune neither overwrites nor
+  silently adopts it. This was selected over free-form policy JSON, email-based
+  trust, long-lived session authority, and application-only database controls.
+
 ## 2026-07 — Model proposals terminate at a typed capability gateway
 
 - Hosted model output may propose only an exact versioned capability name and

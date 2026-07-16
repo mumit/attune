@@ -111,6 +111,16 @@ class PostgresIdentitySessionRepository:
         )
         return _session(row)
 
+    def authorize_recent(self, token: str, csrf: str) -> IdentitySession | None:
+        """Authorize a mutation only within ten minutes of web sign-in."""
+
+        row = self._call_one(
+            "SELECT session_id, tenant_id, principal_id "
+            "FROM attune.authorize_recent_identity_session(%s, %s)",
+            (session_secret_hash(token), session_secret_hash(csrf)),
+        )
+        return _session(row)
+
     def revoke(self, token: str, csrf: str) -> bool:
         row = self._call_one(
             "SELECT attune.revoke_identity_session(%s, %s)",

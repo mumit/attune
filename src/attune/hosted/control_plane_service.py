@@ -53,6 +53,8 @@ class SessionRepository(Protocol):
 
     def authorize(self, token: str, csrf: str) -> IdentitySession | None: ...
 
+    def authorize_recent(self, token: str, csrf: str) -> IdentitySession | None: ...
+
     def revoke(self, token: str, csrf: str) -> bool: ...
 
 
@@ -78,6 +80,10 @@ class HostedOnboarding(Protocol):
     def start(self, context, *, principal_id): ...
 
 
+class HostedPolicy(Protocol):
+    def activate_read_only(self, context, *, principal_id, session_id): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -95,6 +101,8 @@ def create_app(
     google_connector_revocations: GoogleConnectorRevoker | None = None,
     hosted_onboarding_enabled: bool = False,
     hosted_onboarding: HostedOnboarding | None = None,
+    hosted_policy_enabled: bool = False,
+    hosted_policy: HostedPolicy | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -142,6 +150,10 @@ def create_app(
     if hosted_onboarding_enabled and (not identity_enabled or hosted_onboarding is None):
         raise ValueError(
             "enabled hosted onboarding requires identity and a tenant-bound repository"
+        )
+    if hosted_policy_enabled and (not hosted_onboarding_enabled or hosted_policy is None):
+        raise ValueError(
+            "enabled hosted policy requires hosted onboarding and an audited policy service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -301,6 +313,9 @@ def create_app(
                     "hosted_onboarding": (
                         "available" if hosted_onboarding_enabled else "not_configured"
                     ),
+                    "hosted_policy": (
+                        "available" if hosted_policy_enabled else "not_configured"
+                    ),
                 }
             )
 
@@ -376,7 +391,9 @@ def create_app(
             if request.content_length not in {None, 0}:
                 return jsonify({"error": "invalid_request"}), 400
             authorized = _authorize_mutation(
-                request, expected_origin, sessions  # type: ignore[arg-type]
+                request,
+                expected_origin,
+                sessions,  # type: ignore[arg-type]
             )
             if authorized is None:
                 return jsonify({"error": "invalid_session"}), 401
@@ -398,12 +415,12 @@ def create_app(
             if not request.is_json:
                 return jsonify({"error": "invalid_request"}), 400
             payload = request.get_json(silent=True)
-            if not isinstance(payload, dict) or payload != {
-                "confirmation": "disconnect"
-            }:
+            if not isinstance(payload, dict) or payload != {"confirmation": "disconnect"}:
                 return jsonify({"error": "invalid_request"}), 400
             authorized = _authorize_mutation(
-                request, expected_origin, sessions  # type: ignore[arg-type]
+                request,
+                expected_origin,
+                sessions,  # type: ignore[arg-type]
             )
             if authorized is None:
                 return jsonify({"error": "invalid_session"}), 401
@@ -488,7 +505,9 @@ def create_app(
             if request.content_length not in {None, 0}:
                 return jsonify({"error": "invalid_request"}), 400
             session = _authorize_mutation(
-                request, expected_origin, sessions  # type: ignore[arg-type]
+                request,
+                expected_origin,
+                sessions,  # type: ignore[arg-type]
             )
             if session is None:
                 return jsonify({"error": "invalid_session"}), 401
@@ -499,6 +518,62 @@ def create_app(
             except Exception:
                 return jsonify({"error": "onboarding_unavailable"}), 503
             return jsonify(_public_onboarding(state)), 201
+
+        if hosted_policy_enabled:
+
+            @app.get("/v1/onboarding/policy")
+            def read_hosted_policy():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    state = hosted_onboarding.read(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except Exception:
+                    return jsonify({"error": "policy_unavailable"}), 503
+                if state is None:
+                    return jsonify({"error": "onboarding_not_started"}), 409
+                return jsonify(_public_policy(state.policy))
+
+            @app.post("/v1/onboarding/policy/confirm")
+            def confirm_hosted_policy():
+                if request.content_length not in {None, 0}:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify({"error": "recent_authentication_required"}), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    result = hosted_policy.activate_read_only(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                    )
+                    state = hosted_onboarding.read(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except Exception:
+                    return jsonify({"error": "policy_unavailable"}), 503
+                if result.status != "validated" or state is None:
+                    return jsonify({"error": "policy_requires_repair"}), 409
+                return jsonify(
+                    {
+                        "policy": _public_policy(result.status),
+                        "onboarding": _public_onboarding(state),
+                    }
+                )
 
     @app.errorhandler(400)
     def bad_request(_error):
@@ -522,7 +597,13 @@ def _same_origin_request(request, expected_origin: str) -> bool:
     )
 
 
-def _authorize_mutation(request, expected_origin: str, sessions: SessionRepository):
+def _authorize_mutation(
+    request,
+    expected_origin: str,
+    sessions: SessionRepository,
+    *,
+    recent: bool = False,
+):
     if not _same_origin_request(request, expected_origin):
         return None
     token = request.cookies.get(SESSION_COOKIE, "")
@@ -530,7 +611,12 @@ def _authorize_mutation(request, expected_origin: str, sessions: SessionReposito
     csrf_header = request.headers.get("X-Attune-CSRF", "")
     if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_header):
         return None
-    return sessions.authorize(token, csrf_cookie)
+    try:
+        if recent:
+            return sessions.authorize_recent(token, csrf_cookie)
+        return sessions.authorize(token, csrf_cookie)
+    except Exception:
+        return None
 
 
 def _read_session(request, sessions: SessionRepository):
@@ -553,4 +639,19 @@ def _public_onboarding(state):
             "policy": state.policy,
             "activation": state.activation,
         },
+    }
+
+
+def _public_policy(status: str) -> dict:
+    return {
+        "schema_version": 1,
+        "profile": "private_alpha_read_only",
+        "status": status,
+        "maximum_risk": "R0",
+        "automatic": ["Verify the read-only Gmail and Calendar connection"],
+        "excluded": [
+            "Send messages or email",
+            "Change calendar events",
+            "Delete or share provider data",
+        ],
     }

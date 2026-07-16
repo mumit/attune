@@ -76,6 +76,10 @@ ceremonies implement those controls. R4 remains a dedicated non-model
 administrative workflow. Registering a definition is necessary but never
 sufficient to activate a write.
 
+The fixed R0 owner-review and activation prerequisite is defined in
+[`hosted-policy.md`](hosted-policy.md). Its one exact grant still cannot execute
+anything while the gateway-to-dispatch path remains disconnected.
+
 ## Evidence
 
 Unit tests reject malformed, oversized, unknown, wrong-version, extra-field,

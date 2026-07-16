@@ -9,6 +9,7 @@ identity_provider_ready = false
 identity_api_key         = ""
 enable_google_workspace_oauth = false
 enable_hosted_onboarding       = false
+enable_hosted_policy           = false
 google_oauth_provider_ready    = false
 google_oauth_client_id         = ""
 

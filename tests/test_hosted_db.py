@@ -50,6 +50,7 @@ from attune.hosted.oauth import (
     PostgresOAuthTransactionRepository,
 )
 from attune.hosted.onboarding import PostgresHostedOnboardingRepository
+from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
 from attune.hosted.capability_gateway import (
     CapabilityDefinition,
     CapabilityDenied,
@@ -85,6 +86,9 @@ RATE_CONNECTOR = UUID("10000000-0000-4000-8000-000000000061")
 RATE_CREDENTIAL = UUID("10000000-0000-4000-8000-000000000062")
 IDENTITY_PRINCIPAL_A = UUID("10000000-0000-4000-8000-000000000071")
 IDENTITY_PRINCIPAL_B = UUID("20000000-0000-4000-8000-000000000072")
+POLICY_TENANT = UUID("30000000-0000-4000-8000-000000000081")
+POLICY_PRINCIPAL = UUID("30000000-0000-4000-8000-000000000082")
+POLICY_SESSION = UUID("30000000-0000-4000-8000-000000000083")
 
 ROLE_BINDINGS = {
     "attune_control_plane": "attune_test_control",
@@ -103,7 +107,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0018_hosted_onboarding.sql"
+    assert migrations[-1].name == "0019_hosted_read_only_policy.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -218,7 +222,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 18
+    assert apply_migrations(admin) == 19
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -492,6 +496,137 @@ def test_missing_tenant_context_is_an_error(initialized_database):
         initialized_database.rollback()
     finally:
         _reset_role(initialized_database)
+
+
+def test_read_only_policy_activation_is_exact_recent_and_function_only(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) VALUES (%s,%s,%s)",
+            (POLICY_TENANT, "policy-tenant", "test"),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals
+                (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test')
+            """,
+            (POLICY_TENANT, POLICY_PRINCIPAL, hashlib.sha256(b"policy").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.identity_sessions
+                (tenant_id, id, principal_id, token_hash, csrf_hash, expires_at)
+            VALUES (%s, %s, %s, %s, %s,
+                    clock_timestamp() + interval '8 hours')
+            """,
+            (
+                POLICY_TENANT,
+                POLICY_SESSION,
+                POLICY_PRINCIPAL,
+                hashlib.sha256(b"policy-token").digest(),
+                hashlib.sha256(b"policy-csrf").digest(),
+            ),
+        )
+    initialized_database.commit()
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    onboarding = PostgresHostedOnboardingRepository(control_factory)
+    policies = PostgresHostedPolicyRepository(control_factory)
+    context = TenantContext(POLICY_TENANT)
+    assert onboarding.start(context, principal_id=POLICY_PRINCIPAL).policy == (
+        "not_started"
+    )
+
+    first = policies.activate_read_only(
+        context, principal_id=POLICY_PRINCIPAL, session_id=POLICY_SESSION
+    )
+    repeated = policies.activate_read_only(
+        context, principal_id=POLICY_PRINCIPAL, session_id=POLICY_SESSION
+    )
+    assert first == repeated
+    assert (first.policy_version, first.onboarding_revision, first.status) == (
+        1,
+        2,
+        "validated",
+    )
+    assert onboarding.read(context, principal_id=POLICY_PRINCIPAL).policy == "validated"
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "SELECT document FROM attune.policies WHERE tenant_id = %s AND active",
+            (POLICY_TENANT,),
+        )
+        assert cursor.fetchone()[0] == {
+            "schema_version": 1,
+            "profile": "private_alpha_read_only",
+            "maximum_risk": 0,
+            "capabilities": ["google.workspace.connection.verify"],
+        }
+        cursor.execute(
+            """
+            SELECT capability, domain, maximum_risk, policy_version, granted_by
+              FROM attune.autonomy_grants
+             WHERE tenant_id = %s AND revoked_at IS NULL
+            """,
+            (POLICY_TENANT,),
+        )
+        assert cursor.fetchall() == [
+            (
+                "google.workspace.connection.verify",
+                "private_workspace",
+                0,
+                1,
+                POLICY_PRINCIPAL,
+            )
+        ]
+
+    control = control_factory()
+    try:
+        with control.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "INSERT INTO attune.policies "
+                    "(tenant_id,version,document,active,created_by) "
+                    "VALUES (%s,2,'{}',false,%s)",
+                    (POLICY_TENANT, POLICY_PRINCIPAL),
+                )
+        control.rollback()
+    finally:
+        control.close()
+
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "UPDATE attune.policies SET document = '{\"tampered\":true}'::jsonb "
+            "WHERE tenant_id = %s AND active",
+            (POLICY_TENANT,),
+        )
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions "
+            "SET created_at = clock_timestamp() - interval '11 minutes' "
+            "WHERE tenant_id = %s AND id = %s",
+            (POLICY_TENANT, POLICY_SESSION),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        policies.activate_read_only(
+            context, principal_id=POLICY_PRINCIPAL, session_id=POLICY_SESSION
+        )
+    with tenant_transaction(initialized_database, context) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions SET created_at = clock_timestamp() "
+            "WHERE tenant_id = %s AND id = %s",
+            (POLICY_TENANT, POLICY_SESSION),
+        )
+    changed = policies.activate_read_only(
+        context, principal_id=POLICY_PRINCIPAL, session_id=POLICY_SESSION
+    )
+    assert (changed.onboarding_revision, changed.status) == (
+        3,
+        "externally_modified",
+    )
 
 
 def test_rls_hides_other_tenant_rows_and_vectors(initialized_database):
@@ -995,19 +1130,32 @@ def test_conversation_sequences_are_atomic_and_tenant_scoped(
 def test_autonomy_and_lifecycle_objects_fail_closed_across_tenants(
     initialized_database, database_url
 ):
+    psycopg = pytest.importorskip("psycopg")
     control_factory = _role_connection_factory(
         database_url, ROLE_BINDINGS["attune_control_plane"]
     )
     autonomy = PostgresAutonomyRepository(control_factory)
     lifecycle = PostgresLifecycleRepository(control_factory)
-    grant = autonomy.grant(
-        TenantContext(TENANT_A),
-        principal_id=PRINCIPAL_A,
-        capability="gmail.read",
-        domain="private",
-        maximum_risk=0,
-        policy_version=1,
-        granted_by=PRINCIPAL_A,
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            """
+            INSERT INTO attune.autonomy_grants
+                (tenant_id, principal_id, capability, domain, maximum_risk,
+                 policy_version, granted_by)
+            VALUES (%s, %s, 'gmail.read', 'private', 0, 1, %s)
+            RETURNING id
+            """,
+            (TENANT_A, PRINCIPAL_A, PRINCIPAL_A),
+        )
+        grant_id = cursor.fetchone()[0]
+    assert (
+        autonomy.find_active(
+            TenantContext(TENANT_A),
+            principal_id=PRINCIPAL_A,
+            capability="gmail.read",
+            domain="private",
+        )
+        is not None
     )
     assert (
         autonomy.find_active(
@@ -1018,8 +1166,18 @@ def test_autonomy_and_lifecycle_objects_fail_closed_across_tenants(
         )
         is None
     )
-    assert autonomy.revoke(TenantContext(TENANT_B), grant.id) is None
-    assert autonomy.revoke(TenantContext(TENANT_A), grant.id) is not None
+    control = control_factory()
+    try:
+        with control.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "UPDATE attune.autonomy_grants SET revoked_at = clock_timestamp() "
+                    "WHERE tenant_id = %s AND id = %s",
+                    (TENANT_A, grant_id),
+                )
+        control.rollback()
+    finally:
+        control.close()
 
     export = lifecycle.request_export(
         TenantContext(TENANT_A),
@@ -1766,6 +1924,24 @@ def test_identity_session_is_unambiguous_csrf_bound_and_function_only(
     assert sessions.read(secrets.token) == opened
     assert sessions.authorize(secrets.token, "w" * 43) is None
     assert sessions.authorize(secrets.token, secrets.csrf) == opened
+    assert sessions.authorize_recent(secrets.token, secrets.csrf) == opened
+    stale_secrets = IdentitySessionSecrets(token="u" * 43, csrf="v" * 43)
+    stale = sessions.open(
+        identity,
+        stale_secrets,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
+    )
+    assert stale is not None
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions "
+            "SET created_at = clock_timestamp() - interval '11 minutes' "
+            "WHERE tenant_id = %s AND id = %s",
+            (TENANT_A, stale.id),
+        )
+    assert sessions.authorize(stale_secrets.token, stale_secrets.csrf) == stale
+    assert sessions.authorize_recent(stale_secrets.token, stale_secrets.csrf) is None
+    assert sessions.revoke(stale_secrets.token, stale_secrets.csrf) is True
     assert sessions.revoke(secrets.token, "w" * 43) is False
     assert sessions.revoke(secrets.token, secrets.csrf) is True
     assert sessions.read(secrets.token) is None

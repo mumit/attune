@@ -24,13 +24,14 @@ JOB_ID = UUID("40000000-0000-4000-8000-000000000001")
 
 
 class Sessions:
-    def __init__(self, opened=True):
+    def __init__(self, opened=True, recent=True):
         self.session = (
             IdentitySession(SESSION_ID, TenantContext(TENANT_ID), PRINCIPAL_ID)
             if opened
             else None
         )
         self.calls = []
+        self.recent = recent
 
     def open(self, identity, session_secrets, *, expires_at):
         self.calls.append(("open", identity, session_secrets, expires_at))
@@ -43,6 +44,10 @@ class Sessions:
     def authorize(self, token, csrf):
         self.calls.append(("authorize", token, csrf))
         return self.session
+
+    def authorize_recent(self, token, csrf):
+        self.calls.append(("authorize_recent", token, csrf))
+        return self.session if self.recent else None
 
     def revoke(self, token, csrf):
         self.calls.append(("revoke", token, csrf))
@@ -124,6 +129,21 @@ class OnboardingState:
     channels = "not_started"
     policy = "not_started"
     activation = "not_started"
+
+
+class Policies:
+    def __init__(self, onboarding, status="validated", failure=None):
+        self.onboarding = onboarding
+        self.status = status
+        self.failure = failure
+        self.calls = []
+
+    def activate_read_only(self, context, *, principal_id, session_id):
+        self.calls.append((context, principal_id, session_id))
+        if self.failure:
+            raise self.failure
+        self.onboarding.state.policy = self.status
+        return type("Activation", (), {"status": self.status})()
 
 
 def verified(_token, project_id):
@@ -492,8 +512,9 @@ def test_google_disconnect_is_explicit_session_csrf_and_principal_bound():
     csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
     headers = {**same_origin(), "X-Attune-CSRF": csrf}
     assert (
-        client.delete(url, json={}, headers=headers, base_url=f"https://{HOST}")
-        .status_code
+        client.delete(
+            url, json={}, headers=headers, base_url=f"https://{HOST}"
+        ).status_code
         == 400
     )
     assert (
@@ -606,3 +627,87 @@ def test_hosted_onboarding_configuration_and_failure_are_closed():
     assert response.status_code == 503
     assert response.get_json() == {"error": "onboarding_unavailable"}
     assert b"private state" not in response.data
+
+
+def test_hosted_policy_is_reviewable_recent_auth_bound_and_fixed():
+    onboarding = Onboarding(OnboardingState())
+    policies = Policies(onboarding)
+    client, _sessions = signed_in_client(
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_policy_enabled=True,
+        hosted_policy=policies,
+    )
+    review = client.get("/v1/onboarding/policy", base_url=f"https://{HOST}")
+    assert review.status_code == 200
+    assert review.get_json() == {
+        "schema_version": 1,
+        "profile": "private_alpha_read_only",
+        "status": "not_started",
+        "maximum_risk": "R0",
+        "automatic": ["Verify the read-only Gmail and Calendar connection"],
+        "excluded": [
+            "Send messages or email",
+            "Change calendar events",
+            "Delete or share provider data",
+        ],
+    }
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    assert (
+        client.post(
+            "/v1/onboarding/policy/confirm",
+            headers={**same_origin(), "X-Attune-CSRF": csrf},
+            data=b"not-empty",
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 400
+    )
+    confirmed = client.post(
+        "/v1/onboarding/policy/confirm",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["policy"]["status"] == "validated"
+    assert confirmed.get_json()["onboarding"]["steps"]["policy"] == "validated"
+    assert policies.calls == [(TenantContext(TENANT_ID), PRINCIPAL_ID, SESSION_ID)]
+
+
+def test_hosted_policy_requires_recent_auth_and_audited_service():
+    with pytest.raises(ValueError, match="policy"):
+        identity_client(hosted_policy_enabled=True)
+
+    onboarding = Onboarding(OnboardingState())
+    stale_sessions = Sessions(recent=False)
+    client, _sessions = signed_in_client(
+        sessions=stale_sessions,
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_policy_enabled=True,
+        hosted_policy=Policies(onboarding),
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    stale = client.post(
+        "/v1/onboarding/policy/confirm",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert stale.status_code == 409
+    assert stale.get_json() == {"error": "recent_authentication_required"}
+
+    failed_policies = Policies(onboarding, failure=RuntimeError("private audit"))
+    failed, _sessions = signed_in_client(
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_policy_enabled=True,
+        hosted_policy=failed_policies,
+    )
+    csrf = failed.get_cookie("__Host-attune_csrf", domain=HOST).value
+    response = failed.post(
+        "/v1/onboarding/policy/confirm",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "policy_unavailable"}
+    assert b"private audit" not in response.data

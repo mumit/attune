@@ -112,12 +112,14 @@ def test_repository_authorize_and_revoke_require_both_secrets():
     connection = Connection((SESSION_ID, TENANT_ID, PRINCIPAL_ID))
     repository = PostgresIdentitySessionRepository(lambda: connection)
     assert repository.authorize("a" * 43, "b" * 43).id == SESSION_ID
+    assert repository.authorize_recent("a" * 43, "b" * 43).id == SESSION_ID
     statement, parameters = connection.cursor_value.calls[0]
     assert "authorize_identity_session" in statement
     assert parameters == (
         session_secret_hash("a" * 43),
         session_secret_hash("b" * 43),
     )
+    assert "authorize_recent_identity_session" in connection.cursor_value.calls[1][0]
 
     revoked_connection = Connection((True,))
     revoked = PostgresIdentitySessionRepository(lambda: revoked_connection)

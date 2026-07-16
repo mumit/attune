@@ -158,6 +158,16 @@ data plan was empty. This ordering is mandatory for rebuilds and new
 environments: deploy and execute the immutable migrator, require successful
 boundary verification, and only then enable hosted onboarding at the edge.
 
+The fixed read-only policy ceremony adds migration
+`0019_hosted_read_only_policy.sql`. It creates the recent-session authorization
+function and memberless policy function owner, revokes direct policy/grant
+mutation from the ordinary control-plane role, and exposes one exact idempotent
+R0 activation function. New environments must run and verify this migration
+before setting the edge root's `enable_hosted_policy` gate. The disposable
+PostgreSQL suite covers cross-tenant refusal, direct-mutation denial, exact
+document/grant creation, idempotency, recent-auth expiry, and external-change
+detection.
+
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value
 belongs in these migrations, Terraform state, Cloud Run environment variables,

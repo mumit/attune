@@ -7,6 +7,8 @@ import os
 from .cloud_sql import iam_connection
 from .control_plane_service import create_app
 from .dispatch import PostgresDispatchProducerRepository
+from .audit import PostgresAuditProducerRepository
+from .audit_client import AuditWriterClient
 from .dispatch_broker_client import DispatchBrokerClient
 from .google_connection_test import GoogleWorkspaceConnectionTest
 from .google_connector_revocation import GoogleConnectorRevocation
@@ -16,6 +18,8 @@ from .oauth import (
     PostgresGoogleOAuthStartRepository,
 )
 from .onboarding import PostgresHostedOnboardingRepository
+from .hosted_policy import PostgresHostedPolicyRepository
+from .hosted_policy_service import HostedPolicyService
 from .repositories import PostgresJobRepository
 from .secret_broker_mutation_client import SecretBrokerMutationClient
 
@@ -29,18 +33,20 @@ def create_production_app():
     if oauth_enabled_value not in {"true", "false"}:
         raise ValueError("ATTUNE_GOOGLE_OAUTH_ENABLED must be true or false")
     oauth_enabled = oauth_enabled_value == "true"
-    test_enabled_value = os.environ.get(
-        "ATTUNE_GOOGLE_CONNECTION_TEST_ENABLED", "false"
-    )
+    test_enabled_value = os.environ.get("ATTUNE_GOOGLE_CONNECTION_TEST_ENABLED", "false")
     if test_enabled_value not in {"true", "false"}:
         raise ValueError("ATTUNE_GOOGLE_CONNECTION_TEST_ENABLED must be true or false")
     test_enabled = test_enabled_value == "true"
-    onboarding_enabled_value = os.environ.get(
-        "ATTUNE_HOSTED_ONBOARDING_ENABLED", "false"
-    )
+    onboarding_enabled_value = os.environ.get("ATTUNE_HOSTED_ONBOARDING_ENABLED", "false")
     if onboarding_enabled_value not in {"true", "false"}:
         raise ValueError("ATTUNE_HOSTED_ONBOARDING_ENABLED must be true or false")
     onboarding_enabled = onboarding_enabled_value == "true"
+    policy_enabled_value = os.environ.get("ATTUNE_HOSTED_POLICY_ENABLED", "false")
+    if policy_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_HOSTED_POLICY_ENABLED must be true or false")
+    policy_enabled = policy_enabled_value == "true"
+    if policy_enabled and not onboarding_enabled:
+        raise ValueError("hosted policy requires hosted onboarding")
     if onboarding_enabled and not identity_enabled:
         raise ValueError("hosted onboarding requires identity")
     if test_enabled and not oauth_enabled:
@@ -100,6 +106,18 @@ def create_production_app():
         hosted_onboarding=(
             PostgresHostedOnboardingRepository(iam_connection)
             if onboarding_enabled
+            else None
+        ),
+        hosted_policy_enabled=policy_enabled,
+        hosted_policy=(
+            HostedPolicyService(
+                PostgresHostedPolicyRepository(iam_connection),
+                PostgresAuditProducerRepository(
+                    iam_connection, producer_kind="control_plane"
+                ),
+                AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
+            )
+            if policy_enabled
             else None
         ),
     )

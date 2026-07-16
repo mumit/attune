@@ -85,6 +85,15 @@ returned 200, the CSRF-protected empty-body start returned 201, and a reload
 recovered the persisted state with the already verified Workspace step derived
 as `validated`. The post-apply edge plan was empty.
 
+Hosted policy review has an independent default-off `enable_hosted_policy`
+gate. It requires hosted onboarding, injects only the private audit-writer URL,
+and adds Cloud Armor priority `885` for exact GET
+`/v1/onboarding/policy` and POST `/v1/onboarding/policy/confirm`. The
+application remains authoritative for method, session, same-origin, CSRF, empty
+body, and ten-minute recent-authentication checks. Apply and verify migration
+`0019_hosted_read_only_policy.sql` before enabling this gate; do not infer
+activation from a successful Terraform apply.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate

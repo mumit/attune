@@ -90,6 +90,17 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "ATTUNE_HOSTED_ONBOARDING_ENABLED"
         value = tostring(var.enable_hosted_onboarding)
       }
+      env {
+        name  = "ATTUNE_HOSTED_POLICY_ENABLED"
+        value = tostring(var.enable_hosted_policy)
+      }
+      dynamic "env" {
+        for_each = var.enable_hosted_policy ? [1] : []
+        content {
+          name  = "ATTUNE_AUDIT_WRITER_URL"
+          value = local.runtime.audit_writer.uri
+        }
+      }
       dynamic "env" {
         for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
         content {
@@ -221,6 +232,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
     precondition {
       condition     = !var.enable_hosted_onboarding || var.enable_identity_sign_in
       error_message = "Hosted onboarding requires active identity sign-in."
+    }
+    precondition {
+      condition     = !var.enable_hosted_policy || var.enable_hosted_onboarding
+      error_message = "Hosted policy review requires active hosted onboarding."
     }
   }
 }
@@ -432,6 +447,29 @@ resource "google_compute_security_policy" "edge" {
         enforce_on_key = "IP"
         rate_limit_threshold {
           count        = 30
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_policy ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 885
+      description = "Permit only authenticated hosted policy review and confirmation"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/onboarding/policy' || request.path == '/v1/onboarding/policy/confirm')"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 10
           interval_sec = 60
         }
       }

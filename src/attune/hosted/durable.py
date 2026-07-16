@@ -384,49 +384,10 @@ class PostgresConversationRepository:
 
 
 class PostgresAutonomyRepository:
+    """Read active grants; mutations exist only as fixed reviewed ceremonies."""
+
     def __init__(self, connection_factory: ConnectionFactory):
         self._connect = connection_factory
-
-    def grant(
-        self,
-        context: TenantContext,
-        *,
-        principal_id: UUID,
-        capability: str,
-        domain: str,
-        maximum_risk: int,
-        policy_version: int,
-        granted_by: UUID,
-    ) -> HostedAutonomyGrant:
-        _bounded_text("capability", capability, 120)
-        _bounded_text("domain", domain, 80)
-        if not 0 <= maximum_risk <= 4:
-            raise ValueError("maximum_risk must be between 0 and 4")
-        if policy_version < 1:
-            raise ValueError("policy_version must be positive")
-        with closing(self._connect()) as connection:
-            with tenant_transaction(connection, context) as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO attune.autonomy_grants
-                        (tenant_id, principal_id, capability, domain,
-                         maximum_risk, policy_version, granted_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id, principal_id, capability, domain,
-                              maximum_risk, policy_version, granted_by,
-                              revoked_at
-                    """,
-                    (
-                        context.tenant_id,
-                        principal_id,
-                        capability,
-                        domain,
-                        maximum_risk,
-                        policy_version,
-                        granted_by,
-                    ),
-                )
-                return HostedAutonomyGrant(*cursor.fetchone())
 
     def find_active(
         self,
@@ -450,25 +411,6 @@ class PostgresAutonomyRepository:
                        AND revoked_at IS NULL
                     """,
                     (context.tenant_id, principal_id, capability, domain),
-                )
-                row = cursor.fetchone()
-                return HostedAutonomyGrant(*row) if row is not None else None
-
-    def revoke(
-        self, context: TenantContext, grant_id: UUID
-    ) -> HostedAutonomyGrant | None:
-        with closing(self._connect()) as connection:
-            with tenant_transaction(connection, context) as cursor:
-                cursor.execute(
-                    """
-                    UPDATE attune.autonomy_grants
-                       SET revoked_at = clock_timestamp()
-                     WHERE tenant_id = %s AND id = %s AND revoked_at IS NULL
-                    RETURNING id, principal_id, capability, domain,
-                              maximum_risk, policy_version, granted_by,
-                              revoked_at
-                    """,
-                    (context.tenant_id, grant_id),
                 )
                 row = cursor.fetchone()
                 return HostedAutonomyGrant(*row) if row is not None else None

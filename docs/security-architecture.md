@@ -267,6 +267,16 @@ authenticated, and audited.
   events. The product MUST distinguish local Attune disconnection from upstream
   provider-grant revocation and MUST NOT let provider unavailability delay
   immediate local withdrawal.
+- **SEC-118.** Hosted policy and autonomy changes MUST require a same-origin,
+  CSRF-authorized application session authenticated within the previous ten
+  minutes. The browser MUST review a fixed, versioned profile and MUST NOT
+  submit identity, policy documents, risk tiers, capabilities, grants, or
+  resource references. A memberless function owner MUST apply the exact policy
+  and grants atomically under tenant context only after content-free pre-effect
+  audit is durable. Direct policy/grant mutation by the ordinary control-plane
+  role, missing or ambiguous state, audit outage, stale authentication, and
+  external modification MUST fail closed. See the [hosted policy
+  ceremony](hosted-policy.md).
 
 ### 5.2 Authorization model
 
@@ -412,6 +422,11 @@ connector ownership, and scopes under forced RLS. It is not yet wired to a
 model planner or dispatch producer. Rate/cost limits, freshness, idempotency,
 content-free audit, and approval/recent-authentication enforcement remain
 activation gates, so this slice authorizes no provider effect.
+
+The first fixed R0 profile and recent-authenticated activation boundary are
+implemented separately in [`hosted-policy.md`](hosted-policy.md). Policy
+activation remains dormant until migration, audit, UI, and live owner evidence
+are complete, and gateway-to-dispatch integration remains disabled.
 
 ### 8.2 Risk tiers
 
