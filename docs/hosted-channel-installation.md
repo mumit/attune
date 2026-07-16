@@ -276,6 +276,13 @@ bounded evidence is consistent with Google retaining the single separator
 after stripping the Chat-app mention. The parser now accepts only that one
 provider-shaped prefix in `argumentText`, while still rejecting tabs, multiple
 or trailing spaces, suffixes, and a prefixed fallback `message.text`.
+Revision `attune-development-google-chat-ingress-00005-64b`, pinned to
+`sha256:2614674ffb1d8827441365e0a977b90cb69538ef2e78a5cd3af940259544776d`,
+deployed this rule as the sole in-place resource change. All 909 tests passed;
+health remained 200, four unauthenticated or malformed edge probes remained
+403, and Terraform converged empty. The fixed outbound test had delivered
+`Attune connection test succeeded. No workspace data was accessed.` and
+activated the destination, completing the development delivery gate.
 
 Migration 0023 implements that next gate without a general message-send
 surface. A recent-authenticated, CSRF-bound browser request contains no body.

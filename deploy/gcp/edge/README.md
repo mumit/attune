@@ -260,6 +260,15 @@ ASCII separator that mention removal can retain; no general whitespace
 trimming occurs. The service emits only one of four bounded rejection
 categories, never event content or identifiers.
 
+The route-adoption ceremony later observed one provider-authenticated
+`command_body` rejection followed by success on an identical retry. Revision
+`attune-development-google-chat-ingress-00005-64b`, pinned to
+`sha256:2614674ffb1d8827441365e0a977b90cb69538ef2e78a5cd3af940259544776d`,
+accepts only the one separator-shaped variation above. Its saved plan updated
+only the ingress image in place. Health remained 200; unauthenticated POST,
+invalid bearer, exact-path GET, and near-miss POST remained 403; and the final
+Terraform plan was empty.
+
 The third live attempt exposed a fixture error in the space schema: the
 canonical REST field is `spaceType`, not `type`, and nested `message.space`
 does not guarantee the duplicated type. Revision `00004-2rf` requires the
