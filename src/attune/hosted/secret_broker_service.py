@@ -165,6 +165,26 @@ def create_app(
             return jsonify(result.body), 200
         return ("", result.status_code)
 
+    @app.post("/v1/providers/google/calendar/primary")
+    def google_calendar_primary():
+        if not authorize(expected_worker):
+            return jsonify({"error": "forbidden"}), 403
+        body = body_for({"intent_id"})
+        parsed = intent_id(body) if body is not None else None
+        if parsed is None:
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            result = broker.google_calendar_primary(parsed)
+        except Exception as error:
+            LOG.warning("credential use failed (%s)", type(error).__name__)
+            return jsonify({"error": "broker_unavailable"}), 503
+        if result.status_code != 204:
+            LOG.warning(
+                "attune_secret_broker_use_anomaly status=%d",
+                result.status_code,
+            )
+        return ("", result.status_code)
+
     return app
 
 

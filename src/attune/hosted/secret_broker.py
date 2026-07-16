@@ -12,6 +12,7 @@ from .vault import LeasedCredentialIntent, PostgresSecretBrokerRepository
 from .vault_crypto import EnvelopeCipher
 
 GOOGLE_GMAIL_PROFILE_ACTION = "credential.use.google.gmail.profile.read"
+GOOGLE_CALENDAR_PRIMARY_ACTION = "credential.use.google.calendar.primary.read"
 GOOGLE_OAUTH_INSTALL_ACTION = "credential.install.google.oauth"
 
 
@@ -165,7 +166,12 @@ class SecretBroker:
             or intent.credential_version is None
             or self._google is None
         ):
-            return self._finish_failure(intent, status_code=404, outcome="denied")
+            return self._finish_failure(
+                intent,
+                action=GOOGLE_GMAIL_PROFILE_ACTION,
+                status_code=404,
+                outcome="denied",
+            )
         if not self._record(
             intent, action=GOOGLE_GMAIL_PROFILE_ACTION, outcome="allowed"
         ):
@@ -180,9 +186,19 @@ class SecretBroker:
             )
             profile = self._google.gmail_profile(credential)
         except ProviderFailure:
-            return self._finish_failure(intent, status_code=502, outcome="failed")
+            return self._finish_failure(
+                intent,
+                action=GOOGLE_GMAIL_PROFILE_ACTION,
+                status_code=502,
+                outcome="failed",
+            )
         except Exception:
-            return self._finish_failure(intent, status_code=503, outcome="failed")
+            return self._finish_failure(
+                intent,
+                action=GOOGLE_GMAIL_PROFILE_ACTION,
+                status_code=503,
+                outcome="failed",
+            )
         if not self._record(
             intent, action=GOOGLE_GMAIL_PROFILE_ACTION, outcome="observed"
         ):
@@ -199,14 +215,71 @@ class SecretBroker:
             else SecretBrokerResult(503)
         )
 
+    def google_calendar_primary(self, intent_id: UUID) -> SecretBrokerResult:
+        intent = self._lease(intent_id, "worker", "use")
+        if intent is None:
+            return SecretBrokerResult(404)
+        if (
+            intent.provider != "google"
+            or intent.capability != "google.calendar.primary.read"
+            or intent.encrypted is None
+            or intent.credential_version is None
+            or self._google is None
+        ):
+            return self._finish_failure(
+                intent,
+                action=GOOGLE_CALENDAR_PRIMARY_ACTION,
+                status_code=404,
+                outcome="denied",
+            )
+        if not self._record(
+            intent, action=GOOGLE_CALENDAR_PRIMARY_ACTION, outcome="allowed"
+        ):
+            return SecretBrokerResult(503)
+        try:
+            credential = self._cipher.decrypt(
+                intent.encrypted,
+                tenant_id=intent.tenant.tenant_id,
+                connector_id=intent.connector_id,
+                provider=intent.provider,
+                credential_version=intent.credential_version,
+            )
+            self._google.calendar_primary(credential)
+        except ProviderFailure:
+            return self._finish_failure(
+                intent,
+                action=GOOGLE_CALENDAR_PRIMARY_ACTION,
+                status_code=502,
+                outcome="failed",
+            )
+        except Exception:
+            return self._finish_failure(
+                intent,
+                action=GOOGLE_CALENDAR_PRIMARY_ACTION,
+                status_code=503,
+                outcome="failed",
+            )
+        if not self._record(
+            intent, action=GOOGLE_CALENDAR_PRIMARY_ACTION, outcome="observed"
+        ):
+            return SecretBrokerResult(503)
+        try:
+            finalized = self._vault.finalize(
+                intent.id, producer_kind="worker", outcome="consumed"
+            )
+        except Exception:
+            finalized = False
+        return SecretBrokerResult(204 if finalized else 503)
+
     def _finish_failure(
         self,
         intent: LeasedCredentialIntent,
         *,
+        action: str,
         status_code: int,
         outcome: str,
     ) -> SecretBrokerResult:
-        if not self._record(intent, action=GOOGLE_GMAIL_PROFILE_ACTION, outcome=outcome):
+        if not self._record(intent, action=action, outcome=outcome):
             return SecretBrokerResult(503)
         try:
             finalized = self._vault.finalize(

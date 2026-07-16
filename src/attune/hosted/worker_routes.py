@@ -15,7 +15,9 @@ def platform_smoke(context: TenantContext, job: HostedJob) -> None:
 
 
 def registered_routes(
-    *, google_gmail_profile: JobExecutor | None = None
+    *,
+    google_gmail_profile: JobExecutor | None = None,
+    google_workspace_verification: JobExecutor | None = None,
 ) -> dict[str, TaskRoute]:
     smoke = TaskRoute("platform.smoke", "platform.smoke", platform_smoke)
     routes = {smoke.purpose: smoke}
@@ -26,4 +28,11 @@ def registered_routes(
             google_gmail_profile,
         )
         routes[profile.purpose] = profile
+    if google_workspace_verification is not None:
+        verification = TaskRoute(
+            "google.workspace.connection.verify",
+            "google.workspace.connection.verify",
+            google_workspace_verification,
+        )
+        routes[verification.purpose] = verification
     return routes

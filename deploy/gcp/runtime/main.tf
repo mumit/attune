@@ -199,6 +199,10 @@ resource "google_cloud_run_v2_service" "worker" {
         value = tostring(var.enable_google_gmail_profile)
       }
       env {
+        name  = "ATTUNE_ENABLE_GOOGLE_WORKSPACE_VERIFICATION"
+        value = tostring(var.enable_google_workspace_verification)
+      }
+      env {
         name  = "ATTUNE_SECRET_BROKER_URL"
         value = google_cloud_run_v2_service.secret_broker.uri
       }
@@ -247,15 +251,18 @@ resource "google_cloud_run_v2_service" "worker" {
 
     precondition {
       condition = (
-        !var.enable_google_gmail_profile ||
+        !(var.enable_google_gmail_profile || var.enable_google_workspace_verification) ||
         length(var.alert_notification_channels) > 0
       )
-      error_message = "Google Gmail profile activation requires at least one verified paging notification channel."
+      error_message = "Google provider-read activation requires at least one verified paging notification channel."
     }
 
     precondition {
-      condition     = !var.enable_google_gmail_profile || var.enable_dispatch_broker
-      error_message = "Google Gmail profile activation requires the fixed dispatch broker."
+      condition = (
+        !(var.enable_google_gmail_profile || var.enable_google_workspace_verification) ||
+        var.enable_dispatch_broker
+      )
+      error_message = "Google provider-read activation requires the fixed dispatch broker."
     }
   }
 }
@@ -358,6 +365,14 @@ resource "google_cloud_run_v2_service" "dispatch_broker" {
           var.enable_google_gmail_profile ? [
             {
               purpose    = "google.gmail.profile.read"
+              queue      = local.foundation.jobs_queue
+              target_url = "${google_cloud_run_v2_service.worker.uri}/v1/tasks/dispatch"
+              audience   = local.worker_audience
+            }
+          ] : [],
+          var.enable_google_workspace_verification ? [
+            {
+              purpose    = "google.workspace.connection.verify"
               queue      = local.foundation.jobs_queue
               target_url = "${google_cloud_run_v2_service.worker.uri}/v1/tasks/dispatch"
               audience   = local.worker_audience

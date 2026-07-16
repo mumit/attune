@@ -9,6 +9,8 @@ from typing import Any, Mapping, Protocol
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+CALENDAR_PRIMARY_URL = "https://www.googleapis.com/calendar/v3/calendars/primary"
+CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 MAX_PROVIDER_RESPONSE_BYTES = 32_768
 MAX_ACCESS_TOKEN_CHARS = 8_192
 REQUEST_TIMEOUT = (3.05, 10)
@@ -39,6 +41,11 @@ class GmailProfile:
         }
 
 
+@dataclass(frozen=True)
+class CalendarPrimary:
+    """Content-free proof that the canonical primary calendar was readable."""
+
+
 class GoogleProvider:
     """Construct only reviewed Google requests; never accept URLs from callers."""
 
@@ -53,7 +60,38 @@ class GoogleProvider:
         self._session = session
 
     def gmail_profile(self, credential: Mapping[str, Any]) -> GmailProfile:
-        oauth = _authorized_user_credential(credential)
+        oauth = _authorized_user_credential(credential, GMAIL_READONLY_SCOPE)
+        access_token = self._access_token(oauth)
+        profile = self._get_json(GMAIL_PROFILE_URL, access_token)
+        history_id = profile.get("historyId")
+        messages_total = profile.get("messagesTotal")
+        threads_total = profile.get("threadsTotal")
+        if (
+            not isinstance(history_id, str)
+            or not history_id.isdecimal()
+            or len(history_id) > 32
+            or not _bounded_count(messages_total)
+            or not _bounded_count(threads_total)
+        ):
+            raise ProviderFailure("invalid Gmail profile response")
+        return GmailProfile(history_id, messages_total, threads_total)
+
+    def calendar_primary(self, credential: Mapping[str, Any]) -> CalendarPrimary:
+        oauth = _authorized_user_credential(credential, CALENDAR_READONLY_SCOPE)
+        access_token = self._access_token(oauth)
+        calendar = self._get_json(CALENDAR_PRIMARY_URL, access_token)
+        calendar_id = calendar.get("id")
+        timezone_name = calendar.get("timeZone")
+        if (
+            not isinstance(calendar_id, str)
+            or not 1 <= len(calendar_id) <= 1024
+            or not isinstance(timezone_name, str)
+            or not 1 <= len(timezone_name) <= 255
+        ):
+            raise ProviderFailure("invalid Calendar response")
+        return CalendarPrimary()
+
+    def _access_token(self, oauth: Mapping[str, str]) -> str:
         try:
             token_response = self._session.post(
                 GOOGLE_TOKEN_URL,
@@ -82,9 +120,12 @@ class GoogleProvider:
         ):
             raise ProviderFailure("invalid token response")
 
+        return access_token
+
+    def _get_json(self, url: str, access_token: str) -> dict[str, Any]:
         try:
-            profile_response = self._session.get(
-                GMAIL_PROFILE_URL,
+            response = self._session.get(
+                url,
                 headers={
                     "Accept": "application/json",
                     "Authorization": f"Bearer {access_token}",
@@ -94,23 +135,13 @@ class GoogleProvider:
                 stream=True,
             )
         except Exception as error:
-            raise ProviderFailure("Gmail request failed") from error
-        profile = _json_response(profile_response, expected_status=200)
-        history_id = profile.get("historyId")
-        messages_total = profile.get("messagesTotal")
-        threads_total = profile.get("threadsTotal")
-        if (
-            not isinstance(history_id, str)
-            or not history_id.isdecimal()
-            or len(history_id) > 32
-            or not _bounded_count(messages_total)
-            or not _bounded_count(threads_total)
-        ):
-            raise ProviderFailure("invalid Gmail profile response")
-        return GmailProfile(history_id, messages_total, threads_total)
+            raise ProviderFailure("provider read failed") from error
+        return _json_response(response, expected_status=200)
 
 
-def _authorized_user_credential(value: Mapping[str, Any]) -> dict[str, str]:
+def _authorized_user_credential(
+    value: Mapping[str, Any], required_scope: str
+) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ProviderFailure("invalid credential")
     required = ("refresh_token", "client_id", "client_secret")
@@ -128,7 +159,7 @@ def _authorized_user_credential(value: Mapping[str, Any]) -> dict[str, str]:
         if (
             not isinstance(scopes, list)
             or not all(isinstance(scope, str) for scope in scopes)
-            or GMAIL_READONLY_SCOPE not in scopes
+            or required_scope not in scopes
         ):
             raise ProviderFailure("required scope is unavailable")
     return parsed

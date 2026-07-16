@@ -36,9 +36,11 @@ The broker alone can use the connector credential KMS key and its narrow
 database functions. It requires the private audit writer before and after a
 mutation and fails closed on ambiguous results.
 
-The initial read-only Gmail profile executor is implemented but dormant by
-default. `enable_google_gmail_profile = false` leaves both worker and dispatch
-registries smoke-only. Terraform refuses activation unless the fixed dispatch
+The composite read-only Workspace verifier is implemented but dormant by
+default. `enable_google_workspace_verification = false` leaves it absent from
+both worker and dispatch registries. Its worker creates separate one-use Gmail
+profile and Calendar primary-read intents; Calendar provider metadata never
+leaves the broker. Terraform refuses activation unless the fixed dispatch
 broker is enabled and at least one paging notification channel is configured.
 The development credential-free exact-endpoint egress probe passed on
 2026-07-14; repeat it after a material network or image change. Before the gate
@@ -169,12 +171,12 @@ channel and put its full resource name in `alert_notification_channels`. Treat
 channel verification and a test page as deployment evidence; do not put webhook
 secrets or addresses in committed variables.
 
-### Gmail profile activation journey
+### Google Workspace verification activation journey
 
 Activation is an operator release gate, not an end-user setting:
 
-1. keep `enable_google_gmail_profile = false` while creating and verifying the
-   paging channel;
+1. keep `enable_google_workspace_verification = false` while creating and
+   verifying the paging channel;
 2. repeat the credential-free exact-endpoint egress job with the reviewed worker
    image;
 3. create the OAuth client outside Terraform, add its value to Secret Manager
@@ -182,13 +184,16 @@ Activation is an operator release gate, not an end-user setting:
    non-production Google account;
 4. exercise install, one-time worker intent, broker decrypt/use, minimized
    response, audit, anomaly alert, revocation, and reconciliation evidence;
-5. set `enable_google_gmail_profile = true`, retain the verified notification
-   channel resource name, review an immutable-image Terraform plan, and apply;
+5. set `enable_google_workspace_verification = true`, retain the verified
+   notification channel resource name, review an immutable-image Terraform
+   plan, and apply;
 6. confirm the worker and dispatch broker expose exactly `platform.smoke` and
-   `google.gmail.profile.read`, then run the bounded end-to-end test before any
-   wider rollout.
+   `google.workspace.connection.verify`; confirm the broker alone exposes the
+   fixed `google.gmail.profile.read` and `google.calendar.primary.read`
+   credential uses, then run the bounded end-to-end test before wider rollout.
 
-The runtime output `google_gmail_profile_enabled` is consumed by the edge root.
+The runtime output `google_workspace_verification_enabled` is consumed by the
+edge root.
 After the runtime apply, the edge enables the session/CSRF-bound connection-test
 API, gives the control plane only private broker invocation, and exposes the two
 exact rate-limited browser paths. Apply runtime before edge when changing this

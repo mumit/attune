@@ -55,6 +55,11 @@ class Google:
             raise self.error
         return GmailProfile("99", 8, 5)
 
+    def calendar_primary(self, credential):
+        self.calls.append(credential)
+        if self.error:
+            raise self.error
+
 
 class Audit:
     def __init__(self, results=None):
@@ -121,3 +126,36 @@ def test_post_effect_audit_or_finalize_failure_never_returns_provider_result():
         vault=vault, cipher=Cipher(), google=Google(), audit=Audit([True, False])
     ).google_gmail_profile(INTENT)
     assert result.status_code == 503 and vault.finalized == []
+
+
+def test_calendar_use_is_separately_authorized_and_returns_no_provider_data():
+    vault = Vault(use_intent("google.calendar.primary.read"))
+    google, audit = Google(), Audit()
+    result = SecretBroker(
+        vault=vault, cipher=Cipher(), google=google, audit=audit
+    ).google_calendar_primary(INTENT)
+    assert result.status_code == 204 and result.body is None
+    assert google.calls == [{"refresh_token": "secret"}]
+    assert [event for event in audit.events] == [
+        {
+            "action": "credential.use.google.calendar.primary.read",
+            "outcome": "allowed",
+        },
+        {
+            "action": "credential.use.google.calendar.primary.read",
+            "outcome": "observed",
+        },
+    ]
+    assert vault.finalized[0][1]["outcome"] == "consumed"
+
+
+def test_calendar_failure_is_content_free_audited_and_finalized():
+    vault = Vault(use_intent("google.calendar.primary.read"))
+    result = SecretBroker(
+        vault=vault,
+        cipher=Cipher(),
+        google=Google(ProviderFailure("provider secret")),
+        audit=Audit([True, True]),
+    ).google_calendar_primary(INTENT)
+    assert result.status_code == 502 and result.body is None
+    assert vault.finalized[0][1]["outcome"] == "failed"

@@ -227,9 +227,11 @@ def test_worker_is_private_deterministic_and_queue_routed():
     assert "USER 65532:65532" in dockerfile
     assert "platform.smoke" in routes
     assert "google_gmail_profile: JobExecutor | None = None" in routes
+    assert "google_workspace_verification: JobExecutor | None = None" in routes
     assert "enable_google_gmail_profile" in terraform
+    assert "enable_google_workspace_verification" in terraform
     assert "length(var.alert_notification_channels) > 0" in terraform
-    assert "!var.enable_google_gmail_profile || var.enable_dispatch_broker" in terraform
+    assert "var.enable_dispatch_broker" in terraform
 
 
 def test_control_plane_edge_is_locked_before_oauth_activation():

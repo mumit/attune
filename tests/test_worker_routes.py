@@ -49,3 +49,13 @@ def test_google_profile_route_is_registered_only_with_explicit_executor():
     profile_job = job({"connector_id": "10000000-0000-4000-8000-000000000713"})
     route.execute(context, profile_job)
     assert calls == [(context, profile_job)]
+
+
+def test_workspace_verification_route_requires_explicit_executor():
+    calls = []
+    routes = registered_routes(
+        google_workspace_verification=lambda *args: calls.append(args)
+    )
+    assert set(routes) == {"platform.smoke", "google.workspace.connection.verify"}
+    route = routes["google.workspace.connection.verify"]
+    assert route.capability == "google.workspace.connection.verify"

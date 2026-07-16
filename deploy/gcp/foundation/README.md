@@ -120,12 +120,14 @@ compiled-in token exchange, Google signing-certificate fetch, Gmail operation,
 and platform OAuth-client-secret read respectively. Arbitrary internet
 destinations continue to fail closed.
 
-The foundation also enables `gmail.googleapis.com` declaratively. Private DNS
+The foundation also enables `gmail.googleapis.com` and
+`calendar-json.googleapis.com` declaratively. Private DNS
 reachability without project API activation is insufficient: Google accepts
-OAuth consent and refresh-token exchange but rejects the fixed Gmail profile
-read. Keep API activation and exact private DNS in the same reviewed foundation
-plan. Calendar API activation remains deferred until its hosted capability and
-exact egress route have their own release gate.
+OAuth consent and refresh-token exchange but rejects a provider read when its
+project API is disabled. Keep API activation and exact private DNS in the same
+reviewed foundation plan. Runtime authorization remains separate: the fixed
+composite Gmail/Calendar verification route is disabled by default and requires
+its own reviewed release gate.
 
 The private VIP can serve other Google APIs, so DNS is one layer rather than
 the complete authorization boundary. Exact broker URLs and paths, disabled

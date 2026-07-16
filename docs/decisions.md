@@ -96,9 +96,10 @@ Newest first. This log records decisions that constrain current implementation.
 
 ## 2026-07 — Provider routes activate atomically and fail closed
 
-- `google.gmail.profile.read` is present in neither the worker nor dispatch
-  registry by default. One Terraform variable adds it to both, avoiding a
-  producer/consumer mismatch during release.
+- `google.workspace.connection.verify` is present in neither the worker nor
+  dispatch registry by default. One Terraform variable adds it to both,
+  avoiding a producer/consumer mismatch during release. Its executor creates
+  separately authorized Gmail-profile and Calendar-primary credential uses.
 - Terraform rejects activation unless the fixed dispatch broker is enabled and
   at least one Monitoring notification channel is configured. Operators must
   separately prove channel verification, a test page, dedicated test identity,
@@ -111,16 +112,19 @@ Newest first. This log records decisions that constrain current implementation.
   separate worker/dispatch toggles, or treating a successful Terraform plan as
   authorization for customer traffic.
 
-## 2026-07 — Connector verification is a principal-bound fixed job
+## 2026-07 — Connector verification is a principal-bound composite fixed job
 
 - A signed-in browser may request only the fixed
-  `google.gmail.profile.read` connection test. Tenant, principal, active Google
+  `google.workspace.connection.verify` job. Tenant, principal, active Google
   connector, exact scope set, capability, and worker destination are resolved
-  from the Attune session and canonical server-side state.
+  from the Attune session and canonical server-side state. The worker creates
+  distinct one-use intents for `google.gmail.profile.read` and
+  `google.calendar.primary.read`; one composite job succeeds only after both.
 - The browser receives an opaque job UUID and only queued, running, succeeded,
   or failed. Status resolution rebinds the job to the session principal and
-  active connector; the UUID alone conveys no authority. Mailbox counters and
-  provider details never cross the worker boundary.
+  active connector; the UUID alone conveys no authority. Mailbox counters,
+  calendar ID/timezone, and provider details never cross the browser boundary;
+  Calendar metadata never leaves the secret broker.
 - This was selected over a privileged operator smoke command, returning Gmail
   profile data to the UI, or treating successful OAuth token storage as proof
   that the granted credential can perform the reviewed provider read.
@@ -144,18 +148,19 @@ Newest first. This log records decisions that constrain current implementation.
   expected unauthenticated refusals. Adding a provider hostname is a reviewed
   infrastructure and application change, never an operational workaround.
 - Project API activation is a separate required control. The foundation
-  declaratively enables `gmail.googleapis.com` with the fixed Gmail egress
-  route; successful OAuth consent and token refresh do not prove that the API
-  is enabled. Calendar API activation remains deferred to its own capability
-  gate.
+  declaratively enables `gmail.googleapis.com` and
+  `calendar-json.googleapis.com`; successful OAuth consent and token refresh
+  do not prove that either API is enabled. The broker still fixes each exact
+  operation and the runtime keeps the composite route disabled by default.
 
 ## 2026-07 — Provider credentials stay behind fixed broker operations
 
 - Hosted workers receive neither stored credentials nor OAuth access tokens. A
   provider route accepts only an opaque one-time intent, maps its canonical
   capability to one reviewed request, and returns a minimized, typed result.
-  The first route is the read-only Gmail `users/me/profile` operation and omits
-  `emailAddress`.
+  The first routes are Gmail's read-only `users/me/profile` operation, which
+  omits `emailAddress`, and Calendar's read-only `calendars/primary` operation,
+  which returns no provider data to the worker.
 - This makes destination allowlisting and data minimization structural,
   prevents model- or caller-controlled URLs and user IDs, limits SSRF and token
   exfiltration paths, and gives every decrypt/use a durable audit boundary.

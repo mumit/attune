@@ -67,3 +67,8 @@ output "google_gmail_profile_enabled" {
   description = "Whether the reviewed fixed Gmail profile route is active."
   value       = var.enable_google_gmail_profile
 }
+
+output "google_workspace_verification_enabled" {
+  description = "Whether the reviewed composite Gmail and Calendar connection-verification route is active."
+  value       = var.enable_google_workspace_verification
+}

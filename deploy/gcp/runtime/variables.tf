@@ -82,6 +82,12 @@ variable "enable_google_gmail_profile" {
   default     = false
 }
 
+variable "enable_google_workspace_verification" {
+  description = "Register the composite fixed Gmail and Calendar connection-verification route after its security gates pass."
+  type        = bool
+  default     = false
+}
+
 variable "alert_notification_channels" {
   description = "Monitoring notification-channel resource names for runtime security alerts."
   type        = list(string)

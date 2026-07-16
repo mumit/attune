@@ -36,6 +36,10 @@ class Broker:
             body={"history_id": "123", "messages_total": 4, "threads_total": 3},
         )
 
+    def google_calendar_primary(self, intent_id):
+        self.calls.append(("google_calendar_primary", intent_id))
+        return SimpleNamespace(status_code=204, body=None)
+
     def google_oauth_exchange(self, intent_id, **kwargs):
         self.calls.append(("google_oauth_exchange", intent_id, kwargs))
         return SimpleNamespace(status_code=204)
@@ -155,6 +159,22 @@ def test_google_profile_requires_worker_and_returns_only_bounded_result():
         "threads_total": 3,
     }
     assert broker.calls == [("google_gmail_profile", INTENT)]
+
+
+def test_google_calendar_requires_worker_and_returns_no_provider_data():
+    broker = Broker()
+    app = client(broker)
+    route = "/v1/providers/google/calendar/primary"
+    body = {"intent_id": str(INTENT)}
+    assert (
+        app.post(route, headers={"Authorization": "Bearer valid"}, json=body).status_code
+        == 403
+    )
+    response = app.post(
+        route, headers={"Authorization": "Bearer valid-worker"}, json=body
+    )
+    assert response.status_code == 204 and response.data == b""
+    assert broker.calls == [("google_calendar_primary", INTENT)]
 
 
 def test_worker_cannot_install_or_add_provider_arguments():

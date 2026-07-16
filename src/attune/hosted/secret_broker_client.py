@@ -22,7 +22,7 @@ class GmailProfile:
 
 
 class SecretBrokerClient:
-    """Invoke only the broker's compiled-in Gmail profile operation."""
+    """Invoke only the broker's compiled-in Google operations."""
 
     def __init__(
         self,
@@ -42,27 +42,8 @@ class SecretBrokerClient:
         self._timeout = timeout_seconds
 
     def google_gmail_profile(self, intent_id: UUID) -> GmailProfile:
-        import requests
-
-        if not isinstance(intent_id, UUID):
-            raise TypeError("intent_id must be a UUID")
-        token = self._token_provider(self._audience)
-        if not isinstance(token, str) or not token:
-            raise RuntimeError("secret broker identity token is unavailable")
-        session = self._session
-        if session is None:
-            session = requests.Session()
-            session.trust_env = False
-        response = None
+        response = self._post("/v1/providers/google/gmail/profile", intent_id)
         try:
-            response = session.post(
-                f"{self._service_url}/v1/providers/google/gmail/profile",
-                json={"intent_id": str(intent_id)},
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=self._timeout,
-                allow_redirects=False,
-                stream=True,
-            )
             if response.status_code != 200:
                 raise RuntimeError("secret broker provider operation failed")
             content_type = response.headers.get("Content-Type", "")
@@ -75,11 +56,39 @@ class SecretBrokerClient:
                 raise RuntimeError("secret broker response is invalid") from error
             return _profile(body)
         finally:
-            if response is not None:
-                try:
-                    response.close()
-                except Exception:
-                    pass
+            _close(response)
+
+    def google_calendar_primary(self, intent_id: UUID) -> None:
+        response = self._post("/v1/providers/google/calendar/primary", intent_id)
+        try:
+            if response.status_code != 204:
+                raise RuntimeError("secret broker provider operation failed")
+            raw = _bounded_body(response)
+            if raw:
+                raise RuntimeError("secret broker response contract is invalid")
+        finally:
+            _close(response)
+
+    def _post(self, path: str, intent_id: UUID):
+        import requests
+
+        if not isinstance(intent_id, UUID):
+            raise TypeError("intent_id must be a UUID")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("secret broker identity token is unavailable")
+        session = self._session
+        if session is None:
+            session = requests.Session()
+            session.trust_env = False
+        return session.post(
+            f"{self._service_url}{path}",
+            json={"intent_id": str(intent_id)},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+            stream=True,
+        )
 
 
 def _https_origin(value: str, name: str) -> str:
@@ -138,3 +147,10 @@ def _profile(body: Any) -> GmailProfile:
     ):
         raise RuntimeError("secret broker response contract is invalid")
     return GmailProfile(history_id, messages_total, threads_total)
+
+
+def _close(response: Any) -> None:
+    try:
+        response.close()
+    except Exception:
+        pass

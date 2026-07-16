@@ -78,6 +78,30 @@ def test_client_uses_exact_route_audience_and_minimized_contract():
     assert session.response.closed
 
 
+def test_calendar_client_requires_exact_204_empty_contract():
+    response = Response(status=204, chunks=[])
+    session = Session(response)
+    result = SecretBrokerClient(
+        URL,
+        AUDIENCE,
+        token_provider=lambda audience: "token",
+        session=session,
+    ).google_calendar_primary(INTENT)
+    assert result is None
+    assert session.calls[0][0] == f"{URL}/v1/providers/google/calendar/primary"
+    assert response.closed
+
+    for ambiguous in (Response(status=200, chunks=[]), Response(status=204, chunks=[b"x"])):
+        with pytest.raises(RuntimeError):
+            SecretBrokerClient(
+                URL,
+                AUDIENCE,
+                token_provider=lambda audience: "token",
+                session=Session(ambiguous),
+            ).google_calendar_primary(INTENT)
+        assert ambiguous.closed
+
+
 @pytest.mark.parametrize(
     "url",
     [

@@ -344,12 +344,15 @@ opaque-intent contract in [`secret-broker.md`](secret-broker.md): a fresh
 AES-256-GCM DEK per credential version, tenant/connector/provider/version-bound
 associated data, KMS-wrapped DEKs, route-specific control-plane or worker
 authentication, content-free intent-based audit, and no caller-authoritative
-tenant field. Its first provider-use capability is a fixed read-only Gmail
-profile operation: no caller URL or user ID, no redirects, bounded responses,
-no access-token release, and no returned email address. It remains unavailable
-to normal hosted jobs until the test-identity, egress, paging, and end-to-end
-evidence gates are satisfied. Its dormant worker executor accepts one canonical
-connector UUID, derives a stable job-bound idempotency key, creates a two-minute
+tenant field. Its first provider-use capabilities are fixed read-only Gmail
+profile and Calendar primary-calendar operations: no caller URL or user ID, no
+redirects, bounded responses, and no access-token release. Gmail omits the
+email address; Calendar returns no provider data. A composite verification job
+creates a separate two-minute one-use intent and audit trail for each operation
+and succeeds only when both succeed. It remains unavailable to normal hosted
+jobs until the test-identity, egress, paging, and end-to-end evidence gates are
+satisfied. Its dormant worker executor accepts one canonical connector UUID,
+derives stable job-bound idempotency keys, creates a two-minute
 use intent, and calls only the typed broker client. Terraform requires the fixed
 dispatch broker and a notification channel before registering the route.
 Credential-use leases are serialized and limited

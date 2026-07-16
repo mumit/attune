@@ -5,6 +5,8 @@ import json
 import pytest
 
 from attune.hosted.google_provider import (
+    CALENDAR_PRIMARY_URL,
+    CALENDAR_READONLY_SCOPE,
     GMAIL_PROFILE_URL,
     GMAIL_READONLY_SCOPE,
     GOOGLE_TOKEN_URL,
@@ -35,7 +37,7 @@ class Response:
 
 
 class Session:
-    def __init__(self, token=None, profile=None):
+    def __init__(self, token=None, profile=None, calendar=None):
         self.token = token or Response(
             200, {"access_token": "short-token", "token_type": "Bearer"}
         )
@@ -48,6 +50,10 @@ class Session:
                 "threadsTotal": 7,
             },
         )
+        self.calendar = calendar or Response(
+            200,
+            {"id": "must-not-leave-broker@example.com", "timeZone": "America/Vancouver"},
+        )
         self.calls = []
 
     def post(self, url, **kwargs):
@@ -56,7 +62,7 @@ class Session:
 
     def get(self, url, **kwargs):
         self.calls.append(("get", url, kwargs))
-        return self.profile
+        return self.calendar if url == CALENDAR_PRIMARY_URL else self.profile
 
 
 def credential(**overrides):
@@ -92,6 +98,20 @@ def test_default_session_ignores_ambient_proxy_configuration():
     assert GoogleProvider()._session.trust_env is False
 
 
+def test_calendar_primary_uses_fixed_endpoint_and_returns_no_provider_data():
+    session = Session()
+    result = GoogleProvider(session).calendar_primary(
+        credential(scopes=[CALENDAR_READONLY_SCOPE])
+    )
+    assert result.__dict__ == {}
+    assert [call[1] for call in session.calls] == [
+        GOOGLE_TOKEN_URL,
+        CALENDAR_PRIMARY_URL,
+    ]
+    assert all(call[2]["allow_redirects"] is False for call in session.calls)
+    assert session.token.closed and session.calendar.closed
+
+
 def test_unapproved_token_uri_and_missing_scope_fail_before_network():
     session = Session()
     with pytest.raises(ProviderFailure):
@@ -100,6 +120,8 @@ def test_unapproved_token_uri_and_missing_scope_fail_before_network():
         )
     with pytest.raises(ProviderFailure):
         GoogleProvider(session).gmail_profile(credential(scopes=["calendar.readonly"]))
+    with pytest.raises(ProviderFailure):
+        GoogleProvider(session).calendar_primary(credential())
     assert session.calls == []
 
 

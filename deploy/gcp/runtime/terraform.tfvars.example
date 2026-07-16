@@ -12,6 +12,7 @@ worker_image                 = "northamerica-northeast1-docker.pkg.dev/PROJECT/R
 # Keep false until the credential-free egress probe, a verified paging channel,
 # and the dedicated non-production Google identity are ready.
 enable_google_gmail_profile = false
+enable_google_workspace_verification = false
 
 # Required before customer credentials. Empty still creates a visible incident
 # in Cloud Monitoring but sends no page.

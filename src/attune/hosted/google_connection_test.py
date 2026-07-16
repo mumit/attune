@@ -13,7 +13,7 @@ from .dispatch import PostgresDispatchProducerRepository
 from .repositories import PostgresJobRepository
 from .tenant import TenantContext
 
-CAPABILITY = "google.gmail.profile.read"
+CAPABILITY = "google.workspace.connection.verify"
 REQUIRED_SCOPES = (
     "openid",
     "email",

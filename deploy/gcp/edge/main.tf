@@ -84,17 +84,17 @@ resource "google_cloud_run_v2_service" "control_plane" {
       }
       env {
         name  = "ATTUNE_GOOGLE_CONNECTION_TEST_ENABLED"
-        value = tostring(local.runtime.google_gmail_profile_enabled)
+        value = tostring(local.runtime.google_workspace_verification_enabled)
       }
       dynamic "env" {
-        for_each = local.runtime.google_gmail_profile_enabled ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_URL"
           value = local.runtime.dispatch_broker.uri
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_gmail_profile_enabled ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_AUDIENCE"
           value = local.runtime.dispatch_broker.audience
@@ -195,7 +195,7 @@ resource "google_cloud_run_v2_service" "control_plane" {
       error_message = "Google Workspace OAuth activation requires identity sign-in, provider-readiness attestation, and the separate public client ID."
     }
     precondition {
-      condition = !local.runtime.google_gmail_profile_enabled || (
+      condition = !local.runtime.google_workspace_verification_enabled || (
         var.enable_google_workspace_oauth && local.runtime.dispatch_broker != null
       )
       error_message = "The browser connection test requires active Workspace OAuth and the fixed dispatch broker."
@@ -394,7 +394,7 @@ resource "google_compute_security_policy" "edge" {
   }
 
   dynamic "rule" {
-    for_each = local.runtime.google_gmail_profile_enabled ? [1] : []
+    for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
     content {
       action      = "throttle"
       priority    = 881
@@ -417,7 +417,7 @@ resource "google_compute_security_policy" "edge" {
   }
 
   dynamic "rule" {
-    for_each = local.runtime.google_gmail_profile_enabled ? [1] : []
+    for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
     content {
       action      = "throttle"
       priority    = 882

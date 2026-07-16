@@ -164,9 +164,11 @@ acceptable substitutes.
 3. **Secret broker and OAuth exchange:** private install/revoke service, serialized encrypted
    lifecycle, exact workload authentication, intent-only audit, and live KMS
    evidence are implemented in development. The first fixed, read-only,
-   response-minimized Gmail profile operation is deployed. Its deterministic
-   worker executor is deployed dormant and disabled by default in both worker
-   and dispatch registries, and has no authorized-identity provider evidence.
+   response-minimized Gmail profile operation is deployed and has authenticated
+   development evidence. A content-free Calendar primary-read and composite
+   Workspace verifier are implemented behind the same broker boundary; their
+   deterministic worker route remains disabled by default until deployment and
+   authenticated end-to-end evidence.
    Its no-NAT, exact-host private Google API boundary is declarative, and the
    credential-free egress probe passed in development on 2026-07-14. It must be
    repeated after material network or image changes. A dedicated test identity,

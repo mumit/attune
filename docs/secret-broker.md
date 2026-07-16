@@ -44,20 +44,25 @@ tenant field.
 | `/v1/credentials/install` | control plane | `control_plane/install` | encrypt and version a credential |
 | `/v1/credentials/revoke` | control plane | `control_plane/revoke` | revoke the active credential |
 | `/v1/providers/google/gmail/profile` | worker | `worker/use/google.gmail.profile.read` | return bounded mailbox counters and history ID |
+| `/v1/providers/google/calendar/primary` | worker | `worker/use/google.calendar.primary.read` | prove primary-calendar readability; return no content |
 
-The first provider operation is intentionally narrow and read-only. The broker
+The first provider operations are intentionally narrow and read-only. The broker
 accepts no URL, Google user ID, query, or provider argument. It exchanges the
 refresh token only at `https://oauth2.googleapis.com/token`, disables HTTP
 redirects and ambient proxy environment variables, and calls only Gmail's fixed
-`users/me/profile` endpoint. Both
-responses have strict status, type, timeout, and 32 KB size checks. The worker
+`users/me/profile` endpoint or Calendar's fixed `calendars/primary` endpoint.
+All responses have strict status, type, timeout, and 32 KB size checks. The worker
 receives only `history_id`, `messages_total`, and `threads_total`; the Gmail
 profile's email address and the OAuth access token never leave the broker.
-Credentials with a caller-controlled token endpoint are rejected.
+The Calendar ID and timezone are validated but never leave the broker.
+Credentials with a caller-controlled token endpoint are rejected, and each
+operation requires its own exact granted scope and one-use capability intent.
 
 In GCP, the application subnet has Private Google Access but no Cloud NAT.
-Exact private DNS zones resolve only `oauth2.googleapis.com` and
-`gmail.googleapis.com` to Google's `private.googleapis.com` VIP. There is no
+Exact private DNS zones resolve the reviewed Google hosts, including
+`oauth2.googleapis.com`, `gmail.googleapis.com`, and the exact
+`www.googleapis.com` host used for Calendar primary reads, to Google's
+`private.googleapis.com` VIP. There is no
 wildcard Google API zone. TLS still verifies the public hostnames, and the
 broker still fixes each path in code; DNS alone is not treated as provider
 authorization. A credential-free ephemeral job must prove both endpoints
