@@ -168,10 +168,11 @@ or database identifier. The broker alone derives keyed references and resolves
 the tenant through the one-use claim ceremony.
 
 For an interactive `MESSAGE`, the command parser prefers Google Chat's
-`message.argumentText`, whose contract removes Chat-app mentions. It never
-strips or normalizes user text itself: the selected field must still match the
-single exact `/link CODE` grammar. If the output-only field is absent or empty,
-the parser accepts only an exact `message.text` fallback. Sender and space
+`message.argumentText`, whose contract removes Chat-app mentions. The selected
+field must match the exact `/link CODE` grammar, optionally preceded by the one
+ASCII separator that mention removal can retain; no general trimming occurs.
+If the output-only field is absent or empty, the parser accepts only an exact
+`message.text` fallback. Sender and space
 equality, human actor type, direct-message type, token identity, and exact
 audience are validated independently of the command body.
 
@@ -247,8 +248,9 @@ required for the resumed ceremony.
 
 The second live attempt established that direct-message `argumentText` can be
 present as an empty protobuf string. The current parser treats only absence or
-empty string as permission to try the exact `text` fallback. It does not trim
-whitespace or fall back after any other non-empty value. Content-free reason
+empty string as permission to try the exact `text` fallback. It does not
+generally trim whitespace or fall back after any other non-empty value.
+Content-free reason
 codes (`event_envelope`, `identity_envelope`, `actor_space_binding`, or
 `command_body`) provide bounded live diagnostics without retaining message,
 code, actor, or destination data.
@@ -267,6 +269,13 @@ response, and canonical setup readback reported `pending_test`. No link code,
 actor ID, space ID, or tenant ID was retained in application logs or rollout
 notes. This completes the real owner-DM link and replay-rejection evidence;
 the separately requested asynchronous delivery test remains the next gate.
+
+During route adoption, the first link message was provider-authenticated but
+rejected as `command_body`; an identical retry was accepted and consumed. The
+bounded evidence is consistent with Google retaining the single separator
+after stripping the Chat-app mention. The parser now accepts only that one
+provider-shaped prefix in `argumentText`, while still rejecting tabs, multiple
+or trailing spaces, suffixes, and a prefixed fallback `message.text`.
 
 Migration 0023 implements that next gate without a general message-send
 surface. A recent-authenticated, CSRF-bound browser request contains no body.

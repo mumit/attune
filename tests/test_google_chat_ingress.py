@@ -63,7 +63,6 @@ def test_decode_requires_exact_link_command_without_hidden_or_extra_text():
         f"link {CODE}",
         f"/link  {CODE}",
         f"/link {CODE} extra",
-        f" /link {CODE}",
         f"/link {CODE}\n",
     ):
         value = event()
@@ -89,6 +88,22 @@ def test_decode_prefers_provider_canonical_argument_text_and_supports_exact_fall
     value["message"]["argumentText"] = ""
     value["message"]["text"] = f"/link {CODE}"
     assert decode_owner_dm_link(value) is not None
+
+
+def test_decode_accepts_only_one_provider_separator_before_canonical_argument():
+    value = event()
+    value["message"]["argumentText"] = f" /link {CODE}"
+    assert decode_owner_dm_link(value) is not None
+
+    for text in (f"  /link {CODE}", f"\t/link {CODE}", f" /link {CODE} "):
+        value = event()
+        value["message"]["argumentText"] = text
+        assert decode_owner_dm_link(value) is None
+
+    value = event()
+    value["message"]["argumentText"] = ""
+    value["message"]["text"] = f" /link {CODE}"
+    assert decode_owner_dm_link(value) is None
 
 
 def test_decode_diagnostics_are_bounded_and_content_free():

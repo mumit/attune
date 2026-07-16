@@ -254,9 +254,11 @@ empty.
 
 The next live attempt showed that `argumentText` can be present as an empty
 protobuf string in a direct message. The parser therefore treats absent and
-empty identically for fallback purposes; a whitespace or otherwise non-empty
-value remains authoritative and must match exactly. The service now emits only
-one of four bounded rejection categories, never event content or identifiers.
+empty identically for fallback purposes. A non-empty value remains
+authoritative and must match the exact command, optionally preceded by the one
+ASCII separator that mention removal can retain; no general whitespace
+trimming occurs. The service emits only one of four bounded rejection
+categories, never event content or identifiers.
 
 The third live attempt exposed a fixture error in the space schema: the
 canonical REST field is `spaceType`, not `type`, and nested `message.space`

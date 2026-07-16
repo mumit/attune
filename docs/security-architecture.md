@@ -547,10 +547,12 @@ minimal event, and returns promptly.
   use the strongest documented provider verification, including expected
   audience/issuer and channel tokens where applicable.
 - **SEC-701A.** Google Chat command parsing MUST prefer the provider's
-  mention-stripped `message.argumentText`, require the complete selected field
-  to match the single command grammar, and accept `message.text` only as an
-  exact fallback when `argumentText` is absent or empty. It MUST NOT strip,
-  trim, or otherwise normalize attacker-controlled text into a valid command.
+  mention-stripped `message.argumentText` and require the complete selected
+  field to match the single command grammar, optionally preceded by the one
+  ASCII separator that mention removal can retain. It MAY accept
+  `message.text` only as an exact fallback when `argumentText` is absent or
+  empty. It MUST NOT generally strip, trim, or otherwise normalize
+  attacker-controlled text into a valid command.
 - **SEC-701B.** Google Chat direct-message authorization MUST use the signed
   top-level Event `space.spaceType`, bind `message.space.name` to that same
   resource, and reject a conflicting nested `spaceType`. A missing nested type

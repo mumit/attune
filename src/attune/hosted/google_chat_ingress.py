@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 _LINK_MESSAGE = re.compile(r"^/link ([A-Za-z0-9_-]{43})$")
+_LINK_ARGUMENT = re.compile(r"^ ?/link ([A-Za-z0-9_-]{43})$")
 _ACTOR_REF = re.compile(r"^users/[A-Za-z0-9._-]{1,180}$")
 _SPACE_REF = re.compile(r"^spaces/[A-Za-z0-9_-]{1,180}$")
 
@@ -63,14 +64,17 @@ def decode_owner_dm_link_diagnostic(
     # not distinguish omission from an empty value, so retain the exact-text
     # fallback in either case.
     argument_text = message.get("argumentText")
-    text = (
-        argument_text
-        if isinstance(argument_text, str) and argument_text
-        else message.get("text")
-    )
+    canonical_argument = isinstance(argument_text, str) and bool(argument_text)
+    text = argument_text if canonical_argument else message.get("text")
     if not isinstance(text, str):
         return None, "command_body"
-    matched = _LINK_MESSAGE.fullmatch(text)
+    # Removing an app mention can retain its single ASCII separator. Accept
+    # only that provider-shaped variation; never trim arbitrary whitespace.
+    matched = (
+        _LINK_ARGUMENT.fullmatch(text)
+        if canonical_argument
+        else _LINK_MESSAGE.fullmatch(text)
+    )
     if matched is None:
         return None, "command_body"
     return GoogleChatOwnerDmLink(matched.group(1), actor_ref, destination_ref), "accepted"
