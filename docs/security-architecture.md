@@ -510,6 +510,23 @@ arguments.
   MUST prevent deleted tenants or credentials from being resurrected.
 - **SEC-605.** Memory poisoning, cross-tenant retrieval, inference leakage, and
   adversarial embedding tests are required for memory or model changes.
+- **SEC-606.** Every tenant-bearing store MUST appear in an executable lifecycle
+  inventory declaring its data class, export eligibility, and deletion action.
+  A schema or storage change with no reviewed lifecycle entry MUST fail closed.
+- **SEC-607.** Account restore-suppression evidence MUST live outside the
+  deletable tenant foreign-key graph, contain no reversible customer identity,
+  and remain authoritative longer than every backup and PITR horizon.
+- **SEC-608.** Export and deletion executors MUST use dedicated identities,
+  fixed server-side scopes, recent owner authentication, content-free audit,
+  bounded work, and verified cleanup. Credentials and authorization material
+  MUST NOT enter customer exports.
+- **SEC-609.** A restored snapshot MUST remain isolated from ingress, workers,
+  and provider egress until the current suppression authority has been applied
+  and lifecycle verification proves that suppressed data and credentials
+  cannot become reachable.
+
+The lifecycle policy, complete storage inventory, customer ceremonies, and
+restore procedure are defined in [Hosted data lifecycle](data-lifecycle.md).
 
 ## 11. Data minimization and model handling
 

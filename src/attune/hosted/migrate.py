@@ -12,6 +12,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from .data_lifecycle import validate_relational_lifecycle_inventory
+
 _MIGRATION_NAME = re.compile(r"^[0-9]{4}_[a-z0-9_]+\.sql$")
 _ROLE_NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _LOGIN_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,255}$")
@@ -292,6 +294,8 @@ TENANT_TABLES = (
     "hosted_channel_deliveries",
 )
 
+validate_relational_lifecycle_inventory(TENANT_TABLES)
+
 
 @dataclass(frozen=True)
 class Migration:
@@ -454,10 +458,12 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             """
         )
         rls = {name: (enabled, forced) for name, enabled, forced in cursor.fetchall()}
-        if set(TENANT_TABLES) - set(rls) or not all(
+        if set(rls) != set(TENANT_TABLES) or not all(
             rls[name] == (True, True) for name in TENANT_TABLES
         ):
-            raise RuntimeError("hosted tenant tables must enable and force RLS")
+            raise RuntimeError(
+                "hosted tenant table inventory must be exact and enable and force RLS"
+            )
 
         placeholders = ", ".join("%s" for _ in RUNTIME_ROLES)
         cursor.execute(

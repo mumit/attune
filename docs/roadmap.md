@@ -96,8 +96,10 @@ conversation recovery are verified. Relative dates are now grounded from an
 authoritative server clock and `America/Vancouver`, with a live repeat of the
 same Calendar question proving that prior email context no longer supplies the
 date.
-Workspace disconnect/reconnect was already live. Slack installation/lifecycle,
-retention controls,
+Workspace disconnect/reconnect was already live. The first retention safety
+slice is implemented: the live database verifier now requires an exact,
+reviewed lifecycle classification for every tenant-bearing relation. Retention
+executors and customer controls are not active yet. Slack installation/lifecycle,
 export/deletion, support repair, customer-visible audit, adversarial assurance,
 and external security review remain later independent slices.
 

@@ -11,8 +11,15 @@ from uuid import UUID
 
 import pytest
 
+from attune.hosted.data_lifecycle import (
+    DataClass,
+    DeletionRule,
+    RELATIONAL_ASSET_BY_TABLE,
+    validate_relational_lifecycle_inventory,
+)
 from attune.hosted.migrate import (
     RUNTIME_ROLES,
+    TENANT_TABLES,
     Migration,
     _dispatch_function_invariants_hold,
     apply_migrations,
@@ -163,6 +170,26 @@ def test_runtime_role_binding_contract_is_fixed():
         duplicated = dict(ROLE_BINDINGS)
         duplicated["attune_worker"] = duplicated["attune_control_plane"]
         bind_runtime_roles(None, duplicated)
+
+
+def test_lifecycle_inventory_is_complete_and_fail_closed():
+    validate_relational_lifecycle_inventory(TENANT_TABLES)
+    assert set(RELATIONAL_ASSET_BY_TABLE) == set(TENANT_TABLES)
+    assert RELATIONAL_ASSET_BY_TABLE["conversation_turns"].data_class == (
+        DataClass.CUSTOMER_CONTENT
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["connector_credentials"].deletion_rule == (
+        DeletionRule.CRYPTO_ERASE
+    )
+    assert not RELATIONAL_ASSET_BY_TABLE["connector_credentials"].customer_export
+    assert RELATIONAL_ASSET_BY_TABLE["audit_events"].deletion_rule == (
+        DeletionRule.DEIDENTIFY
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["deletion_markers"].deletion_rule == (
+        DeletionRule.RETAIN_TOMBSTONE
+    )
+    with pytest.raises(RuntimeError, match="does not match tenant tables"):
+        validate_relational_lifecycle_inventory((*TENANT_TABLES, "unreviewed_table"))
 
 
 def test_dispatch_verifier_accepts_pg8000_list_rows():

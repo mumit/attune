@@ -64,7 +64,9 @@ start with the [GCP operated-service architecture](docs/hosted-gcp.md); the
 [hosted sign-in guide](docs/identity-platform.md) documents the separate Google
 Identity Platform and Workspace consent clients. The normative
 [security architecture](docs/security-architecture.md) defines trust boundaries,
-control requirements, red-team cases, and hosted launch gates; the approved
+control requirements, red-team cases, and hosted launch gates; the
+[hosted data-lifecycle contract](docs/data-lifecycle.md) defines retention,
+export, deletion, and backup restore suppression; the approved
 [dispatch-broker contract](docs/dispatch-broker.md) defines exclusive task
 authority and queue delivery, while the
 [audit-writer contract](docs/audit-writer.md) defines the intent-only path to

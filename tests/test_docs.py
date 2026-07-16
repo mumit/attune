@@ -32,6 +32,16 @@ def test_quickstart_uses_guided_local_setup():
     assert "attune doctor" not in quickstart
 
 
+def test_hosted_lifecycle_contract_is_fail_closed_and_not_overstated():
+    lifecycle = (ROOT / "docs" / "data-lifecycle.md").read_text()
+    normalized = " ".join(lifecycle.split())
+
+    assert "not claims about the current development deployment" in normalized
+    assert "outside the deletable tenant graph" in normalized
+    assert "A missing, stale, unavailable, or unverifiable suppression ledger blocks" in normalized
+    assert "must not present a decorative control" in normalized
+
+
 def test_qdrant_compose_images_are_pinned_and_loopback_bound():
     compose = (ROOT / "deploy" / "compose.yml").read_text()
     local = (ROOT / "src" / "attune" / "resources" / "local-compose.yml").read_text()
