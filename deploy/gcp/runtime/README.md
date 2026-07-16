@@ -284,6 +284,13 @@ images. It does not make the public Chat endpoint enqueue ordinary messages;
 that requires the separate edge gate after runtime validation. Review a saved
 plan and confirm it contains no other authority or service changes.
 
+Development enabled this gate on 2026-07-16 UTC only after a dormant rollout.
+The saved activation plan added one worker-only channel-broker invoker grant
+and changed the worker and dispatch-broker revisions in place; it added the
+single fixed conversation route and private broker/model environment values,
+with no destroys. Both revisions became Ready, emitted no activation errors,
+and the post-apply plan was empty.
+
 Worker deployment does not enable delivery. Copy the worker output's URI
 hostname and custom audience into the two nullable jobs-worker variables in the
 foundation root, review the queue-only in-place plan, and apply it. Confirm the

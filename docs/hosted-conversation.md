@@ -188,3 +188,22 @@ The worker, secret-broker, and channel-broker conversation images then deployed
 as Ready revisions while `enable_google_chat_conversation=false`; the saved
 plan changed only those three services, its post-apply plan was empty, and no
 worker-to-channel-broker invoker grant or dispatch route was activated.
+
+The subsequent private-runtime activation used a separate saved plan: it added
+the worker-only channel-broker invoker grant, registered the single fixed
+conversation dispatch route, and supplied only the private model/channel
+broker origins and audiences to the worker. A second saved edge plan changed
+only the dedicated Google Chat ingress revision, adding the private dispatch
+broker origin/audience and setting the conversation flag. Both roots converged
+to empty plans.
+
+Four live owner-DM journeys then traversed ingress, channel acceptance,
+dispatch, Cloud Tasks, worker execution, model gateway, the applicable bounded
+Workspace broker, canonical reply delivery, and content-free audit. General,
+Gmail, Calendar, and mutation-refusal executions all completed; ingress and
+broker calls returned 200/204, outbound delivery returned 200, and no error log
+was emitted by any service in the chain. Replay, cross-tenant, substitution,
+redirect, oversized-body, and duplicate-delivery behavior remains enforced by
+the automated contract and isolated-PostgreSQL suites. The development feature
+is therefore active for the verified owner DM; activation is not a production
+readiness attestation.

@@ -107,13 +107,15 @@ adopt only an exact app, owner, and DM match.
 
 An active hosted destination hides link-code generation because linking is
 complete; signing out does not reset tenant channel state. A new code is not a
-conversation switch. The current development hosted ingress has completed
-linking and fixed-content delivery verification, but its durable
-natural-language worker path is not active yet. Until that separate gate is
-enabled, ordinary owner-DM messages receive an explicit unavailable response
-instead of misleading `/link` instructions. The local/standalone interaction
-journey below is already implemented; the hosted path must meet the additional
-tenant, replay, dispatch, model-secret, and outbound-delivery controls first.
+conversation switch. In the current development hosted environment, an
+ordinary owner-DM message receives a prompt `Working on it.` acknowledgement;
+Attune then posts its answer as a second message in the same verified DM. The
+durable natural-language path is active only for that owner binding. It
+resolves tenant and destination server-side, dispatches replay safely, keeps
+Workspace and model credentials behind private brokers, and records
+content-free pre/post-effect audits. If the environment's independent
+conversation gate is disabled, ordinary messages receive an explicit
+unavailable response instead of misleading `/link` instructions.
 
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed
@@ -143,16 +145,18 @@ The same conversation can narrow into Gmail or Calendar:
 
 > Did Sarah send the launch plan?
 
-Attune plans a capped Gmail search, fetches metadata for at most ten matching
-threads and details for at most three, and answers only from those live
-results.
+The initial hosted release runs a fixed, capped Gmail search and returns
+metadata summaries for at most ten matching threads; it does not expose
+message bodies to the worker. Standalone Attune can use the richer connector
+limits configured for that deployment. Both answer only from live results.
 
 > What is on my calendar tomorrow morning?
 
-Attune resolves “tomorrow morning” in `ATTUNE_TIMEZONE`, performs a live
-Calendar read for that bounded window, and summarizes the returned events.
-This behavior is identical with direct Google OAuth and MCP because both
-implement the same internal Workspace connector.
+The initial hosted release reads at most 25 events from the next seven days and
+lets the bounded answer model select the requested portion. Standalone Attune
+can resolve a narrower window in `ATTUNE_TIMEZONE`. Direct Google OAuth and MCP
+still implement the same internal Workspace connector contract; the operated
+hosted release currently uses brokered direct OAuth.
 
 Fetched subjects, snippets, bodies, event names, and attendees remain
 untrusted external data. They can be summarized but cannot issue instructions

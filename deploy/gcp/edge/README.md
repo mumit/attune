@@ -171,6 +171,15 @@ in a separate saved plan. That plan may add only the dispatch-broker URL and
 audience to the dedicated ingress service; it must not grant the public ingress
 Workspace, model, database, or outbound-provider authority.
 
+Development enabled this edge gate on 2026-07-16 UTC after the runtime output
+reported `google_chat_conversation_enabled=true`. The saved plan changed only
+the dedicated ingress service in place, adding the private dispatch-broker URL
+and audience plus the true feature flag; it added or destroyed no resources.
+The revision became Ready, the post-apply plan was empty, and four live
+owner-DM journeys completed through model, bounded Workspace reads where
+applicable, canonical reply delivery, and content-free audit without service
+errors.
+
 These controls establish URL non-retention; they do not by themselves activate
 OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
 workload identity, and private broker handoff are implemented. A separate
