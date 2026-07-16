@@ -310,3 +310,26 @@ audit, decrypts the KMS-wrapped route, calls the fixed Google Chat
 request ID, validates the returned message resource, records the outcome, and
 then exposes `active`. The fixed text states only that the connection test
 succeeded and that no workspace data was accessed.
+
+The Google Chat destination lifecycle was deployed dormant-first on
+2026-07-16 UTC. The first migration execution exposed an ownership defect
+before any migration committed: the Cloud SQL non-superuser migrator could not
+replace a security-definer function owned by the memberless link executor.
+Commit `ea4e3cb` corrected the migration by assuming that narrow owner role
+only for the function replacement. Execution
+`attune-development-database-migrate-mfjp9` then applied migration 0026 once
+from immutable migrator digest
+`sha256:1234cbd61bb9db1aa29c2282bbeb29c234a51a7996d910a84021cf3952cc38f6`;
+the verifier reported 33 tenant tables forced through RLS.
+
+Control-plane digest
+`sha256:0e2bc4e2b99a052596cfe217d8516719e063fbde307c257ebc31869e35f0f68b`
+was first deployed with the lifecycle gate false. Health returned 200, the
+exact lifecycle path remained edge-blocked with 403, and Terraform converged
+empty. Activation then changed only the control-plane flag and Cloud Armor
+policy in place, adding priority 888 for the exact disconnect path at five
+requests per minute per IP. After global propagation, an unauthenticated
+request reached the application and returned the bounded `invalid_session`
+401; health remained 200 and both data and edge Terraform plans were empty.
+No destination was disconnected or relinked during infrastructure activation.
+The recent-authenticated owner ceremony remains separate live evidence.
