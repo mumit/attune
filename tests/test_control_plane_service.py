@@ -277,6 +277,15 @@ def test_locked_shell_exposes_only_health_and_unavailable_root():
     assert client.post("/", headers=headers).status_code == 405
 
 
+def test_first_party_chat_avatar_is_public_on_the_exact_host():
+    response = create_app(HOST).test_client().get(
+        "/assets/attune-chat-avatar.png", headers={"Host": HOST}
+    )
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert len(response.data) > 1_000
+
+
 def test_every_response_sets_strict_non_caching_browser_headers():
     response = create_app(HOST).test_client().get("/", headers={"Host": HOST})
     assert response.headers["Cache-Control"] == "no-store"
