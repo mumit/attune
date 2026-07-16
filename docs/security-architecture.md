@@ -593,6 +593,12 @@ minimal event, and returns promptly.
   onboarding out of validated state. Relinking MUST use a new one-use provider
   proof and fixed delivery test; it MUST NOT revive or retarget a revoked route
   from browser input. Pre-effect and outcome audit are mandatory.
+- **SEC-701H.** Hosted relative-date interpretation MUST use an authoritative
+  server clock and an operator- or principal-confirmed IANA timezone supplied
+  outside conversation and provider content. The model MUST NOT infer the
+  current date or timezone from email, calendar, memory, or prior turns. Live
+  Gmail and Calendar results MUST remain explicitly labeled as untrusted source
+  data so temporal grounding cannot be overridden by retrieved content.
 - **SEC-702.** Ingress MUST apply TLS, body/header limits, content-type checks,
   strict schemas, event-type allowlists, rate limits, deduplication, and safe
   parser configuration before queueing.

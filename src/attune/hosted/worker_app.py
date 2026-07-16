@@ -95,6 +95,7 @@ def create_production_app():
                 os.environ["ATTUNE_CHANNEL_BROKER_URL"],
                 os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
             ),
+            timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
         )
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),

@@ -114,6 +114,20 @@ variable "enable_google_chat_conversation" {
   default     = false
 }
 
+variable "hosted_timezone" {
+  description = "Operator-confirmed IANA timezone used to ground relative dates until per-principal timezone preferences are available."
+  type        = string
+  default     = "UTC"
+
+  validation {
+    condition = (
+      var.hosted_timezone == "UTC" ||
+      can(regex("^[A-Za-z][A-Za-z0-9_+-]{0,31}/[A-Za-z0-9_+./-]{1,127}$", var.hosted_timezone))
+    )
+    error_message = "hosted_timezone must be UTC or a bounded IANA timezone name such as America/Vancouver."
+  }
+}
+
 variable "llm_base_url" {
   description = "Operator-fixed OpenAI-compatible HTTPS origin or base path used only by the model gateway."
   type        = string

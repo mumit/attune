@@ -16,6 +16,7 @@ model_gateway_image          = "northamerica-northeast1-docker.pkg.dev/PROJECT/R
 # processing. Keep false until its dedicated identity and model secret are ready.
 enable_model_gateway = false
 enable_google_chat_conversation = false
+hosted_timezone                 = "UTC"
 llm_base_url          = "https://api.openai.com/v1"
 model_classify        = "gpt-4.1-mini"
 model_converse        = "gpt-4.1"

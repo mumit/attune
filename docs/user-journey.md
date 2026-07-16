@@ -172,6 +172,13 @@ can resolve a narrower window in `ATTUNE_TIMEZONE`. Direct Google OAuth and MCP
 still implement the same internal Workspace connector contract; the operated
 hosted release currently uses brokered direct OAuth.
 
+The hosted worker supplies an operator-confirmed IANA timezone and authoritative
+current local datetime outside the untrusted conversation and Workspace data.
+Words such as **today** and **tomorrow** are resolved only from that trusted
+temporal context. Until each principal can confirm a profile timezone, an
+operated deployment uses one explicit `hosted_timezone` value and must not infer
+the date from earlier email, calendar, or conversation content.
+
 Fetched subjects, snippets, bodies, event names, and attendees remain
 untrusted external data. They can be summarized but cannot issue instructions
 to Attune.

@@ -212,6 +212,10 @@ resource "google_cloud_run_v2_service" "worker" {
         value = tostring(var.enable_google_chat_conversation)
       }
       env {
+        name  = "ATTUNE_HOSTED_TIMEZONE"
+        value = var.hosted_timezone
+      }
+      env {
         name  = "ATTUNE_SECRET_BROKER_URL"
         value = google_cloud_run_v2_service.secret_broker.uri
       }

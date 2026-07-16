@@ -284,6 +284,13 @@ images. It does not make the public Chat endpoint enqueue ordinary messages;
 that requires the separate edge gate after runtime validation. Review a saved
 plan and confirm it contains no other authority or service changes.
 
+Set `hosted_timezone` to the operator-confirmed IANA timezone used by the
+initial tenant, for example `America/Vancouver`. The worker supplies the
+corresponding current local datetime as trusted model context for **today** and
+**tomorrow**; it never infers that context from retrieved Workspace data. Keep
+the default `UTC` only when UTC is the intended user timezone. Per-principal
+timezone confirmation remains a later account-profile capability.
+
 Development enabled this gate on 2026-07-16 UTC only after a dormant rollout.
 The saved activation plan added one worker-only channel-broker invoker grant
 and changed the worker and dispatch-broker revisions in place; it added the

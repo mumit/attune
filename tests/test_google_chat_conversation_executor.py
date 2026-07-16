@@ -93,11 +93,12 @@ class Replies:
         return True
 
 
-def execute(text, classification="general"):
+def execute(text, classification="general", timezone_name="UTC"):
     work, intents, workspace = Work(text), Intents(), Workspace()
     models, replies = Models(classification), Replies()
     GoogleChatConversationExecutor(
-        work, intents, workspace, models, replies, now=lambda: NOW
+        work, intents, workspace, models, replies, now=lambda: NOW,
+        timezone_name=timezone_name,
     )(TenantContext(TENANT), job())
     return work, intents, workspace, models, replies
 
@@ -120,6 +121,20 @@ def test_obvious_gmail_and_calendar_requests_override_model_under_fixed_limits()
     assert workspace.calls[0][2] == {"query": "is:unread newer_than:14d", "limit": 10}
     assert workspace.calls[1][2]["limit"] == 25
     assert models.calls[-1]["task"] == "converse"
+
+
+def test_relative_dates_use_authoritative_local_time_and_label_live_calendar():
+    _, _, _, models, _ = execute(
+        "What is on my calendar tomorrow?",
+        classification="calendar",
+        timezone_name="America/Vancouver",
+    )
+    messages = models.calls[-1]["messages"]
+    assert "2026-07-16T09:00:00-07:00" in messages[0]["content"]
+    assert "Authoritative IANA timezone: America/Vancouver" in messages[0]["content"]
+    assert "never from conversation or reference data" in messages[0]["content"]
+    assert messages[-1]["content"].startswith("Live Workspace results")
+    assert '"calendar_events"' in messages[-1]["content"]
 
 
 def test_mutation_request_is_refused_without_workspace_or_answer_model():
