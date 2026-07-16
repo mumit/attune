@@ -44,6 +44,7 @@ from attune.hosted.repositories import (
 )
 from attune.hosted.reconciliation import PostgresJobReconciliationRepository
 from attune.hosted.oauth import (
+    PostgresGoogleOAuthStartRepository,
     PostgresOAuthExchangeRepository,
     PostgresOAuthTransactionRepository,
 )
@@ -57,6 +58,7 @@ from attune.hosted.vault import (
     PostgresCredentialIntentRepository,
     PostgresSecretBrokerRepository,
 )
+from attune.hosted.vault_crypto import EncryptedCredential
 
 TENANT_A = UUID("10000000-0000-4000-8000-000000000001")
 TENANT_B = UUID("20000000-0000-4000-8000-000000000002")
@@ -90,7 +92,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0016_initial_identity_provisioning.sql"
+    assert migrations[-1].name == "0017_google_oauth_scopes.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -205,7 +207,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 16
+    assert apply_migrations(admin) == 17
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -1443,6 +1445,86 @@ def test_oauth_transaction_is_tenant_bound_one_time_and_exchange_only(
         raw_exchange.rollback()
     finally:
         raw_exchange.close()
+
+
+def test_google_oauth_start_is_atomic_principal_bound_and_refuses_replacement(
+    initialized_database, database_url
+):
+    repository = PostgresGoogleOAuthStartRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_control_plane"])
+    )
+    context = TenantContext(TENANT_B)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    scopes = (
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+    )
+    first = repository.start(
+        context,
+        principal_id=PRINCIPAL_B,
+        state_hash=hashlib.sha256(b"start-state-one").digest(),
+        binding_hash=hashlib.sha256(b"start-binding-one").digest(),
+        nonce_hash=hashlib.sha256(b"start-nonce-one").digest(),
+        pkce_verifier="v" * 64,
+        redirect_uri="https://dev.attune.mumit.org/oauth/google/callback",
+        scopes=scopes,
+        expires_at=expires_at,
+    )
+    second = repository.start(
+        context,
+        principal_id=PRINCIPAL_B,
+        state_hash=hashlib.sha256(b"start-state-two").digest(),
+        binding_hash=hashlib.sha256(b"start-binding-two").digest(),
+        nonce_hash=hashlib.sha256(b"start-nonce-two").digest(),
+        pkce_verifier="w" * 64,
+        redirect_uri="https://dev.attune.mumit.org/oauth/google/callback",
+        scopes=scopes,
+        expires_at=expires_at,
+    )
+    assert first.connector_id == second.connector_id
+    assert first.credential_intent_id != second.credential_intent_id
+    assert first.transaction_id != second.transaction_id
+    assert not repository.is_connected(context, principal_id=PRINCIPAL_B)
+
+    broker = PostgresSecretBrokerRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_secret_broker"])
+    )
+    leased = broker.lease(first.credential_intent_id, producer_kind="control_plane")
+    assert leased is not None
+    stored = broker.store(
+        first.credential_intent_id,
+        EncryptedCredential(
+            b"ciphertext-with-tag",
+            bytes(12),
+            b"wrapped-dek",
+            "projects/test/locations/test/keyRings/test/cryptoKeys/connectors",
+        ),
+        granted_scopes=scopes,
+    )
+    assert stored is not None
+    assert repository.is_connected(context, principal_id=PRINCIPAL_B)
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "SELECT granted_scopes FROM attune.connectors "
+            "WHERE tenant_id = %s AND id = %s",
+            (TENANT_B, first.connector_id),
+        )
+        assert tuple(cursor.fetchone()[0]) == scopes
+    with pytest.raises(RuntimeError, match="already connected"):
+        repository.start(
+            context,
+            principal_id=PRINCIPAL_B,
+            state_hash=hashlib.sha256(b"start-state-three").digest(),
+            binding_hash=hashlib.sha256(b"start-binding-three").digest(),
+            nonce_hash=hashlib.sha256(b"start-nonce-three").digest(),
+            pkce_verifier="x" * 64,
+            redirect_uri="https://dev.attune.mumit.org/oauth/google/callback",
+            scopes=scopes,
+            expires_at=expires_at,
+        )
 
 
 def test_identity_session_is_unambiguous_csrf_bound_and_function_only(

@@ -1,11 +1,15 @@
 state_bucket            = "attune-development-example-attune-tfstate"
 foundation_state_prefix = "foundation"
+runtime_state_prefix    = "runtime"
 control_plane_image     = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-control-plane@sha256:REPLACE"
 oauth_callback_image    = "northamerica-northeast1-docker.pkg.dev/PROJECT/REPOSITORY/attune-oauth-callback@sha256:REPLACE"
 hostname                = "dev.attune.example.com"
 enable_identity_sign_in = false
 identity_provider_ready = false
 identity_api_key         = ""
+enable_google_workspace_oauth = false
+google_oauth_provider_ready    = false
+google_oauth_client_id         = ""
 
 labels = {
   owner       = "platform"

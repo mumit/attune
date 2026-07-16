@@ -55,6 +55,17 @@ variable "oauth_exchange_image" {
   }
 }
 
+variable "oauth_min_instance_count" {
+  description = "Warm-instance floor for the synchronous audit, secret-broker, and OAuth-exchange chain after connector activation."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = contains([0, 1], var.oauth_min_instance_count)
+    error_message = "oauth_min_instance_count must be 0 while dormant or 1 after OAuth activation."
+  }
+}
+
 variable "worker_image" {
   description = "Artifact Registry worker image pinned by sha256 digest."
   type        = string

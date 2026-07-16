@@ -6,8 +6,17 @@ data "terraform_remote_state" "foundation" {
   }
 }
 
+data "terraform_remote_state" "runtime" {
+  backend = "gcs"
+  config = {
+    bucket = var.state_bucket
+    prefix = var.runtime_state_prefix
+  }
+}
+
 locals {
   foundation = data.terraform_remote_state.foundation.outputs.foundation
+  runtime    = data.terraform_remote_state.runtime.outputs
   prefix     = "attune-${local.foundation.environment}"
   labels = merge(
     {
@@ -36,7 +45,7 @@ resource "google_cloud_run_v2_service" "control_plane" {
     max_instance_request_concurrency = 20
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.enable_google_workspace_oauth ? 1 : 0
       max_instance_count = 2
     }
 
@@ -68,6 +77,17 @@ resource "google_cloud_run_v2_service" "control_plane" {
       env {
         name  = "ATTUNE_IDENTITY_PROJECT"
         value = local.foundation.project_id
+      }
+      env {
+        name  = "ATTUNE_GOOGLE_OAUTH_ENABLED"
+        value = tostring(var.enable_google_workspace_oauth)
+      }
+      dynamic "env" {
+        for_each = var.enable_google_workspace_oauth ? [1] : []
+        content {
+          name  = "ATTUNE_GOOGLE_OAUTH_CLIENT_ID"
+          value = var.google_oauth_client_id
+        }
       }
       dynamic "env" {
         for_each = var.enable_identity_sign_in ? [1] : []
@@ -148,6 +168,14 @@ resource "google_cloud_run_v2_service" "control_plane" {
       )
       error_message = "Identity sign-in activation requires provider-readiness attestation and the public browser API key."
     }
+    precondition {
+      condition = !var.enable_google_workspace_oauth || (
+        var.enable_identity_sign_in &&
+        var.google_oauth_provider_ready &&
+        var.google_oauth_client_id != ""
+      )
+      error_message = "Google Workspace OAuth activation requires identity sign-in, provider-readiness attestation, and the separate public client ID."
+    }
   }
 }
 
@@ -189,7 +217,7 @@ resource "google_cloud_run_v2_service" "oauth_callback" {
     max_instance_request_concurrency = 20
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.enable_google_workspace_oauth ? 1 : 0
       max_instance_count = 2
     }
 
@@ -213,6 +241,24 @@ resource "google_cloud_run_v2_service" "oauth_callback" {
       env {
         name  = "ATTUNE_PUBLIC_HOST"
         value = var.hostname
+      }
+      env {
+        name  = "ATTUNE_GOOGLE_OAUTH_ENABLED"
+        value = tostring(var.enable_google_workspace_oauth)
+      }
+      dynamic "env" {
+        for_each = var.enable_google_workspace_oauth ? [1] : []
+        content {
+          name  = "ATTUNE_OAUTH_EXCHANGE_URL"
+          value = local.runtime.oauth_exchange.uri
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_google_workspace_oauth ? [1] : []
+        content {
+          name  = "ATTUNE_OAUTH_EXCHANGE_AUDIENCE"
+          value = local.runtime.oauth_exchange.audience
+        }
       }
 
       startup_probe {
@@ -259,6 +305,14 @@ resource "google_cloud_run_v2_service" "oauth_callback" {
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition = !var.enable_google_workspace_oauth || (
+        var.google_oauth_provider_ready &&
+        var.google_oauth_client_id != ""
+      )
+      error_message = "OAuth callback activation requires provider-readiness attestation and the separate Workspace client ID."
+    }
   }
 
   depends_on = [google_logging_project_exclusion.oauth_callback_requests]
@@ -291,6 +345,29 @@ resource "google_compute_security_policy" "edge" {
   name        = "${local.prefix}-control-plane-edge"
   description = "Exact-host and bounded-rate policy for the locked Attune edge"
   type        = "CLOUD_ARMOR"
+
+  dynamic "rule" {
+    for_each = var.enable_google_workspace_oauth ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 880
+      description = "Permit only the authenticated Google connector start path"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/connectors/google/start'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 10
+          interval_sec = 60
+        }
+      }
+    }
+  }
 
   dynamic "rule" {
     for_each = var.enable_identity_sign_in ? [1] : []

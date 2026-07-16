@@ -137,19 +137,45 @@ class PostgresSecretBrokerRepository:
                 format_version=row[8],
             )
         return LeasedCredentialIntent(
-            id=row[0], tenant=TenantContext(row[1]), connector_id=row[2],
-            provider=row[3], operation=row[4], capability=row[5],
-            credential_id=row[6], credential_version=row[7], encrypted=encrypted,
+            id=row[0],
+            tenant=TenantContext(row[1]),
+            connector_id=row[2],
+            provider=row[3],
+            operation=row[4],
+            capability=row[5],
+            credential_id=row[6],
+            credential_version=row[7],
+            encrypted=encrypted,
         )
 
     def store(
-        self, intent_id: UUID, encrypted: EncryptedCredential
+        self,
+        intent_id: UUID,
+        encrypted: EncryptedCredential,
+        *,
+        granted_scopes: tuple[str, ...] | None = None,
     ) -> tuple[UUID, int] | None:
+        if granted_scopes is not None:
+            return self._call_row(
+                "SELECT * FROM attune.store_google_oauth_credential(%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    intent_id,
+                    encrypted.ciphertext,
+                    encrypted.nonce,
+                    encrypted.wrapped_dek,
+                    encrypted.key_resource,
+                    encrypted.format_version,
+                    list(granted_scopes),
+                ),
+            )
         row = self._call_row(
             "SELECT * FROM attune.store_connector_credential(%s,%s,%s,%s,%s,%s)",
             (
-                intent_id, encrypted.ciphertext, encrypted.nonce,
-                encrypted.wrapped_dek, encrypted.key_resource,
+                intent_id,
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.wrapped_dek,
+                encrypted.key_resource,
                 encrypted.format_version,
             ),
         )

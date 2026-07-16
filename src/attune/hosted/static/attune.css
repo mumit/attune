@@ -47,6 +47,13 @@ h1 {
   letter-spacing: -0.045em;
 }
 
+h2 {
+  margin: 0 0 0.75rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.65rem;
+  font-weight: 500;
+}
+
 .summary {
   margin: 1.5rem 0 2rem;
   color: #526058;
@@ -105,5 +112,17 @@ button:disabled {
   border-top: 1px solid rgb(23 33 28 / 10%);
   color: #69756e;
   font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+#workspace-connection {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgb(23 33 28 / 10%);
+}
+
+#workspace-connection p {
+  margin: 0 0 1.25rem;
+  color: #526058;
   line-height: 1.55;
 }

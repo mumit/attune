@@ -16,12 +16,22 @@
       <button id="google-sign-in" type="button" disabled>
         Continue with Google
       </button>
+      <section id="workspace-connection" hidden>
+        <h2>Connect your workspace</h2>
+        <p>
+          Attune starts with read-only access to Gmail and Calendar. Identity
+          sign-in and workspace access are separate permissions.
+        </p>
+        <button id="google-workspace-connect" type="button" disabled>
+          Connect Gmail and Calendar
+        </button>
+      </section>
       <p id="status" role="status" aria-live="polite">
         Preparing secure sign-in…
       </p>
       <p class="privacy">
-        Signing in identifies your Attune account. Access to Gmail, Calendar,
-        Chat, or other Workspace data requires a separate consent step.
+        Signing in identifies your Attune account. Workspace access is granted
+        separately and can be revoked without ending your Attune membership.
       </p>
     </main>
     <script type="module" src="/assets/identity.js"></script>

@@ -188,7 +188,10 @@ authenticated, and audited.
   Canonical content-free security events remain mandatory; request-log
   suppression is not audit suppression. Provider redirect registration MUST
   occur only after the route has converged globally and synthetic non-retention
-  evidence has passed; configuration order is part of the control.
+  evidence has passed; configuration order is part of the control. The callback
+  MUST require the exact provider authorization-response issuer, reject missing
+  or duplicate authority fields, and scrub rather than forward non-authoritative
+  response extensions.
 - **SEC-108.** OAuth transaction resolution MUST require independent state and
   browser-binding secrets, resolve tenant/principal/connector/redirect/scope
   authority from a short-lived canonical record, and atomically lease it before
@@ -228,6 +231,20 @@ authenticated, and audited.
   subject, expected email, and subject hash MUST NOT enter Terraform, job
   arguments, images, or logs. A one-time secret version MAY carry only the
   locally derived subject hash and MUST be destroyed after successful use.
+- **SEC-114.** A connector-consent start MUST derive tenant and principal only
+  from a CSRF-authorized application session. Pending connector, install intent,
+  and OAuth transaction creation MUST be atomic and serialized per
+  tenant/principal/provider. The browser MUST NOT choose connector identifiers,
+  provider, redirect, scopes, capability, expiry, or credential intent. An
+  active connector MUST NOT be silently replaced. Initial consent SHOULD use
+  the minimum read-only provider scopes; every scope escalation requires a
+  distinct reviewed capability and user ceremony.
+- **SEC-115.** Provider-exchange diagnostics MUST be limited to fixed,
+  content-free stage identifiers. Authorization codes, tokens, provider
+  responses, account identifiers, scopes, state, nonce, binding material, and
+  exception text MUST NOT enter logs. An operated synchronous consent chain
+  SHOULD keep its callback, exchange, broker, and mandatory audit dependency
+  warm rather than extending credential-bearing request timeouts.
 
 ### 5.2 Authorization model
 

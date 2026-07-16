@@ -353,15 +353,15 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             "attune_dispatch_executor": (True, False, True, False),
             "attune_audit_executor": (True, False, False, False),
             "attune_vault_executor": (True, False, False, False),
-                "attune_oauth_executor": (True, False, False, False),
-                "attune_identity_executor": (True, False, False, False),
-                "attune_identity_provisioning_executor": (
-                    True,
-                    False,
-                    True,
-                    False,
-                ),
-            }:
+            "attune_oauth_executor": (True, False, False, False),
+            "attune_identity_executor": (True, False, False, False),
+            "attune_identity_provisioning_executor": (
+                True,
+                False,
+                True,
+                False,
+            ),
+        }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
         cursor.execute(
@@ -481,6 +481,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             ),
             (
                 "attune.store_connector_credential(uuid,bytea,bytea,bytea,text,integer)",
+                "attune_secret_broker",
+                "attune_vault_executor",
+            ),
+            (
+                "attune.store_google_oauth_credential(uuid,bytea,bytea,bytea,text,integer,text[])",
                 "attune_secret_broker",
                 "attune_vault_executor",
             ),

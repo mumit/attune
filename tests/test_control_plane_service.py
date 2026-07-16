@@ -16,6 +16,7 @@ HOST = "dev.attune.mumit.org"
 PROJECT = "attune-development-502421"
 API_KEY = "AIza" + "a" * 35
 AUTH_DOMAIN = f"{PROJECT}.firebaseapp.com"
+WORKSPACE_CLIENT_ID = "123456789012-" + "a" * 32 + ".apps.googleusercontent.com"
 TENANT_ID = UUID("10000000-0000-4000-8000-000000000001")
 PRINCIPAL_ID = UUID("20000000-0000-4000-8000-000000000001")
 SESSION_ID = UUID("30000000-0000-4000-8000-000000000001")
@@ -47,6 +48,22 @@ class Sessions:
         return bool(self.session)
 
 
+class OAuthStarts:
+    def __init__(self, failure=None, connected=False):
+        self.calls = []
+        self.failure = failure
+        self.connected = connected
+
+    def start(self, context, **kwargs):
+        self.calls.append((context, kwargs))
+        if self.failure:
+            raise self.failure
+
+    def is_connected(self, context, *, principal_id):
+        self.calls.append(("is_connected", context, principal_id))
+        return self.connected
+
+
 def verified(_token, project_id):
     assert project_id == PROJECT
     return VerifiedIdentity(
@@ -56,7 +73,7 @@ def verified(_token, project_id):
     )
 
 
-def identity_client(sessions=None, verifier=verified):
+def identity_client(sessions=None, verifier=verified, **kwargs):
     return create_app(
         HOST,
         identity_enabled=True,
@@ -65,6 +82,7 @@ def identity_client(sessions=None, verifier=verified):
         identity_auth_domain=AUTH_DOMAIN,
         sessions=sessions or Sessions(),
         token_verifier=verifier,
+        **kwargs,
     ).test_client()
 
 
@@ -124,12 +142,11 @@ def test_identity_ui_exposes_only_public_provider_configuration():
         "project_id": PROJECT,
     }
     assert "no-store" in config.headers["Cache-Control"]
-    assert "script-src 'self' https://apis.google.com" in root.headers[
-        "Content-Security-Policy"
-    ]
-    assert root.headers["Cross-Origin-Opener-Policy"] == (
-        "same-origin-allow-popups"
+    assert (
+        "script-src 'self' https://apis.google.com"
+        in root.headers["Content-Security-Policy"]
     )
+    assert root.headers["Cross-Origin-Opener-Policy"] == ("same-origin-allow-popups")
 
 
 @pytest.mark.parametrize(
@@ -140,9 +157,7 @@ def test_identity_ui_exposes_only_public_provider_configuration():
         (API_KEY, "attacker.example"),
     ],
 )
-def test_identity_ui_rejects_inexact_public_provider_configuration(
-    api_key, auth_domain
-):
+def test_identity_ui_rejects_inexact_public_provider_configuration(api_key, auth_domain):
     with pytest.raises(ValueError):
         create_app(
             HOST,
@@ -232,3 +247,73 @@ def test_session_read_and_signout_require_csrf():
     )
     assert signed_out.status_code == 200
     assert [call[0] for call in sessions.calls][-2:] == ["authorize", "revoke"]
+
+
+def test_google_workspace_start_is_authenticated_csrf_bound_and_canonical():
+    sessions = Sessions()
+    starts = OAuthStarts()
+    client = identity_client(
+        sessions,
+        google_oauth_enabled=True,
+        google_oauth_client_id=WORKSPACE_CLIENT_ID,
+        google_oauth_starts=starts,
+    )
+    bootstrap = client.get("/v1/session/bootstrap", base_url=f"https://{HOST}").get_json()
+    client.post(
+        "/v1/session",
+        json={"id_token": "signed", "login_challenge": bootstrap["login_challenge"]},
+        headers=same_origin(),
+        base_url=f"https://{HOST}",
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    response = client.post(
+        "/v1/connectors/google/start",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+
+    assert response.status_code == 200
+    authorization_url = response.get_json()["authorization_url"]
+    assert authorization_url.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    assert f"client_id={WORKSPACE_CLIENT_ID}" in authorization_url
+    assert "response_type=code" in authorization_url
+    assert "code_challenge_method=S256" in authorization_url
+    assert "gmail.readonly" in authorization_url
+    assert "calendar.readonly" in authorization_url
+    assert len(starts.calls) == 1
+    context, values = starts.calls[0]
+    assert context == TenantContext(TENANT_ID)
+    assert values["principal_id"] == PRINCIPAL_ID
+    assert values["redirect_uri"] == f"https://{HOST}/oauth/google/callback"
+    assert values["scopes"] == (
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+    )
+    cookies = response.headers.getlist("Set-Cookie")
+    assert any(
+        "__Secure-attune_oauth_binding=" in value
+        and "HttpOnly" in value
+        and "Path=/oauth/google/callback" in value
+        and "SameSite=Lax" in value
+        for value in cookies
+    )
+
+
+def test_google_workspace_start_fails_closed_without_configuration_or_csrf():
+    client = identity_client()
+    assert (
+        client.post(
+            "/v1/connectors/google/start",
+            headers=same_origin(),
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 503
+    )
+    with pytest.raises(ValueError):
+        identity_client(
+            google_oauth_enabled=True,
+            google_oauth_client_id="invalid",
+            google_oauth_starts=OAuthStarts(),
+        )

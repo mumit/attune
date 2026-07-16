@@ -74,7 +74,19 @@ state. Keep these actions in a separately reviewed operator ceremony.
 5. Create a second Web application OAuth client for Workspace connector consent
    with the exact redirect
    `https://dev.attune.mumit.org/oauth/google/callback`. Download its standard
-   client JSON to an owner-readable temporary file.
+   client JSON to an owner-readable temporary file. Check **Google Auth
+   Platform > Audience** before activation:
+
+   - **External + Testing** displays a **Test users** section. Add each
+     development account there; testing grants expire after seven days.
+   - **Internal** does not display a test-user list. Accounts in the Google
+     Workspace organization are the allowed audience.
+   - **External + In production** does not display a test-user list. Sensitive
+     scopes may instead trigger Google's unverified-app limits until the app is
+     verified.
+
+   Absence of the Test users control is therefore expected for Internal or
+   published apps; it is not a client-creation failure.
 6. Add that complete JSON as a new version of the existing connector secret
    without placing it in a command argument or Terraform state:
 
@@ -120,13 +132,15 @@ for an explicitly reviewed recovery ceremony.
 The exact build, migration, execution, verification, and secret-destruction
 commands are in [`../deploy/gcp/data/README.md`](../deploy/gcp/data/README.md).
 
-This staged exception is not customer activation: connector OAuth stays off,
-no Workspace data is accessible, and production remains disabled.
+Development identity sign-in and the first exact tenant/principal mapping were
+activated and verified on 2026-07-15. A successful visit now reports **Signed
+in to Attune**. This is not customer activation: connector OAuth stays off, no
+Workspace data is accessible, and production remains disabled.
 
 ## Activation gates
 
-Keep production identity and the OAuth callback disabled until all of these are
-evidenced:
+Keep production identity disabled and keep development/production connector
+OAuth disabled until all applicable items are evidenced:
 
 - sign-in provider settings and authorized domains independently reviewed;
 - separate client IDs and redirects verified;
@@ -138,5 +152,7 @@ evidenced:
   and
 - connector callback non-retention plus the complete brokered consent test.
 
-Only then set both edge identity flags true in a reviewed plan. Connector OAuth
-is a later, independent activation.
+The development identity flags are now true. Connector OAuth is a later,
+independent activation using the gates in
+[`oauth-transaction.md`](oauth-transaction.md); it must not be inferred from
+the identity activation.

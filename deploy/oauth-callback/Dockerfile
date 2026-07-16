@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir --no-compile --require-hashes \
     && useradd --system --uid 65532 --gid attune --home-dir /nonexistent attune
 
 COPY src/attune/hosted/oauth_callback_service.py ./
+COPY src/attune/hosted/oauth_exchange_client.py ./
 COPY deploy/oauth-callback/app.py ./
 
 USER 65532:65532

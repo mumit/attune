@@ -69,6 +69,13 @@ callback remains disabled until a reviewed client secret version, exact Google
 redirect registration, hosted sign-in/session binding, negative tests, and
 release evidence all exist.
 
+The exchange is synchronous and traverses the exchange, secret broker, and
+audit writer before the callback can finish. Keep
+`oauth_min_instance_count = 0` while OAuth is dormant. Set it to `1` in an
+operated environment before enabling the public consent route so those three
+private services remain warm. This is an intentional availability/cost tradeoff,
+not a reason to lengthen credential-bearing callback timeouts.
+
 ## Deterministic worker boundary
 
 The worker accepts only the minimal versioned Cloud Tasks envelope at

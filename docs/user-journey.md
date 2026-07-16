@@ -25,6 +25,25 @@ Connecting Google Workspace is a separate screen and OAuth client with explicit
 Workspace scopes. A user can sign in to Attune without connecting Workspace,
 and disconnecting Workspace does not silently end or transfer the Attune account.
 
+The first hosted connection journey is:
+
+1. Visit the Attune hostname and choose **Continue with Google**.
+2. Complete identity-only sign-in. Attune creates its own eight-hour session;
+   the transient browser provider session is discarded.
+3. Choose **Connect Gmail and Calendar**. This opens a second Google consent
+   ceremony for read-only Gmail and Calendar access. It does not reuse the
+   sign-in client or silently request compose, send, Chat, or calendar-write
+   authority.
+4. Return to a credential-free Attune URL. The page reports connected, denied,
+   or failed without exposing the authorization code or provider error.
+5. Configure delivery and interaction channels, run bounded live Gmail and
+   Calendar checks, then activate briefs. Later capability upgrades such as
+   Gmail draft creation are separate, explicit consent and policy changes.
+
+Closing or denying the second screen leaves the Attune account signed in and
+unconnected. Retrying creates a fresh ten-minute transaction. A completed
+connector is shown as connected instead of silently starting a replacement.
+
 ## 1. Start the day
 
 At `ATTUNE_BRIEF_TIME`, Attune reads recent unread Gmail, today's Calendar,

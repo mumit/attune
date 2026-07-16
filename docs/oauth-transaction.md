@@ -16,6 +16,12 @@ persists an encrypted credential.
 The callback supplies no tenant, principal, connector, redirect URI, scope, or
 provider authority. Those values come from the canonical transaction record.
 
+The initial hosted capability is intentionally read-only: `openid`, `email`,
+`gmail.readonly`, and `calendar.readonly`. `openid` and `email` bind and
+validate the connector identity; they do not establish Attune tenant
+membership. Compose, send, Chat, and calendar-write scopes require later,
+separately reviewed capability upgrades.
+
 ## Transaction creation
 
 For each attempt, trusted code generates independent cryptographic values:
@@ -41,15 +47,26 @@ redirect, response type `code`, PKCE S256, transaction-specific state and
 nonce, offline access, explicit consent where required for a refresh token, and
 only reviewed scopes.
 
+Connector, `google.oauth.install` credential intent, and OAuth transaction
+creation occur in one PostgreSQL transaction. Tenant and principal come only
+from the authorized Attune session. The control plane serializes starts for the
+tenant/principal/provider tuple, reuses only that principal's pending Google
+connector, refuses an already-active connector, and rolls back every object if
+any insert fails. The browser supplies none of those identifiers or policy
+values.
+
 ## Callback and consumption
 
 1. The dedicated public scrubber bounds the query length and accepts only the
    exact host, method, and callback path. Its request-log planes are excluded by
    dedicated resource identity as specified in `security-architecture.md`.
-2. The scrubber requires exactly one bounded `code`, `state`, and binding
-   cookie. Provider errors are normalized without reflecting their fields. It
-   clears the binding cookie and sends the three opaque values over an
-   authenticated private request; it never receives the main login session.
+2. The scrubber requires Google's exact RFC 9207 authorization-response
+   issuer, exactly one bounded `code`, `state`, and binding cookie, and rejects
+   missing or duplicate authority fields. Non-authoritative provider extension
+   fields are ignored as OAuth requires and are never forwarded. Provider
+   errors are normalized without reflecting their fields. It clears the
+   binding cookie and sends the three opaque values over an authenticated
+   private request; it never receives the main login session.
 3. The private exchange service hashes state and binding and calls one narrow
    `SECURITY DEFINER` lease function. The function searches across tenants but
    returns a record only when both hashes match, the transaction is pending or
@@ -59,9 +76,13 @@ only reviewed scopes.
    PKCE verifier, nonce hash, redirect URI, and provider identifier to one fixed
    secret-broker operation. The broker supplies the client secret, uses the
    fixed Google token endpoint, forbids redirects and ambient proxies, validates
-   the ID token issuer/audience/nonce/time claims, minimizes the account
-   identity, envelope-encrypts the refresh token, and returns only an opaque
-   connector result.
+   the ID token issuer/audience/nonce/time claims, and admits only the requested
+   scope set after applying a closed equivalence for Google's `email` /
+   `userinfo.email` aliases. It minimizes the account identity,
+   envelope-encrypts the refresh token, and returns only an opaque connector
+   result. The fixed Google install function admits only the reviewed initial
+   scope tuple and atomically records those granted scopes on the connector with
+   the encrypted credential activation.
 5. The transaction is finalized once. A crash or ambiguous provider/vault
    result fails closed and requires a fresh user ceremony; an authorization
    code is never durably stored for automatic retry.
@@ -72,7 +93,8 @@ and callback URLs never enter audit metadata.
 
 ## Required negative evidence
 
-- guessed, malformed, missing, duplicate, expired, and replayed state;
+- guessed, malformed, missing, duplicate, expired, and replayed state, plus a
+  missing, duplicate, or non-Google authorization-response issuer;
 - missing, wrong, duplicate, or replayed binding cookie;
 - cross-tenant state/binding/connector substitution;
 - connector no longer pending or principal/session changed;
@@ -87,3 +109,24 @@ The OAuth client is configured only after global route convergence and
 synthetic non-retention evidence. Creating a client, receiving a 303, or
 successfully exchanging a code is not by itself authorization to admit customer
 data.
+
+## Development activation gate
+
+Code and Terraform support the complete route, but
+`enable_google_workspace_oauth` defaults to `false`. Activation requires all of
+the following in the same reviewed release:
+
+- a second Google Web application client used only for Workspace consent;
+- exact redirect `https://HOST/oauth/google/callback`;
+- a broker-only Secret Manager version containing the standard downloaded web
+  client JSON;
+- the matching public client ID in the edge variables;
+- synthetic callback non-retention evidence after the final callback image and
+  route have converged;
+- successful negative tests for session, CSRF, state, binding, replay,
+  duplicate parameters, private workload identity, and broker failure; and
+- `google_oauth_provider_ready = true` plus
+  `enable_google_workspace_oauth = true` in a reviewed saved plan.
+
+The client secret never enters Terraform. The readiness boolean is an operator
+attestation, not a substitute for the evidence above.

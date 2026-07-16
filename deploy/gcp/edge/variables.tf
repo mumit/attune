@@ -9,6 +9,12 @@ variable "foundation_state_prefix" {
   default     = "foundation"
 }
 
+variable "runtime_state_prefix" {
+  description = "GCS prefix of the runtime remote state containing the private OAuth exchange endpoint."
+  type        = string
+  default     = "runtime"
+}
+
 variable "control_plane_image" {
   description = "Artifact Registry control-plane image pinned by sha256 digest."
   type        = string
@@ -72,5 +78,28 @@ variable "identity_api_key" {
   validation {
     condition     = var.identity_api_key == "" || can(regex("^AIza[0-9A-Za-z_-]{35}$", var.identity_api_key))
     error_message = "identity_api_key must be empty or a syntactically valid public browser API key."
+  }
+}
+
+variable "enable_google_workspace_oauth" {
+  description = "Activate the separate Google Workspace connector-consent journey."
+  type        = bool
+  default     = false
+}
+
+variable "google_oauth_provider_ready" {
+  description = "Explicit operator attestation that the separate Workspace web client, exact redirect, consent screen, secret version, and negative tests are ready."
+  type        = bool
+  default     = false
+}
+
+variable "google_oauth_client_id" {
+  description = "Public client ID of the separate Google Workspace OAuth web client."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.google_oauth_client_id == "" || can(regex("^[0-9]{6,32}-[0-9A-Za-z_-]{16,96}\\.apps\\.googleusercontent\\.com$", var.google_oauth_client_id))
+    error_message = "google_oauth_client_id must be empty or a syntactically valid Google web client ID."
   }
 }

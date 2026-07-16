@@ -48,7 +48,7 @@ resource "google_cloud_run_v2_service" "audit_writer" {
     max_instance_request_concurrency = 8
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.oauth_min_instance_count
       max_instance_count = 3
     }
 
@@ -432,7 +432,7 @@ resource "google_cloud_run_v2_service" "secret_broker" {
     max_instance_request_concurrency = 4
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.oauth_min_instance_count
       max_instance_count = 3
     }
 
@@ -574,7 +574,7 @@ resource "google_cloud_run_v2_service" "oauth_exchange" {
     max_instance_request_concurrency = 4
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.oauth_min_instance_count
       max_instance_count = 3
     }
 

@@ -10,7 +10,7 @@ output "edge" {
     certificate                 = google_compute_managed_ssl_certificate.edge.name
     health_url                  = "https://${var.hostname}/healthz"
     oauth_callback              = "https://${var.hostname}/oauth/google/callback"
-    oauth_is_enabled            = false
+    oauth_is_enabled            = var.enable_google_workspace_oauth
     identity_sign_in_enabled    = var.enable_identity_sign_in
   }
 }

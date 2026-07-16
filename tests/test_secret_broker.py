@@ -36,8 +36,8 @@ class Vault:
     def lease(self, *args, **kwargs):
         return self.leased
 
-    def store(self, intent_id, encrypted):
-        self.stored.append((intent_id, encrypted))
+    def store(self, intent_id, encrypted, **kwargs):
+        self.stored.append((intent_id, encrypted, kwargs))
         return UUID("10000000-0000-4000-8000-000000000304"), 1
 
     def revoke(self, intent_id):
@@ -154,3 +154,4 @@ def test_google_oauth_install_uses_canonical_intent_and_two_phase_audit():
     assert google.calls[0]["authorization_code"] == "code"
     assert cipher.calls[0][0]["refresh_token"] == "restricted"
     assert vault.stored[0][0] == INTENT
+    assert vault.stored[0][2] == {"granted_scopes": ("openid", "email")}

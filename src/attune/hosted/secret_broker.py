@@ -86,7 +86,7 @@ class SecretBroker:
                 provider=intent.provider,
                 credential_version=version,
             )
-            stored = self._vault.store(intent.id, encrypted)
+            stored = self._vault.store(intent.id, encrypted, granted_scopes=tuple(scopes))
         except ProviderFailure:
             self._record(intent, action=GOOGLE_OAUTH_INSTALL_ACTION, outcome="failed")
             try:

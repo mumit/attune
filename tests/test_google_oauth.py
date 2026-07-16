@@ -167,6 +167,74 @@ def test_exchange_rejects_incomplete_or_scope_changed_response(change):
         )
 
 
+def test_exchange_accepts_only_the_fixed_google_email_scope_equivalence():
+    body = {
+        "access_token": "access",
+        "refresh_token": "refresh",
+        "id_token": "signed-id-token",
+        "token_type": "Bearer",
+        "scope": (
+            "openid email https://www.googleapis.com/auth/userinfo.email "
+            "https://www.googleapis.com/auth/gmail.readonly "
+            "https://www.googleapis.com/auth/calendar.readonly"
+        ),
+    }
+    provider = GoogleAuthorizationCodeProvider(
+        client_secret(),
+        session=Session(Response(body)),
+        id_token_verifier=lambda token, audience: {
+            "iss": "https://accounts.google.com",
+            "sub": "subject",
+            "nonce": "n" * 43,
+        },
+    )
+
+    credential = provider.exchange(
+        authorization_code="code",
+        pkce_verifier="v" * 64,
+        nonce_hash=hashlib.sha256(("n" * 43).encode()).digest(),
+        redirect_uri=REDIRECT,
+        scopes=(
+            "openid",
+            "email",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ),
+    )
+
+    assert credential["scopes"] == [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly",
+    ]
+
+    extra_scope_body = dict(body)
+    extra_scope_body["scope"] += " https://www.googleapis.com/auth/gmail.modify"
+    provider_with_extra_scope = GoogleAuthorizationCodeProvider(
+        client_secret(),
+        session=Session(Response(extra_scope_body)),
+        id_token_verifier=lambda token, audience: {
+            "iss": "https://accounts.google.com",
+            "sub": "subject",
+            "nonce": "n" * 43,
+        },
+    )
+    with pytest.raises(ProviderFailure):
+        provider_with_extra_scope.exchange(
+            authorization_code="code",
+            pkce_verifier="v" * 64,
+            nonce_hash=hashlib.sha256(("n" * 43).encode()).digest(),
+            redirect_uri=REDIRECT,
+            scopes=(
+                "openid",
+                "email",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/calendar.readonly",
+            ),
+        )
+
+
 def test_exchange_rejects_wrong_nonce_or_redirect_before_storage():
     response = Response(
         {

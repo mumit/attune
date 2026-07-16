@@ -2,12 +2,11 @@
 
 This independent Terraform root creates the locked public HTTPS boundary for
 the hosted control plane. With identity disabled, the service exposes only
-`GET /healthz` and an unavailable root. A separately identified,
-credential-free callback scrubber
-accepts the exact Google callback path only to remove query parameters from the
-browser URL. The private OAuth exchange is deployed but not connected to this
-scrubber. Signup, sessions, connector installation, and customer traffic remain
-disabled.
+`GET /healthz` and an unavailable root. Identity sign-in can be activated
+independently. Google Workspace connector consent has a second default-off gate
+that atomically creates a principal-bound transaction and connects the
+credential-free callback scrubber to the private OAuth exchange. Customer
+traffic remains unauthorized until the applicable gates and evidence pass.
 
 The control-plane image contains a separately gated Identity Platform sign-in
 page, verifier, and opaque session API. `enable_identity_sign_in = false` omits
@@ -26,7 +25,7 @@ also avoids an `allUsers` IAM grant, which domain-restricted-sharing policies
 reject. Disabling the check is safe only in combination with both ingress
 restrictions and the disabled default URI.
 
-The dormant shell policy permits only `/` and `/healthz` on the exact configured
+The locked shell policy permits only `/` and `/healthz` on the exact configured
 host. When staged identity is enabled, a tighter rule adds only the public
 configuration, two fixed assets, and exact session paths; the application
 enforces the allowed HTTP methods and returns 405 for every other method. The browser bundle
@@ -38,16 +37,19 @@ protected project exclusion drops both Cloud Run platform request logs and
 Cloud Armor/load-balancer request logs by the dedicated service/backend resource
 identities. Disabling backend logging alone is insufficient because Cloud Armor
 can still emit `requests` entries. The exclusion does not match on or inspect
-the credential-bearing URL. The scrubber parses no OAuth fields, has no
-access-log, database, secret, KMS, queue, or provider authority, and redirects
-to `/` with HTTP 303. The foundation's immutable sink exports Cloud Audit logs
-only.
+the credential-bearing URL. While connector OAuth is off, the scrubber parses
+no OAuth fields. When its separate gate is on, it bounds and normalizes only
+code, state, and its callback-only binding cookie, then hands them to the
+private exchange using the callback workload identity. It has no access-log,
+database, secret, KMS, queue, or provider authority and redirects to a
+credential-free result URL with HTTP 303. The foundation's immutable sink
+exports Cloud Audit logs only.
 
-These controls establish URL non-retention; they do not activate OAuth. The
-server-side one-time transaction, PKCE exchange, and private broker handoff are
-implemented behind the dormant boundary. Hosted sign-in/session binding,
-identity-link validation, a reviewed OAuth client, callback-to-exchange wiring,
-content-free live audit evidence, and adversarial tests remain launch gates.
+These controls establish URL non-retention; they do not by themselves activate
+OAuth. The server-side transaction, PKCE exchange, callback-to-exchange
+workload identity, and private broker handoff are implemented. A separate
+reviewed Workspace OAuth client, broker-only secret version, exact redirect,
+content-free live evidence, and adversarial tests remain activation gates.
 
 ## Build and apply
 
@@ -87,6 +89,40 @@ terraform show edge.tfplan
 terraform apply edge.tfplan
 terraform output -json edge
 ```
+
+`runtime_state_prefix` must identify the already-applied runtime root because
+the callback reads the private OAuth exchange URI and audience from remote
+state. This is non-secret routing metadata.
+
+## Workspace OAuth activation
+
+Leave these values at their defaults during image and route rollout:
+
+```hcl
+enable_google_workspace_oauth = false
+google_oauth_provider_ready    = false
+google_oauth_client_id         = ""
+```
+
+First deploy the final control-plane and callback images with OAuth off and
+repeat the synthetic callback non-retention test below after global route
+convergence. Then create the separate Workspace web client, register only the
+exact callback output, add its downloaded JSON as a Secret Manager version
+using `docs/identity-platform.md`, and independently compare its public client
+ID. Only after the complete evidence review should a saved edge plan set:
+
+```hcl
+enable_google_workspace_oauth = true
+google_oauth_provider_ready    = true
+google_oauth_client_id         = "PUBLIC_WORKSPACE_CLIENT_ID.apps.googleusercontent.com"
+```
+
+Terraform never receives the client secret. Preconditions require identity
+sign-in to be enabled, and Cloud Armor exposes the connector-start route only
+while this separate gate is true. Enabling the gate also keeps one control-plane
+and one callback instance warm. Set `oauth_min_instance_count = 1` in the
+runtime root before this apply so the complete synchronous consent chain does
+not cold-start serially.
 
 Create exactly the output `A` record at the authoritative DNS provider. The
 Google-managed certificate remains `PROVISIONING` until DNS points at the

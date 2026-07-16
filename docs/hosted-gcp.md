@@ -77,7 +77,8 @@ The transaction and callback contract is specified in
 
 1. The authenticated control plane creates an OAuth transaction bound to the
    browser session, intended tenant, PKCE verifier, exact redirect URI, state,
-   and expiry.
+   and expiry. Pending connector, install intent, and transaction are created
+   atomically; the browser chooses none of their authority.
 2. The public callback scrubber removes the credential-bearing browser URL and
    hands only the bounded code, state, and callback binding to a private OAuth
    exchange service. That service leases canonical transaction authority using
@@ -175,19 +176,24 @@ acceptable substitutes.
    implemented in development. The private OAuth exchange, function-only
    transaction lease/finalize database boundary, callback-only invoker grant,
    and fixed broker exchange operation are deployed dormant in development.
-   The callback is not enabled, and no user OAuth flow is authorized until the
-   hosted login/session binding, reviewed client-secret version, redirect
-   registration, and adversarial evidence are complete.
+   The callback activation path and authenticated connector-start boundary are
+   implemented and were activated for development evidence on 2026-07-15 with
+   a separate broker-only client-secret version, exact redirect registration,
+   and callback non-retention evidence. The synchronous consent chain uses one
+   warm control-plane, callback, exchange, secret-broker, and audit-writer
+   instance while active; dormant environments retain a zero-instance floor.
+   Production authorization still requires the remaining adversarial,
+   operational, verification, and launch-gate evidence.
 4. **Control plane:** OIDC/passkey login and explicit connector identity links.
-   The first Google Identity Platform verifier and tenant-bound opaque session
-   store are implemented and deployed dormant. Identity Platform is initialized
-   in development; its browser key and authorized domains are restricted, but
-   no sign-in provider is configured. Cloud Armor denies all session routes and
-   the application flag remains false. Sign-in-provider configuration, a test
-   principal mapping, adversarial evidence, signup/tenant-selection ceremonies,
-   and UI remain before activation. Follow the separate [hosted sign-in operator
-   ceremony](identity-platform.md); it deliberately uses a different OAuth
-   client from Workspace connector consent.
+   Google Identity Platform sign-in, the tenant-bound opaque session store, and
+   one exact development tenant/principal mapping were activated and verified
+   on 2026-07-15. Email/domain membership inference remains forbidden. The
+   signed-in page now exposes a separately gated Google Workspace connection
+   journey; while its gate is false, it creates no connector authority.
+   Production signup, invitation/tenant-selection, connector revocation, and
+   account-management ceremonies remain. Follow the separate [hosted sign-in
+   operator ceremony](identity-platform.md); it deliberately uses a different
+   OAuth client from Workspace connector consent.
 5. **Ingress and workers:** provider verification, replay resistance,
    reconciliation, deterministic capabilities, and kill switches.
 6. **Operations:** load balancer/WAF, alerts, SLOs, backups/restores, export,

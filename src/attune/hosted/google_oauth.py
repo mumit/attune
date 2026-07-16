@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -19,6 +20,10 @@ from .google_provider import (
 GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
 MAX_CLIENT_SECRET_BYTES = 16_384
 MAX_CERT_RESPONSE_BYTES = 65_536
+GOOGLE_SCOPE_EQUIVALENTS = {
+    "https://www.googleapis.com/auth/userinfo.email": "email",
+}
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, repr=False)
@@ -120,8 +125,13 @@ class GoogleAuthorizationCodeProvider:
                 stream=True,
             )
         except Exception as error:
+            LOG.warning("google_oauth_exchange_refused stage=token_request")
             raise ProviderFailure("token request failed") from error
-        body = _json_response(response, expected_status=200)
+        try:
+            body = _json_response(response, expected_status=200)
+        except ProviderFailure:
+            LOG.warning("google_oauth_exchange_refused stage=token_endpoint")
+            raise
         access_token = body.get("access_token")
         refresh_token = body.get("refresh_token")
         id_token = body.get("id_token")
@@ -137,12 +147,14 @@ class GoogleAuthorizationCodeProvider:
             or not isinstance(token_type, str)
             or token_type.lower() != "bearer"
             or not isinstance(granted_scopes, str)
-            or set(granted_scopes.split()) != set(requested_scopes)
+            or not _equivalent_scope_grant(granted_scopes, requested_scopes)
         ):
+            LOG.warning("google_oauth_exchange_refused stage=token_response")
             raise ProviderFailure("invalid token response")
         try:
             claims = self._verify_id_token(id_token, client.client_id)
         except Exception as error:
+            LOG.warning("google_oauth_exchange_refused stage=id_token")
             raise ProviderFailure("invalid ID token") from error
         nonce = claims.get("nonce")
         subject = claims.get("sub")
@@ -156,6 +168,7 @@ class GoogleAuthorizationCodeProvider:
             or not 1 <= len(subject) <= 255
             or issuer not in {"accounts.google.com", "https://accounts.google.com"}
         ):
+            LOG.warning("google_oauth_exchange_refused stage=id_token_binding")
             raise ProviderFailure("invalid ID token binding")
         return {
             "refresh_token": refresh_token,
@@ -166,6 +179,16 @@ class GoogleAuthorizationCodeProvider:
             "issuer": issuer,
             "subject_hash": hashlib.sha256(subject.encode()).hexdigest(),
         }
+
+
+def _equivalent_scope_grant(granted: str, requested: Sequence[str]) -> bool:
+    """Compare Google's fixed aliases without admitting an extra capability."""
+    values = granted.split()
+    if not values or any(not 1 <= len(value) <= 255 for value in values):
+        return False
+    normalized = {GOOGLE_SCOPE_EQUIVALENTS.get(value, value) for value in values}
+    expected = {GOOGLE_SCOPE_EQUIVALENTS.get(value, value) for value in requested}
+    return normalized == expected
 
 
 def _client_document(value: Any) -> GoogleOAuthClient:

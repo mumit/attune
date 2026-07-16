@@ -249,8 +249,12 @@ def test_control_plane_edge_is_locked_before_oauth_activation():
     assert "request.path == '/healthz'" in terraform
     assert "strip_query            = true" in terraform
     assert 'min_tls_version = "TLS_1_2"' in terraform
-    assert re.search(r"oauth_is_enabled\s*=\s*false", terraform)
-    assert "oauth/google/callback" not in service
+    assert re.search(
+        r'enable_google_workspace_oauth"\s*\{[^}]*default\s*=\s*false', terraform, re.S
+    )
+    assert "oauth_is_enabled            = var.enable_google_workspace_oauth" in terraform
+    assert "google_oauth_provider_ready" in terraform
+    assert '@app.get("/oauth/google/callback")' not in service
     assert "USER 65532:65532" in dockerfile
     assert "google_logging_project_exclusion" in terraform
     assert 'log_id("run.googleapis.com/requests")' in terraform
@@ -261,9 +265,10 @@ def test_control_plane_edge_is_locked_before_oauth_activation():
     assert 'resource "google_compute_backend_service" "oauth_callback"' in terraform
     assert "enable = false" in terraform
     assert "request.method == 'GET'" in terraform
-    assert "request.args" not in callback
     assert "request.query_string" in callback
     assert 'redirect("/", code=303)' in callback
+    assert "OAUTH_BINDING_COOKIE" in callback
+    assert "exchange.exchange" in callback
     assert '--access-logfile", "/dev/null"' in callback_dockerfile
     assert "USER 65532:65532" in callback_dockerfile
     assert "--require-hashes" in callback_dockerfile

@@ -7,6 +7,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
+from urllib.parse import urlencode
 
 from .identity import IdentityRefused, VerifiedIdentity, verify_identity_platform_token
 from .identity_session import (
@@ -14,6 +15,7 @@ from .identity_session import (
     IdentitySessionSecrets,
     create_identity_session_secrets,
 )
+from .oauth_transaction import create_oauth_transaction_secrets
 
 HOSTNAME = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -23,7 +25,19 @@ FIREBASE_API_KEY = re.compile(r"^AIza[0-9A-Za-z_-]{35}$")
 LOGIN_COOKIE = "__Host-attune_login"
 SESSION_COOKIE = "__Host-attune_session"
 CSRF_COOKIE = "__Host-attune_csrf"
+OAUTH_BINDING_COOKIE = "__Secure-attune_oauth_binding"
 SESSION_LIFETIME = timedelta(hours=8)
+OAUTH_LIFETIME = timedelta(minutes=10)
+GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_WORKSPACE_SCOPES = (
+    "openid",
+    "email",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.readonly",
+)
+GOOGLE_CLIENT_ID = re.compile(
+    r"^[0-9]{6,32}-[0-9A-Za-z_-]{16,96}\.apps\.googleusercontent\.com$"
+)
 
 
 class SessionRepository(Protocol):
@@ -42,6 +56,12 @@ class SessionRepository(Protocol):
     def revoke(self, token: str, csrf: str) -> bool: ...
 
 
+class GoogleOAuthStartRepository(Protocol):
+    def start(self, context, **kwargs): ...
+
+    def is_connected(self, context, *, principal_id): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -50,6 +70,9 @@ def create_app(
     identity_api_key: str | None = None,
     identity_auth_domain: str | None = None,
     sessions: SessionRepository | None = None,
+    google_oauth_enabled: bool = False,
+    google_oauth_client_id: str | None = None,
+    google_oauth_starts: GoogleOAuthStartRepository | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -70,6 +93,16 @@ def create_app(
             raise ValueError(
                 "enabled identity requires exact public provider configuration"
             )
+    if google_oauth_enabled and (
+        not identity_enabled
+        or google_oauth_starts is None
+        or not isinstance(google_oauth_client_id, str)
+        or not GOOGLE_CLIENT_ID.fullmatch(google_oauth_client_id)
+    ):
+        raise ValueError(
+            "enabled Google Workspace OAuth requires identity, a public client ID, "
+            "and a transaction repository"
+        )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
         MAX_CONTENT_LENGTH=20_000 if identity_enabled else 1024,
@@ -89,9 +122,7 @@ def create_app(
                 f"https://{identity_auth_domain} https://accounts.google.com; "
                 "base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
             )
-            response.headers["Cross-Origin-Opener-Policy"] = (
-                "same-origin-allow-popups"
-            )
+            response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
         else:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
@@ -211,7 +242,89 @@ def create_app(
                 session = None
             if session is None:
                 return jsonify({"authenticated": False}), 401
-            return jsonify({"authenticated": True})
+            google_workspace_oauth = "not_configured"
+            if google_oauth_enabled:
+                try:
+                    google_workspace_oauth = (
+                        "connected"
+                        if google_oauth_starts.is_connected(  # type: ignore[union-attr]
+                            session.context, principal_id=session.principal_id
+                        )
+                        else "available"
+                    )
+                except Exception:
+                    google_workspace_oauth = "unavailable"
+            return jsonify(
+                {
+                    "authenticated": True,
+                    "google_workspace_oauth": google_workspace_oauth,
+                }
+            )
+
+        @app.post("/v1/connectors/google/start")
+        def start_google_connector():
+            if not google_oauth_enabled:
+                return jsonify({"error": "connector_not_configured"}), 503
+            if not _same_origin_request(request, expected_origin):
+                return jsonify({"error": "invalid_session"}), 401
+            token = request.cookies.get(SESSION_COOKIE, "")
+            csrf_cookie = request.cookies.get(CSRF_COOKIE, "")
+            csrf_header = request.headers.get("X-Attune-CSRF", "")
+            if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_header):
+                return jsonify({"error": "invalid_session"}), 401
+            try:
+                authorized = sessions.authorize(  # type: ignore[union-attr]
+                    token, csrf_cookie
+                )
+                if authorized is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                transaction = create_oauth_transaction_secrets()
+                redirect_uri = f"{expected_origin}/oauth/google/callback"
+                google_oauth_starts.start(  # type: ignore[union-attr]
+                    authorized.context,
+                    principal_id=authorized.principal_id,
+                    state_hash=transaction.state_hash,
+                    binding_hash=transaction.binding_hash,
+                    nonce_hash=transaction.nonce_hash,
+                    pkce_verifier=transaction.pkce_verifier,
+                    redirect_uri=redirect_uri,
+                    scopes=GOOGLE_WORKSPACE_SCOPES,
+                    expires_at=datetime.now(timezone.utc) + OAUTH_LIFETIME,
+                )
+            except RuntimeError:
+                return jsonify({"error": "connector_already_active"}), 409
+            except Exception:
+                return jsonify({"error": "connector_unavailable"}), 503
+            authorization_url = (
+                GOOGLE_AUTHORIZATION_ENDPOINT
+                + "?"
+                + urlencode(
+                    {
+                        "client_id": google_oauth_client_id,
+                        "redirect_uri": redirect_uri,
+                        "response_type": "code",
+                        "scope": " ".join(GOOGLE_WORKSPACE_SCOPES),
+                        "access_type": "offline",
+                        "include_granted_scopes": "false",
+                        "prompt": "consent select_account",
+                        "state": transaction.state,
+                        "nonce": transaction.nonce,
+                        "code_challenge": transaction.pkce_challenge,
+                        "code_challenge_method": "S256",
+                    }
+                )
+            )
+            response = jsonify({"authorization_url": authorization_url})
+            response.set_cookie(
+                OAUTH_BINDING_COOKIE,
+                transaction.binding,
+                max_age=int(OAUTH_LIFETIME.total_seconds()),
+                secure=True,
+                httponly=True,
+                samesite="Lax",
+                path="/oauth/google/callback",
+            )
+            return response
 
         @app.delete("/v1/session")
         def delete_session():

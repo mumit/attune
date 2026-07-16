@@ -10,6 +10,8 @@ import {
 } from "firebase/auth";
 
 const button = document.querySelector("#google-sign-in");
+const workspace = document.querySelector("#workspace-connection");
+const workspaceButton = document.querySelector("#google-workspace-connect");
 const status = document.querySelector("#status");
 
 function show(message, kind = "info") {
@@ -113,13 +115,72 @@ async function existingSession() {
     credentials: "same-origin",
     headers: { Accept: "application/json" },
   });
-  return response.ok;
+  return response.ok ? await response.json() : null;
+}
+
+function cookie(name) {
+  const prefix = `${encodeURIComponent(name)}=`;
+  const item = document.cookie.split("; ").find((value) => value.startsWith(prefix));
+  return item ? decodeURIComponent(item.slice(prefix.length)) : null;
+}
+
+function showWorkspace(session) {
+  workspace.hidden = false;
+  if (session.google_workspace_oauth === "connected") {
+    workspaceButton.disabled = true;
+    workspaceButton.textContent = "Gmail and Calendar connected";
+    show("Google Workspace is connected.", "success");
+    return;
+  }
+  if (session.google_workspace_oauth !== "available") {
+    workspaceButton.disabled = true;
+    workspaceButton.textContent = "Workspace connection is being prepared";
+    return;
+  }
+  workspaceButton.disabled = false;
+  workspaceButton.addEventListener("click", async () => {
+    workspaceButton.disabled = true;
+    show("Preparing Google Workspace consent…");
+    try {
+      const csrf = cookie("__Host-attune_csrf");
+      if (!csrf) throw new Error("missing session binding");
+      const result = await json(
+        await fetch("/v1/connectors/google/start", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            Accept: "application/json",
+            "X-Attune-CSRF": csrf,
+          },
+        }),
+      );
+      window.location.assign(result.authorization_url);
+    } catch (error) {
+      show(
+        error.status === 409
+          ? "Google Workspace is already connected."
+          : "Workspace connection could not be started. Please try again.",
+        error.status === 409 ? "success" : "error",
+      );
+      workspaceButton.disabled = false;
+    }
+  });
 }
 
 async function main() {
-  if (await existingSession()) {
-    show("Signed in to Attune.", "success");
+  const outcome = new URLSearchParams(window.location.search).get("workspace");
+  if (outcome) window.history.replaceState({}, "", window.location.pathname);
+  const session = await existingSession();
+  if (session) {
+    const messages = {
+      connected: ["Google Workspace is connected.", "success"],
+      denied: ["Google Workspace access was not granted.", "pending"],
+      failed: ["Workspace connection could not be completed. Please try again.", "error"],
+    };
+    const result = messages[outcome] || ["Signed in to Attune.", "success"];
+    show(result[0], result[1]);
     button.hidden = true;
+    showWorkspace(session);
     return;
   }
   const auth = await configure();
@@ -135,6 +196,8 @@ async function main() {
       await attempt;
       show("Signed in to Attune.", "success");
       button.hidden = true;
+      const session = await existingSession();
+      if (session) showWorkspace(session);
     } catch (error) {
       if (error.status === 409) {
         show(
