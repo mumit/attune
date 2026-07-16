@@ -96,6 +96,15 @@ to a one-user DM. Each provider then shows installation, ingress, destination,
 and fixed-content test as separate checks. Shared spaces and channels are not
 accepted by the initial hosted release.
 
+After Google Chat says the one-time link succeeded, return to the setup page.
+If the page says the delivery test remains, select **Send fixed connection
+test**. The request has no editable message or destination. Attune sends one
+sentence to the owner DM: `Attune connection test succeeded. No workspace data
+was accessed.` Successful provider readback changes the destination to active.
+If an older development binding says its encrypted route must be adopted,
+generate a fresh link code and send it in the same owner DM first; Attune will
+adopt only an exact app, owner, and DM match.
+
 Closing or denying the second screen leaves the Attune account signed in and
 unconnected. Retrying creates a fresh ten-minute transaction. A completed
 connector is verified instead of silently starting a replacement. A temporary

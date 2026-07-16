@@ -63,3 +63,15 @@ def test_client_rejects_non_origin_urls_and_nonexact_success():
         actor_ref="users/123456",
         destination_ref="spaces/AAAA-test",
     )
+
+
+def test_client_delivery_sends_only_canonical_destination_binding():
+    destination = __import__("uuid").UUID("10000000-0000-4000-8000-000000000107")
+    session = Session(Response(body={"status": "delivered", "destination_status": "active"}))
+    client = ChannelBrokerClient(
+        URL, AUDIENCE, token_provider=lambda _: "token", session=session
+    )
+    assert client.test_google_chat_delivery(destination_id=destination)
+    url, call = session.calls[0]
+    assert url == f"{URL}/v1/google-chat/test-delivery"
+    assert call["json"] == {"version": 1, "destination_id": str(destination)}

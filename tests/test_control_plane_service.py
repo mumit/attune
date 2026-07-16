@@ -224,6 +224,23 @@ class ChannelSetup:
             "Started", (), {"transaction": transaction, "one_time_secret": "x" * 43}
         )()
 
+    def test_delivery(self, context, **kwargs):
+        self.calls.append(("test", context, kwargs))
+        if self.failure:
+            raise self.failure
+        states = list(self.states)
+        states[0] = type(
+            "ProviderState",
+            (),
+            {
+                "provider": "google_chat",
+                "selected": True,
+                "setup_state": "consumed",
+                "destination_state": "active",
+            },
+        )()
+        return tuple(states)
+
 def verified(_token, project_id):
     assert project_id == PROJECT
     return VerifiedIdentity(
@@ -950,3 +967,36 @@ def test_hosted_channel_setup_dependency_body_and_stale_auth_fail_closed():
     )
     assert body.status_code == 400
     assert setup.calls == []
+
+
+def test_hosted_google_chat_delivery_test_is_recent_bound_and_argument_free():
+    onboarding = Onboarding(OnboardingState())
+    setup = ChannelSetup()
+    client, _sessions = signed_in_client(
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=onboarding,
+        hosted_channels_enabled=True,
+        hosted_channels=Channels(onboarding),
+        hosted_channel_setup_enabled=True,
+        hosted_channel_setup=setup,
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    path = "/v1/onboarding/channel-installations/google-chat/test"
+    assert client.post(
+        path,
+        json={"destination_id": "attacker"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    ).status_code == 400
+    response = client.post(
+        path,
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 200
+    assert response.get_json()["providers"][0]["destination_state"] == "active"
+    assert setup.calls[-1][2] == {
+        "principal_id": PRINCIPAL_ID,
+        "session_id": SESSION_ID,
+        "provider": "google_chat",
+    }

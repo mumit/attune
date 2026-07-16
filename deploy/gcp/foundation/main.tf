@@ -13,6 +13,7 @@ locals {
     "artifactregistry.googleapis.com",
     "billingbudgets.googleapis.com",
     "calendar-json.googleapis.com",
+    "chat.googleapis.com",
     "cloudbuild.googleapis.com",
     "cloudkms.googleapis.com",
     "cloudtasks.googleapis.com",
@@ -43,6 +44,7 @@ locals {
   ])
 
   fixed_google_api_hosts = {
+    chat          = "chat.googleapis.com"
     oauth2        = "oauth2.googleapis.com"
     oauth-certs   = "www.googleapis.com"
     gmail         = "gmail.googleapis.com"

@@ -307,6 +307,16 @@ public endpoint returned 403, all activation gates remained false, and runtime
 and edge Terraform converged empty. No tenant channel state or provider
 message was created.
 
+The next slice adds asynchronous destination verification without granting the
+control plane provider authority. Migration 0023 stores the raw Chat space
+only as tenant- and destination-bound AEAD ciphertext with a KMS-wrapped DEK.
+The control plane may invoke the broker with only its canonical destination
+UUID; the broker fixes the Chat endpoint, `chat.bot` scope, message text, and
+response validation in code. Its Cloud Run policy therefore has exactly two
+invokers with route-specific application checks: ingress for link consumption
+and control plane for delivery testing. A pre-route development binding is
+reported as `needs_relink` and requires an exact-match owner-DM adoption code.
+
 ## Operator workflow
 
 The operated platform is provisioned by a restricted platform identity from

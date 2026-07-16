@@ -500,8 +500,16 @@ resource "google_cloud_run_v2_service" "channel_broker" {
         value = local.foundation.workload_identities.ingress
       }
       env {
+        name  = "ATTUNE_CONTROL_PLANE_SERVICE_ACCOUNT"
+        value = local.foundation.workload_identities.control_plane
+      }
+      env {
         name  = "ATTUNE_CHANNEL_HMAC_SECRET"
         value = local.foundation.platform_secret_ids["channel-reference-hmac"]
+      }
+      env {
+        name  = "ATTUNE_CONNECTOR_KMS_KEY"
+        value = local.foundation.connector_kms_key
       }
 
       startup_probe {
@@ -548,6 +556,15 @@ resource "google_cloud_run_v2_service_iam_member" "channel_broker_invoker" {
   name     = google_cloud_run_v2_service.channel_broker[0].name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${local.foundation.workload_identities.ingress}"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "channel_broker_control_plane_invoker" {
+  count    = var.enable_channel_broker ? 1 : 0
+  project  = local.foundation.project_id
+  location = local.foundation.region
+  name     = google_cloud_run_v2_service.channel_broker[0].name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.control_plane}"
 }
 
 resource "google_cloud_run_v2_service" "secret_broker" {

@@ -234,15 +234,18 @@ tenant data, tokens, or credentials in Terraform variables, state, labels,
 probes, or deployment logs.
 
 The channel broker is a separate default-off service. Before setting
-`enable_channel_broker=true`, apply migration 0022 and verify its dedicated
+`enable_channel_broker=true`, apply migrations 0022 and 0023 and verify its dedicated
 Cloud SQL IAM user is the sole member of `attune_channel_broker`. Create one
 random 256-bit value, store only its base64url encoding as the first version of
 the foundation-managed `channel-reference-hmac` secret, and never place that
 value in Terraform, environment variables, logs, or support output. Only the
-channel-broker workload may read this secret; only the ingress workload may
-invoke the service. A reviewed dormant plan must show the broker, its single
-invoker grant, and the audit-writer grant without enabling a public provider
-route.
+channel-broker workload may read this secret. The ingress identity may invoke
+only the link route, while the control-plane identity may invoke only the
+canonical delivery-test route; application-level identity checks enforce that
+separation inside the shared private service. The channel broker alone also
+receives connector-KMS wrap/unwrap for encrypted destination routes. A reviewed
+dormant plan must show exactly those two invoker grants and the audit-writer
+grant without enabling a public provider route.
 
 Development completed this private stage on 2026-07-16 UTC. The Ready broker
 revision `attune-development-channel-broker-00003-ksw` uses immutable digest

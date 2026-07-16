@@ -16,6 +16,7 @@ from .hosted_channel_service import HostedChannelService
 from .hosted_channels import PostgresHostedChannelRepository
 from .channel_setup import PostgresHostedChannelSetupRepository
 from .channel_setup_service import HostedChannelSetupService
+from .channel_broker_client import ChannelBrokerClient
 from .identity_session import PostgresIdentitySessionRepository
 from .oauth import (
     PostgresGoogleConnectorRevocationRepository,
@@ -160,6 +161,10 @@ def create_production_app():
                 PostgresHostedChannelSetupRepository(iam_connection),
                 audit,
                 audit_writer,
+                ChannelBrokerClient(
+                    os.environ["ATTUNE_CHANNEL_BROKER_URL"],
+                    os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
+                ),
             )
             if channel_setup_enabled
             else None

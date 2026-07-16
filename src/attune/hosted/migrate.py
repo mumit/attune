@@ -142,6 +142,26 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
             "attune.hosted_channel_destinations",
             "INSERT",
         ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_destinations",
+            "UPDATE",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_routes",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_channel_routes",
+            "INSERT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_onboarding_states",
+            "UPDATE",
+        ),
         ("attune_channel_link_executor", "attune.installations", "SELECT"),
         ("attune_channel_link_executor", "attune.installations", "INSERT"),
         ("attune_channel_link_executor", "attune.audit_intents", "SELECT"),
@@ -202,6 +222,7 @@ TENANT_TABLES = (
     "hosted_channel_preferences",
     "hosted_channel_setup_transactions",
     "hosted_channel_destinations",
+    "hosted_channel_routes",
 )
 
 
@@ -652,6 +673,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune_channel_link_executor",
             ),
             (
+                "attune.begin_hosted_channel_setup_v2(uuid,uuid,text,text,bytea,timestamp with time zone)",
+                "attune_control_plane",
+                "attune_channel_link_executor",
+            ),
+            (
                 "attune.claim_google_chat_link(bytea,bytea,timestamp with time zone)",
                 "attune_channel_broker",
                 "attune_channel_link_executor",
@@ -663,6 +689,26 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             ),
             (
                 "attune.consume_google_chat_link(bytea,bytea,bytea,bytea,bytea)",
+                "attune_channel_link_executor",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.consume_google_chat_link_v2(bytea,bytea,bytea,bytea,bytea,uuid,bytea,bytea,bytea,text,integer)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.resolve_google_chat_link_destination(bytea,bytea,uuid)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.claim_google_chat_delivery_test(uuid,bytea,timestamp with time zone)",
+                "attune_channel_broker",
+                "attune_channel_link_executor",
+            ),
+            (
+                "attune.complete_google_chat_delivery_test(uuid,bytea,boolean)",
                 "attune_channel_broker",
                 "attune_channel_link_executor",
             ),

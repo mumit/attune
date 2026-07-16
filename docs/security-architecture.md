@@ -556,6 +556,13 @@ minimal event, and returns promptly.
   resource, and reject a conflicting nested `spaceType`. A missing nested type
   is not proof of a non-DM because Google does not guarantee duplicated nested
   space metadata.
+- **SEC-701C.** Hosted asynchronous channel tests MUST accept no caller message,
+  provider route, actor, tenant, or installation authority. The control plane
+  may submit only its tenant-resolved canonical destination UUID to a private
+  broker. Recoverable routes MUST be AEAD-encrypted with tenant-, destination-,
+  provider-, and version-bound associated data; only the broker may unwrap
+  them. Provider URL, scope, text, and response-resource validation MUST be
+  fixed in reviewed code, with pre-effect and outcome audit intents.
 - **SEC-702.** Ingress MUST apply TLS, body/header limits, content-type checks,
   strict schemas, event-type allowlists, rate limits, deduplication, and safe
   parser configuration before queueing.
@@ -633,7 +640,7 @@ through protected files or standard input rather than interpolated shell text.
   internet destinations.
 - The initial GCP provider boundary uses no Cloud NAT. Private Google Access and
   exact private DNS zones expose only `oauth2.googleapis.com`,
-  `www.googleapis.com`, `gmail.googleapis.com`, and
+  `www.googleapis.com`, `gmail.googleapis.com`, `chat.googleapis.com`, and
   `secretmanager.googleapis.com` through the `private.googleapis.com` VIP;
   wildcard Google API DNS is prohibited. The additional hosts are restricted
   in code to signing-certificate retrieval and the platform OAuth-client-secret

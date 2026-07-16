@@ -220,6 +220,15 @@ Execution `attune-development-database-migrate-tbd9h` applied exactly one
 migration and reported 31 tenant tables forced through RLS. No setup attempt,
 claim, installation, destination, credential, or message was created.
 
+Migration `0023_google_chat_delivery_test.sql` adds the encrypted destination
+route vault, fixed delivery-test claim/completion functions, and explicit
+adoption path for pre-route `pending_test` bindings. Existing routes are never
+inferred from hashes: canonical readback reports `needs_relink`, and a fresh
+owner-DM code may attach a route only when installation, actor, and destination
+references all match. The migration adds one forced-RLS tenant table, bringing
+the verifier total to 32. Apply it before deploying broker or control-plane
+code that exposes the delivery-test action.
+
 Connector rows hold only opaque credential references. Credential ciphertext
 arrives with the separate connector-vault/secret-broker phase. No secret value
 belongs in these migrations, Terraform state, Cloud Run environment variables,

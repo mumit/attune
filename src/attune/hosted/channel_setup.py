@@ -59,7 +59,7 @@ class PostgresHostedChannelSetupRepository:
                     """
                     SELECT transaction_id, preference_revision, provider,
                            mechanism, state, expires_at
-                      FROM attune.begin_hosted_channel_setup(
+                      FROM attune.begin_hosted_channel_setup_v2(
                           %s, %s, %s, %s, %s, %s
                       )
                     """,
@@ -98,7 +98,15 @@ class PostgresHostedChannelSetupRepository:
                                preference.selected, ARRAY[]::text[]
                            )) AS selected,
                            COALESCE(transaction.state, 'not_started'),
-                           COALESCE(destination.status, 'not_started')
+                           COALESCE(
+                               CASE
+                                   WHEN destination.status = 'pending_test'
+                                    AND destination.route_version IS NULL
+                                   THEN 'needs_relink'
+                                   ELSE destination.status
+                               END,
+                               'not_started'
+                           )
                       FROM providers
                       LEFT JOIN preference ON true
                       LEFT JOIN LATERAL (
@@ -127,3 +135,35 @@ class PostgresHostedChannelSetupRepository:
                 )
                 rows = cursor.fetchall()
         return tuple(HostedChannelProviderState(*row) for row in rows)
+
+    def pending_destination_id(
+        self, context: TenantContext, *, principal_id: UUID, provider: str
+    ) -> UUID:
+        if not isinstance(principal_id, UUID):
+            raise TypeError("principal_id must be a UUID")
+        if provider != "google_chat":
+            raise ValueError("unsupported delivery-test provider")
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT destination.id
+                      FROM attune.hosted_channel_destinations destination
+                      JOIN attune.hosted_channel_preferences preference
+                        ON preference.tenant_id = destination.tenant_id
+                       AND preference.owner_principal_id = destination.owner_principal_id
+                     WHERE destination.tenant_id = %s
+                       AND destination.owner_principal_id = %s
+                       AND destination.provider = %s
+                       AND destination.visibility = 'owner_dm'
+                       AND destination.status = 'pending_test'
+                       AND %s = ANY(
+                           preference.interaction_channels || preference.brief_channels
+                       )
+                    """,
+                    (context.tenant_id, principal_id, provider, provider),
+                )
+                rows = cursor.fetchall()
+        if len(rows) != 1:
+            raise RuntimeError("canonical pending destination is unavailable")
+        return rows[0][0]

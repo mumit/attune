@@ -6,16 +6,21 @@ import pytest
 
 from attune.hosted.channel_broker import (
     ChannelReferenceHasher,
+    ClaimedGoogleChatDelivery,
     ClaimedGoogleChatLink,
+    CompletedGoogleChatDelivery,
     GoogleChatLinkBroker,
     LinkedGoogleChatDestination,
     decode_channel_reference_key,
 )
+from attune.hosted.vault_crypto import EncryptedCredential, EnvelopeCipher
 
 NOW = datetime(2026, 7, 16, tzinfo=timezone.utc)
 CODE = "A" * 43
 PRE_AUDIT = UUID("10000000-0000-4000-8000-000000000101")
 OUTCOME_AUDIT = UUID("10000000-0000-4000-8000-000000000102")
+DELIVERY_PRE_AUDIT = UUID("10000000-0000-4000-8000-000000000108")
+DELIVERY_OUTCOME_AUDIT = UUID("10000000-0000-4000-8000-000000000109")
 
 
 class Repository:
@@ -23,6 +28,8 @@ class Repository:
         self.claims = []
         self.releases = []
         self.consumes = []
+        self.delivery_claims = []
+        self.delivery_completions = []
 
     def claim(self, **kwargs):
         self.claims.append(kwargs)
@@ -37,15 +44,34 @@ class Repository:
         self.releases.append(kwargs)
         return True
 
+    def resolve_destination_id(self, **kwargs):
+        return kwargs["candidate_id"]
+
     def consume(self, **kwargs):
         self.consumes.append(kwargs)
         return LinkedGoogleChatDestination(
             UUID("10000000-0000-4000-8000-000000000104"),
             UUID("10000000-0000-4000-8000-000000000105"),
             UUID("10000000-0000-4000-8000-000000000106"),
-            UUID("10000000-0000-4000-8000-000000000107"),
+            kwargs["destination_id"],
             "pending_test",
             OUTCOME_AUDIT,
+        )
+
+    def claim_delivery(self, **kwargs):
+        self.delivery_claims.append(kwargs)
+        return ClaimedGoogleChatDelivery(
+            UUID("10000000-0000-4000-8000-000000000104"),
+            UUID("10000000-0000-4000-8000-000000000105"),
+            kwargs.get("encrypted", TEST_ENCRYPTED),
+            DELIVERY_PRE_AUDIT,
+        )
+
+    def complete_delivery(self, **kwargs):
+        self.delivery_completions.append(kwargs)
+        return CompletedGoogleChatDelivery(
+            "active" if kwargs["succeeded"] else "pending_test",
+            DELIVERY_OUTCOME_AUDIT,
         )
 
 
@@ -59,11 +85,45 @@ class Writer:
         return next(self.results)
 
 
-def broker(repository=None, writer=None):
+class Wrapper:
+    key_resource = "projects/test/locations/test/keyRings/test/cryptoKeys/test"
+
+    def wrap(self, value):
+        return value
+
+    def unwrap(self, value):
+        return value
+
+
+class Sender:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    def send_connection_test(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+
+
+DESTINATION = UUID("10000000-0000-4000-8000-000000000107")
+CIPHER = EnvelopeCipher(Wrapper())
+TEST_ENCRYPTED = CIPHER.encrypt(
+    {"space": "spaces/AAAA-test"},
+    tenant_id=UUID("10000000-0000-4000-8000-000000000104"),
+    connector_id=DESTINATION,
+    provider="google_chat_route",
+    credential_version=1,
+)
+
+
+def broker(repository=None, writer=None, sender=None):
     return GoogleChatLinkBroker(
         repository or Repository(),
         writer or Writer(),
         ChannelReferenceHasher(b"k" * 32),
+        CIPHER,
+        sender or Sender(),
     )
 
 
@@ -103,6 +163,8 @@ def test_link_hashes_references_by_domain_and_writes_both_audits():
         consumed["actor_ref_hash"],
         consumed["destination_ref_hash"],
     }) == 3
+    assert consumed["destination_id"] == result.destination_id
+    assert consumed["encrypted"].ciphertext
     assert repository.releases == []
 
 
@@ -148,3 +210,23 @@ def test_reference_hashes_are_keyed_and_domain_separated():
     assert first.hash("destination", value) != second.hash("destination", value)
     with pytest.raises(ValueError):
         first.hash("actor", value)
+
+
+def test_fixed_delivery_decrypts_canonical_route_sends_once_and_activates():
+    repository, writer, sender = Repository(), Writer(), Sender()
+    result = broker(repository, writer, sender).test_delivery(
+        destination_id=DESTINATION, now=NOW
+    )
+    assert result.destination_status == "active"
+    assert writer.calls == [DELIVERY_PRE_AUDIT, DELIVERY_OUTCOME_AUDIT]
+    assert sender.calls[0]["space"] == "spaces/AAAA-test"
+    assert repository.delivery_completions[-1]["succeeded"] is True
+
+
+def test_delivery_failure_remains_pending_and_never_claims_success():
+    repository = Repository()
+    with pytest.raises(RuntimeError, match="provider"):
+        broker(repository, Writer(), Sender(RuntimeError("provider failed"))).test_delivery(
+            destination_id=DESTINATION, now=NOW
+        )
+    assert repository.delivery_completions[-1]["succeeded"] is False

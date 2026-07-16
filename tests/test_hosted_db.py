@@ -114,7 +114,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0022_google_chat_link_broker.sql"
+    assert migrations[-1].name == "0023_google_chat_delivery_test.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
@@ -234,7 +234,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 22
+    assert apply_migrations(admin) == 23
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -848,12 +848,24 @@ def test_google_chat_link_broker_is_one_use_audited_and_function_only(
     assert claim.owner_principal_id == CHANNEL_PRINCIPAL
     assert writer.write(claim.pre_audit_intent_id) is not None
 
+    destination_id = broker.resolve_destination_id(
+        secret_hash=secret_hash,
+        claim_hash=claim_hash,
+        candidate_id=UUID("30000000-0000-4000-8000-000000000099"),
+    )
     linked = broker.consume(
         secret_hash=secret_hash,
         claim_hash=claim_hash,
         installation_ref_hash=hashlib.sha256(b"google-chat-app").digest(),
         actor_ref_hash=hashlib.sha256(b"google-chat-owner").digest(),
         destination_ref_hash=hashlib.sha256(b"google-chat-dm").digest(),
+        destination_id=destination_id,
+        encrypted=EncryptedCredential(
+            ciphertext=b"c" * 32,
+            nonce=b"n" * 12,
+            wrapped_dek=b"w" * 32,
+            key_resource="projects/test/locations/test/keyRings/test/cryptoKeys/test",
+        ),
     )
     assert linked.tenant_id == CHANNEL_TENANT
     assert linked.destination_status == "pending_test"
@@ -866,6 +878,38 @@ def test_google_chat_link_broker_is_one_use_audited_and_function_only(
             expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
         )
 
+    delivery_claim_hash = hashlib.sha256(b"delivery-claim-one").digest()
+    delivery = broker.claim_delivery(
+        destination_id=linked.destination_id,
+        claim_hash=delivery_claim_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert delivery.tenant_id == CHANNEL_TENANT
+    assert delivery.encrypted.ciphertext == b"c" * 32
+    assert writer.write(delivery.pre_audit_intent_id) is not None
+    failed = broker.complete_delivery(
+        destination_id=linked.destination_id,
+        claim_hash=delivery_claim_hash,
+        succeeded=False,
+    )
+    assert failed.destination_status == "pending_test"
+    assert writer.write(failed.outcome_audit_intent_id) is not None
+
+    delivery_claim_hash = hashlib.sha256(b"delivery-claim-two").digest()
+    delivery = broker.claim_delivery(
+        destination_id=linked.destination_id,
+        claim_hash=delivery_claim_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert writer.write(delivery.pre_audit_intent_id) is not None
+    completed = broker.complete_delivery(
+        destination_id=linked.destination_id,
+        claim_hash=delivery_claim_hash,
+        succeeded=True,
+    )
+    assert completed.destination_status == "active"
+    assert writer.write(completed.outcome_audit_intent_id) is not None
+
     direct = _role_connection_factory(
         database_url, ROLE_BINDINGS["attune_channel_broker"]
     )()
@@ -874,6 +918,11 @@ def test_google_chat_link_broker_is_one_use_audited_and_function_only(
             psycopg.errors.InsufficientPrivilege
         ):
             cursor.execute("SELECT * FROM attune.hosted_channel_destinations")
+        direct.rollback()
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT * FROM attune.hosted_channel_routes")
         direct.rollback()
     finally:
         direct.close()
@@ -888,7 +937,7 @@ def test_google_chat_link_broker_is_one_use_audited_and_function_only(
         )
     }
     assert states["google_chat"].setup_state == "consumed"
-    assert states["google_chat"].destination_state == "pending_test"
+    assert states["google_chat"].destination_state == "active"
 
 
 def test_rls_hides_other_tenant_rows_and_vectors(initialized_database):

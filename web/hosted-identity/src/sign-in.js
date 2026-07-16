@@ -21,6 +21,7 @@ const channelInstallations = document.querySelector("#channel-installations");
 const googleChatInstallation = document.querySelector("#google-chat-installation");
 const googleChatInstallationState = document.querySelector("#google-chat-installation-state");
 const googleChatLinkStart = document.querySelector("#google-chat-link-start");
+const googleChatDeliveryTest = document.querySelector("#google-chat-delivery-test");
 const googleChatLinkInstructions = document.querySelector("#google-chat-link-instructions");
 const googleChatLinkCommand = document.querySelector("#google-chat-link-command");
 const googleChatLinkExpiry = document.querySelector("#google-chat-link-expiry");
@@ -372,10 +373,17 @@ function renderChannelInstallations(payload) {
         ? "Owner-only Google Chat destination verified."
         : destination === "pending_test"
           ? "Google Chat owner and direct-message destination linked; delivery test remains."
+          : destination === "needs_relink"
+            ? "Google Chat is linked, but its encrypted delivery route must be adopted. Generate a new link code."
           : setup === "pending"
             ? "A previous link code is pending. Generate a new code to replace it."
             : "Google Chat is selected but not linked.";
     googleChatLinkStart.hidden = destination === "active" || destination === "pending_test";
+    if (destination === "needs_relink") {
+      googleChatLinkStart.textContent = "Generate route-adoption link code";
+    }
+    googleChatDeliveryTest.hidden = destination !== "pending_test";
+    googleChatDeliveryTest.disabled = false;
   }
 }
 
@@ -417,6 +425,38 @@ googleChatLinkStart.addEventListener("click", async () => {
       show("Sign out and sign in again before linking Google Chat.", "pending");
     } else {
       show("Google Chat linking could not be started. Please try again.", "error");
+    }
+  }
+});
+
+googleChatDeliveryTest.addEventListener("click", async () => {
+  googleChatDeliveryTest.disabled = true;
+  show("Sending the fixed, content-free Google Chat connection test…");
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    const result = await json(
+      await fetch("/v1/onboarding/channel-installations/google-chat/test", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json", "X-Attune-CSRF": csrf },
+      }),
+    );
+    renderChannelInstallations(result);
+    const state = await json(
+      await fetch("/v1/onboarding", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      }),
+    );
+    renderOnboarding(state);
+    show("Google Chat delivery verified. Only the fixed connection-test text was sent.", "success");
+  } catch (error) {
+    googleChatDeliveryTest.disabled = false;
+    if (error.code === "recent_authentication_required") {
+      show("Sign out and sign in again before testing Google Chat delivery.", "pending");
+    } else {
+      show("Google Chat delivery could not be verified. No workspace data was sent.", "error");
     }
   }
 });

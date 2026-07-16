@@ -129,8 +129,9 @@ submitted by deployment automation.
 Hosted channel installation state has a further independent default-off
 `enable_hosted_channel_setup` gate. It adds only the exact authenticated GET
 `/v1/onboarding/channel-installations` and POST
-`/v1/onboarding/channel-installations/google-chat/link` paths at Cloud Armor
-priority `887`. Apply and verify migration 0021 first. Enabling this gate may
+`/v1/onboarding/channel-installations/google-chat/link` and argument-free
+`/v1/onboarding/channel-installations/google-chat/test` paths at Cloud Armor
+priority `887`. Apply and verify migrations 0021 through 0023 first. Enabling this gate may
 create a hash-only, expiring Google Chat link attempt; it does not enable a
 provider callback, consume the link, create a destination, store a provider
 credential, or send a test. Keep it false until the private channel broker and
@@ -154,7 +155,7 @@ no Chat path. The service verifies Google's bearer token against the exact
 top-level and message-level spaces agree on `DIRECT_MESSAGE` may reach the
 private channel broker. Request logging is disabled on the dedicated backend.
 
-Set `enable_google_chat_ingress=true` only after migration 0022, private broker
+Set `enable_google_chat_ingress=true` only after migrations 0022 and 0023, private broker
 activation, a platform-owned Chat app configured with that exact endpoint and
 audience, signature/audience negative tests, replay tests, paging, and an
 explicit `google_chat_provider_ready=true` attestation. The saved activation

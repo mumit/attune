@@ -23,6 +23,10 @@ class AuditWriter(Protocol):
     def write(self, audit_intent_id: UUID) -> bool: ...
 
 
+class DeliveryBroker(Protocol):
+    def test_google_chat_delivery(self, *, destination_id: UUID) -> bool: ...
+
+
 @dataclass(frozen=True, repr=False)
 class StartedChannelSetup:
     transaction: HostedChannelSetupTransaction
@@ -38,10 +42,12 @@ class HostedChannelSetupService:
         setups: PostgresHostedChannelSetupRepository,
         audit: PostgresAuditProducerRepository,
         writer: AuditWriterClient | AuditWriter,
+        delivery_broker: DeliveryBroker | None = None,
     ):
         self._setups = setups
         self._audit = audit
         self._writer = writer
+        self._delivery_broker = delivery_broker
 
     def read(self, context: TenantContext, *, principal_id: UUID):
         return self._setups.read(context, principal_id=principal_id)
@@ -110,6 +116,49 @@ class HostedChannelSetupService:
             raise RuntimeError("channel setup outcome audit is unavailable")
         return StartedChannelSetup(transaction, secret)
 
+    def test_delivery(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        session_id: UUID,
+        provider: str,
+    ):
+        if provider != "google_chat" or self._delivery_broker is None:
+            raise ValueError("unsupported delivery-test provider")
+        destination_id = self._setups.pending_destination_id(
+            context, principal_id=principal_id, provider=provider
+        )
+        attempt_id = uuid4()
+        target = hashlib.sha256(
+            b"attune-channel-delivery-test-v1:" + destination_id.bytes
+        ).digest()
+        if not self._record_test(
+            context,
+            principal_id=principal_id,
+            session_id=session_id,
+            target=target,
+            attempt_id=attempt_id,
+            outcome="allowed",
+        ):
+            raise RuntimeError("channel delivery test pre-effect audit is unavailable")
+        delivered = self._delivery_broker.test_google_chat_delivery(
+            destination_id=destination_id
+        )
+        outcome = "observed" if delivered else "failed"
+        if not self._record_test(
+            context,
+            principal_id=principal_id,
+            session_id=session_id,
+            target=target,
+            attempt_id=attempt_id,
+            outcome=outcome,
+        ):
+            raise RuntimeError("channel delivery test outcome audit is unavailable")
+        if not delivered:
+            raise RuntimeError("channel delivery test failed")
+        return self._setups.read(context, principal_id=principal_id)
+
     def _record(
         self,
         context: TenantContext,
@@ -137,5 +186,35 @@ class HostedChannelSetupService:
             target_type="channel_setup",
             target_ref_hash=target,
             metadata={"schema_version": 1},
+        )
+        return self._writer.write(intent.id)
+
+    def _record_test(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        session_id: UUID,
+        target: bytes,
+        attempt_id: UUID,
+        outcome: str,
+    ) -> bool:
+        intent = self._audit.request(
+            context,
+            idempotency_key=hashlib.sha256(
+                b"attune-hosted-channel-delivery-test-v1:"
+                + attempt_id.bytes
+                + b":"
+                + session_id.bytes
+                + b":"
+                + outcome.encode("ascii")
+            ).digest(),
+            actor_type="principal",
+            actor_ref_hash=hashlib.sha256(principal_id.bytes).digest(),
+            action="hosted.channels.delivery_test",
+            outcome=outcome,
+            target_type="channel_destination",
+            target_ref_hash=target,
+            metadata={"schema_version": 1, "content_profile": "fixed_connection_test_v1"},
         )
         return self._writer.write(intent.id)

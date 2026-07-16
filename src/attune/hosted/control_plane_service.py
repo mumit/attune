@@ -95,6 +95,8 @@ class HostedChannelSetup(Protocol):
 
     def begin(self, context, **kwargs): ...
 
+    def test_delivery(self, context, **kwargs): ...
+
 
 def create_app(
     expected_host: str,
@@ -744,6 +746,36 @@ def create_app(
                     ),
                     201,
                 )
+
+            @app.post("/v1/onboarding/channel-installations/google-chat/test")
+            def test_google_chat_delivery():
+                if request.content_length not in {None, 0}:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request, expected_origin, sessions  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify({"error": "recent_authentication_required"}), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    states = hosted_channel_setup.test_delivery(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        provider="google_chat",
+                    )
+                except ValueError:
+                    return jsonify({"error": "invalid_channel_setup"}), 400
+                except Exception:
+                    return jsonify({"error": "channel_delivery_unavailable"}), 503
+                return jsonify(_public_channel_installations(states))
 
     @app.errorhandler(400)
     def bad_request(_error):

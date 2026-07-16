@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 from urllib.parse import urlsplit
+from uuid import UUID
 
 
 class ChannelBrokerClient:
@@ -60,6 +61,27 @@ class ChannelBrokerClient:
         except ValueError:
             return False
         return body == {"status": "linked", "destination_status": "pending_test"}
+
+    def test_google_chat_delivery(self, *, destination_id: UUID) -> bool:
+        if not isinstance(destination_id, UUID):
+            raise TypeError("destination_id must be a UUID")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/google-chat/test-delivery",
+            json={"version": 1, "destination_id": str(destination_id)},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return body == {"status": "delivered", "destination_status": "active"}
 
 
 def _https_origin(value: str) -> str:

@@ -13,6 +13,8 @@ from .channel_broker import (
 )
 from .channel_broker_service import create_app
 from .cloud_sql import iam_connection
+from .google_chat_provider import GoogleChatProvider
+from .vault_crypto import EnvelopeCipher, GoogleKmsKeyWrapper
 
 
 def _hmac_key(secret_resource: str) -> bytes:
@@ -32,11 +34,14 @@ def create_production_app():
         PostgresChannelBrokerRepository(iam_connection),
         AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
         ChannelReferenceHasher(_hmac_key(os.environ["ATTUNE_CHANNEL_HMAC_SECRET"])),
+        EnvelopeCipher(GoogleKmsKeyWrapper(os.environ["ATTUNE_CONNECTOR_KMS_KEY"])),
+        GoogleChatProvider(),
     )
     return create_app(
         broker,
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_ingress=os.environ["ATTUNE_INGRESS_SERVICE_ACCOUNT"],
+        expected_control_plane=os.environ["ATTUNE_CONTROL_PLANE_SERVICE_ACCOUNT"],
     )
 
 

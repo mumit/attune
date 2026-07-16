@@ -113,14 +113,14 @@ data-deletion procedure.
 The application subnet has Private Google Access enabled and no Cloud NAT.
 Terraform creates private zones for exactly `oauth2.googleapis.com`,
 `www.googleapis.com`, `gmail.googleapis.com`, and
-`secretmanager.googleapis.com`, with apex A records pointing to Google's
+`chat.googleapis.com`, and `secretmanager.googleapis.com`, with apex A records pointing to Google's
 `private.googleapis.com` VIP (`199.36.153.8/30`). It deliberately creates no
 wildcard `*.googleapis.com` zone. The broker uses these names only for the
 compiled-in token exchange, Google signing-certificate fetch, Gmail operation,
 and platform OAuth-client-secret read respectively. Arbitrary internet
 destinations continue to fail closed.
 
-The foundation also enables `gmail.googleapis.com` and
+The foundation also enables `gmail.googleapis.com`, `chat.googleapis.com`, and
 `calendar-json.googleapis.com` declaratively. Private DNS
 reachability without project API activation is insufficient: Google accepts
 OAuth consent and refresh-token exchange but rejects a provider read when its

@@ -156,6 +156,12 @@ resource "google_kms_crypto_key_iam_member" "broker_connector_crypto" {
   member        = "serviceAccount:${google_service_account.workload["secret_broker"].email}"
 }
 
+resource "google_kms_crypto_key_iam_member" "channel_broker_route_crypto" {
+  crypto_key_id = google_kms_crypto_key.connector_credentials.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:${google_service_account.workload["channel_broker"].email}"
+}
+
 resource "google_storage_bucket_iam_member" "audit_create" {
   bucket = google_storage_bucket.audit.name
   role   = "roles/storage.objectCreator"

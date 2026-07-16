@@ -103,6 +103,16 @@ refuses expired, cancelled, consumed, ambiguous, or externally modified state.
   They cannot substitute an actor, provider installation, workspace, or raw
   channel ID.
 
+The raw provider route needed for later delivery is retained only as a
+per-binding AES-256-GCM envelope. Its associated data binds tenant,
+destination UUID, provider-purpose, and route version; the DEK is wrapped by
+the connector KMS key. The ordinary control plane can neither read the route
+nor use the KMS key. The private channel broker is the only service that can
+decrypt it, and its delivery endpoint accepts only a canonical destination
+UUID from the exact control-plane workload identity. The provider adapter owns
+the immutable connection-test sentence and Chat API URL; neither is accepted
+from the browser, database, or request body.
+
 ## State machine
 
 `pending` setup can become `claimed`, `expired`, or `cancelled`; a short
@@ -113,6 +123,14 @@ from `authorized` to `applied`. A separately audited, explicit test may advance
 that destination to `active`. The channel step becomes `validated` only when
 every provider selected for either purpose has exactly one active owner-DM
 binding and no selected route is missing.
+
+Migration 0023 detects bindings created before encrypted route retention. It
+reports them as `needs_relink`, never fabricates a route, and permits a new
+one-time link only as an explicit adoption ceremony. Adoption succeeds only
+when the newly verified installation, human actor, and direct-message HMAC
+references exactly match the existing pending binding. It then stores the
+encrypted route atomically. A mismatch, active binding, or already provisioned
+route is refused and requires the replacement ceremony.
 
 Changing preferences after validation, retargeting a destination, reinstalling
 into a different Slack team, or binding a different external actor requires a
@@ -242,3 +260,20 @@ revision implements the top-level authority and nested-name binding described
 above. Its image-only plan changed one resource in place with no additions or
 destructions; negative authentication remained 403, health remained 200, and
 the final Terraform plan was empty.
+
+The subsequent fresh code linked once through verified Google ingress and the
+private broker. Replaying the consumed code returned the bounded unavailable
+response, and canonical setup readback reported `pending_test`. No link code,
+actor ID, space ID, or tenant ID was retained in application logs or rollout
+notes. This completes the real owner-DM link and replay-rejection evidence;
+the separately requested asynchronous delivery test remains the next gate.
+
+Migration 0023 implements that next gate without a general message-send
+surface. A recent-authenticated, CSRF-bound browser request contains no body.
+The control plane resolves the owner's sole canonical pending destination and
+passes only its UUID to the private broker. The broker writes the pre-effect
+audit, decrypts the KMS-wrapped route, calls the fixed Google Chat
+`spaces.messages.create` path with the `chat.bot` scope and an idempotent
+request ID, validates the returned message resource, records the outcome, and
+then exposes `active`. The fixed text states only that the connection test
+succeeded and that no workspace data was accessed.

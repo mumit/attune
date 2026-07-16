@@ -27,6 +27,10 @@ class Setups:
     def read(self, context, **kwargs):
         return (context, kwargs)
 
+    def pending_destination_id(self, context, **kwargs):
+        self.calls.append((context, kwargs))
+        return UUID("10000000-0000-4000-8000-000000000107")
+
 
 class Audit:
     def __init__(self):
@@ -43,6 +47,16 @@ class Writer:
 
     def write(self, _intent_id):
         return next(self.results)
+
+
+class Delivery:
+    def __init__(self, result=True):
+        self.result = result
+        self.calls = []
+
+    def test_google_chat_delivery(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result
 
 
 def test_setup_generates_one_use_secret_and_mandatory_audits():
@@ -105,3 +119,22 @@ def test_setup_records_failed_outcome_without_leaking_secret():
             now=NOW,
         )
     assert [item[1]["outcome"] for item in audit.calls] == ["allowed", "failed"]
+
+
+def test_delivery_test_is_canonical_fixed_profile_and_mandatory_audit():
+    setups, audit, delivery = Setups(), Audit(), Delivery()
+    result = HostedChannelSetupService(
+        setups, audit, Writer(), delivery
+    ).test_delivery(
+        CONTEXT,
+        principal_id=PRINCIPAL,
+        session_id=SESSION,
+        provider="google_chat",
+    )
+    assert result[0] == CONTEXT
+    assert list(delivery.calls[0]) == ["destination_id"]
+    assert [item[1]["outcome"] for item in audit.calls] == ["allowed", "observed"]
+    assert all(
+        item[1]["metadata"]["content_profile"] == "fixed_connection_test_v1"
+        for item in audit.calls
+    )

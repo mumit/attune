@@ -112,6 +112,20 @@ resource "google_cloud_run_v2_service" "control_plane" {
         value = tostring(var.enable_hosted_channel_setup)
       }
       dynamic "env" {
+        for_each = var.enable_hosted_channel_setup ? [1] : []
+        content {
+          name  = "ATTUNE_CHANNEL_BROKER_URL"
+          value = local.runtime.channel_broker.uri
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_hosted_channel_setup ? [1] : []
+        content {
+          name  = "ATTUNE_CHANNEL_BROKER_AUDIENCE"
+          value = local.runtime.channel_broker.audience
+        }
+      }
+      dynamic "env" {
         for_each = var.enable_hosted_policy || var.enable_hosted_channels || var.enable_hosted_channel_setup ? [1] : []
         content {
           name  = "ATTUNE_AUDIT_WRITER_URL"
@@ -259,8 +273,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
       error_message = "Hosted channel preferences require active hosted onboarding."
     }
     precondition {
-      condition     = !var.enable_hosted_channel_setup || var.enable_hosted_channels
-      error_message = "Hosted channel setup requires active hosted channel preferences."
+      condition = !var.enable_hosted_channel_setup || (
+        var.enable_hosted_channels && local.runtime.channel_broker != null
+      )
+      error_message = "Hosted channel setup requires active hosted channel preferences and the private channel broker."
     }
   }
 }
@@ -659,7 +675,7 @@ resource "google_compute_security_policy" "edge" {
       description = "Permit only authenticated hosted channel installation setup paths"
       match {
         expr {
-          expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/onboarding/channel-installations' || request.path == '/v1/onboarding/channel-installations/google-chat/link')"
+          expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/onboarding/channel-installations' || request.path == '/v1/onboarding/channel-installations/google-chat/link' || request.path == '/v1/onboarding/channel-installations/google-chat/test')"
         }
       }
       rate_limit_options {

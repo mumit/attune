@@ -11,9 +11,10 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .repositories import ConnectionFactory, _fixed_hash
+from .vault_crypto import EncryptedCredential, EnvelopeCipher
 
 _LINK_CODE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _APP_REF = re.compile(r"^projects/[1-9][0-9]{5,20}$")
@@ -66,6 +67,24 @@ class LinkedGoogleChatDestination:
     outcome_audit_intent_id: UUID
 
 
+@dataclass(frozen=True)
+class ClaimedGoogleChatDelivery:
+    tenant_id: UUID
+    owner_principal_id: UUID
+    encrypted: EncryptedCredential
+    pre_audit_intent_id: UUID
+
+
+@dataclass(frozen=True)
+class CompletedGoogleChatDelivery:
+    destination_status: str
+    outcome_audit_intent_id: UUID
+
+
+class GoogleChatSender(Protocol):
+    def send_connection_test(self, *, space: str, request_id: UUID) -> None: ...
+
+
 class PostgresChannelBrokerRepository:
     def __init__(self, connection_factory: ConnectionFactory):
         self._connect = connection_factory
@@ -92,6 +111,19 @@ class PostgresChannelBrokerRepository:
         )
         return row[0] is True
 
+    def resolve_destination_id(
+        self, *, secret_hash: bytes, claim_hash: bytes, candidate_id: UUID
+    ) -> UUID:
+        _fixed_hash("secret_hash", secret_hash)
+        _fixed_hash("claim_hash", claim_hash)
+        if not isinstance(candidate_id, UUID):
+            raise TypeError("candidate_id must be a UUID")
+        row = self._call(
+            "SELECT attune.resolve_google_chat_link_destination(%s, %s, %s)",
+            (secret_hash, claim_hash, candidate_id),
+        )
+        return row[0]
+
     def consume(
         self,
         *,
@@ -100,6 +132,8 @@ class PostgresChannelBrokerRepository:
         installation_ref_hash: bytes,
         actor_ref_hash: bytes,
         destination_ref_hash: bytes,
+        destination_id: UUID,
+        encrypted: EncryptedCredential,
     ) -> LinkedGoogleChatDestination:
         for name, value in (
             ("secret_hash", secret_hash),
@@ -109,17 +143,63 @@ class PostgresChannelBrokerRepository:
             ("destination_ref_hash", destination_ref_hash),
         ):
             _fixed_hash(name, value)
+        if not isinstance(destination_id, UUID):
+            raise TypeError("destination_id must be a UUID")
         row = self._call(
-            "SELECT * FROM attune.consume_google_chat_link(%s, %s, %s, %s, %s)",
+            """
+            SELECT * FROM attune.consume_google_chat_link_v2(
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            """,
             (
                 secret_hash,
                 claim_hash,
                 installation_ref_hash,
                 actor_ref_hash,
                 destination_ref_hash,
+                destination_id,
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.wrapped_dek,
+                encrypted.key_resource,
+                encrypted.format_version,
             ),
         )
         return LinkedGoogleChatDestination(*row)
+
+    def claim_delivery(
+        self, *, destination_id: UUID, claim_hash: bytes, expires_at: datetime
+    ) -> ClaimedGoogleChatDelivery:
+        if not isinstance(destination_id, UUID):
+            raise TypeError("destination_id must be a UUID")
+        _fixed_hash("claim_hash", claim_hash)
+        if not isinstance(expires_at, datetime) or expires_at.tzinfo is None:
+            raise ValueError("claim expiry must be timezone-aware")
+        row = self._call(
+            "SELECT * FROM attune.claim_google_chat_delivery_test(%s, %s, %s)",
+            (destination_id, claim_hash, expires_at),
+        )
+        tenant_id, owner_id, ciphertext, nonce, wrapped, key, version, audit = row
+        return ClaimedGoogleChatDelivery(
+            tenant_id,
+            owner_id,
+            EncryptedCredential(ciphertext, nonce, wrapped, key, version),
+            audit,
+        )
+
+    def complete_delivery(
+        self, *, destination_id: UUID, claim_hash: bytes, succeeded: bool
+    ) -> CompletedGoogleChatDelivery:
+        if not isinstance(destination_id, UUID):
+            raise TypeError("destination_id must be a UUID")
+        _fixed_hash("claim_hash", claim_hash)
+        if not isinstance(succeeded, bool):
+            raise TypeError("succeeded must be boolean")
+        row = self._call(
+            "SELECT * FROM attune.complete_google_chat_delivery_test(%s, %s, %s)",
+            (destination_id, claim_hash, succeeded),
+        )
+        return CompletedGoogleChatDelivery(*row)
 
     def _call(self, statement: str, values: tuple):
         with closing(self._connect()) as connection:
@@ -167,10 +247,14 @@ class GoogleChatLinkBroker:
         repository: PostgresChannelBrokerRepository,
         audit_writer: AuditWriter,
         reference_hasher: ChannelReferenceHasher,
+        cipher: EnvelopeCipher,
+        sender: GoogleChatSender,
     ):
         self._repository = repository
         self._audit_writer = audit_writer
         self._reference_hasher = reference_hasher
+        self._cipher = cipher
+        self._sender = sender
 
     def link_owner_dm(
         self,
@@ -213,11 +297,76 @@ class GoogleChatLinkBroker:
             except Exception:
                 pass
             raise
+        destination_id = self._repository.resolve_destination_id(
+            secret_hash=secret_hash, claim_hash=claim_hash, candidate_id=uuid4()
+        )
+        encrypted = self._cipher.encrypt(
+            {"space": destination_ref},
+            tenant_id=claim.tenant_id,
+            connector_id=destination_id,
+            provider="google_chat_route",
+            credential_version=1,
+        )
         linked = self._repository.consume(
             secret_hash=secret_hash,
             claim_hash=claim_hash,
+            destination_id=destination_id,
+            encrypted=encrypted,
             **refs,
         )
         if not self._audit_writer.write(linked.outcome_audit_intent_id):
             raise RuntimeError("channel link outcome audit is unavailable")
         return linked
+
+    def test_delivery(
+        self, *, destination_id: UUID, now: datetime | None = None
+    ) -> CompletedGoogleChatDelivery:
+        if not isinstance(destination_id, UUID):
+            raise ValueError("invalid destination binding")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("delivery test time must be timezone-aware")
+        claim_hash = hashlib.sha256(secrets.token_bytes(32)).digest()
+        claim = self._repository.claim_delivery(
+            destination_id=destination_id,
+            claim_hash=claim_hash,
+            expires_at=current + timedelta(seconds=45),
+        )
+        if not self._audit_writer.write(claim.pre_audit_intent_id):
+            self._complete_failed(destination_id, claim_hash)
+            raise RuntimeError("channel delivery pre-effect audit is unavailable")
+        try:
+            route = self._cipher.decrypt(
+                claim.encrypted,
+                tenant_id=claim.tenant_id,
+                connector_id=destination_id,
+                provider="google_chat_route",
+                credential_version=1,
+            )
+            space = route.get("space")
+            if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
+                raise RuntimeError("stored channel route is invalid")
+            self._sender.send_connection_test(
+                space=space,
+                request_id=UUID(bytes=claim_hash[:16], version=4),
+            )
+        except BaseException:
+            self._complete_failed(destination_id, claim_hash)
+            raise
+        completed = self._repository.complete_delivery(
+            destination_id=destination_id, claim_hash=claim_hash, succeeded=True
+        )
+        if not self._audit_writer.write(completed.outcome_audit_intent_id):
+            raise RuntimeError("channel delivery outcome audit is unavailable")
+        return completed
+
+    def _complete_failed(self, destination_id: UUID, claim_hash: bytes) -> None:
+        try:
+            completed = self._repository.complete_delivery(
+                destination_id=destination_id,
+                claim_hash=claim_hash,
+                succeeded=False,
+            )
+            self._audit_writer.write(completed.outcome_audit_intent_id)
+        except Exception:
+            pass
