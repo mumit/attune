@@ -681,6 +681,35 @@ Development recovery evidence on 2026-07-16:
   queue route, object, completion invocation, download path, endpoint, or UI
   was created.
 
+Migration `0033_customer_export_cleanup_authority.sql` adds a distinct
+abandoned-attempt cleanup role. It can lease only durable object UUIDs older
+than 15 minutes, excludes the live writer attempt and ready object, caps claims
+at 100, and acknowledges success through an exact unexpired lease. Its
+separate service account has Cloud SQL login plus a custom bucket role
+containing only `storage.objects.delete`; it has no create, read, list, or KMS
+authority. The bounded library treats absence as successful deletion, leaves
+failed storage work leased for retry, and reports possible backlog. No cleanup
+job or schedule is deployed by this slice.
+
+Development cleanup-authority evidence on 2026-07-16:
+
+- The full suite passed 1,022 tests with 36 optional tests skipped, and all 43
+  real-PostgreSQL tests passed. Coverage includes quarantine, ready/live
+  exclusion, batch bounds, claim replay, direct-table denial, content-free
+  audit, verified absence, storage failure, and backlog reporting.
+- The foundation plan added exactly the cleanup service account, its Cloud SQL
+  IAM/login bindings and database user, logging/metrics writers, and delete-only
+  custom role, then updated the authoritative export-bucket policy (`7 added,
+  1 changed, 0 destroyed`).
+- Migrator manifest digest
+  `sha256:11c11082bd4e222355b4ab998b7c31e66831c2c911b283953f074ac1c5319d48`
+  updated only the three existing operator jobs in place (`0 added, 3 changed,
+  0 destroyed`). Execution `attune-development-database-migrate-b2b7b`
+  applied exactly migration 0033 and verified all 34 tenant tables and exact
+  runtime/function-owner privileges.
+- Both foundation and data plans were empty afterward. No cleanup or writer
+  job, scheduler, object, queue route, download path, endpoint, or UI exists.
+
 ## Production gates
 
 Before this job or schema is promoted beyond development:
