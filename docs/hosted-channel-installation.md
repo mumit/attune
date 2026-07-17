@@ -466,3 +466,22 @@ untrusted conversation and Workspace results. A one-resource in-place rollout
 became Ready with no warnings and an empty Terraform plan. Repeating the same
 “tomorrow” question returned the correct date and Calendar answer without
 using the earlier email as temporal authority.
+
+The Slack ingress Terraform substrate now exists dormant-first: a dedicated
+`slack_ingress` service account distinct from every other workload identity, a
+dormant Cloud Run service with its default URL disabled behind an unrouted
+serverless backend and a default-deny Cloud Armor policy, direct
+least-privilege secret accessors, and an edge backend whose exact
+`/v1/provider/slack/events` path stays absent from the URL map until
+`enable_slack_ingress` is set. The distinct identity is deliberate: the broker
+composition enforces four distinct caller identities (Google Chat ingress,
+Slack ingress, control plane, worker) and refuses to start otherwise, so a
+compromised provider ingress can exercise only its own provider's broker
+routes. The Slack signing secret and client secret bypass the secret broker,
+mirroring the channel-reference HMAC: each is a platform credential read
+directly from Secret Manager at startup by exactly one fixed service — the
+signing secret by the Slack ingress identity and the client secret by the
+channel-broker identity — and both are excluded from the secret-broker
+accessor grant. Channel-broker Slack configuration stays behind
+`slack_channel_enabled`, which remains false. Provider app creation, secret
+version population, and staged gate activation remain operator ceremonies.

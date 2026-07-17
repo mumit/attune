@@ -800,6 +800,45 @@ resource "google_cloud_run_v2_service" "channel_broker" {
         name  = "ATTUNE_CONNECTOR_KMS_KEY"
         value = local.foundation.connector_kms_key
       }
+      env {
+        name  = "ATTUNE_SLACK_CHANNEL_ENABLED"
+        value = tostring(var.slack_channel_enabled)
+      }
+      dynamic "env" {
+        for_each = var.slack_channel_enabled ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_CLIENT_ID"
+          value = var.slack_client_id
+        }
+      }
+      dynamic "env" {
+        for_each = var.slack_channel_enabled ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_CLIENT_SECRET"
+          value = local.foundation.platform_secret_ids["slack-client"]
+        }
+      }
+      dynamic "env" {
+        for_each = var.slack_channel_enabled ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_APP_ID"
+          value = var.slack_app_id
+        }
+      }
+      dynamic "env" {
+        for_each = var.slack_channel_enabled ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_REDIRECT_URI"
+          value = var.slack_redirect_uri
+        }
+      }
+      dynamic "env" {
+        for_each = var.slack_channel_enabled ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_INGRESS_SERVICE_ACCOUNT"
+          value = local.foundation.workload_identities.slack_ingress
+        }
+      }
 
       startup_probe {
         initial_delay_seconds = 1
@@ -835,6 +874,15 @@ resource "google_cloud_run_v2_service" "channel_broker" {
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition = !var.slack_channel_enabled || (
+        var.slack_client_id != "" &&
+        var.slack_app_id != "" &&
+        var.slack_redirect_uri != ""
+      )
+      error_message = "Slack channel activation requires the platform Slack app client ID, app ID, and exact redirect URI."
+    }
   }
 }
 
@@ -845,6 +893,15 @@ resource "google_cloud_run_v2_service_iam_member" "channel_broker_invoker" {
   name     = google_cloud_run_v2_service.channel_broker[0].name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${local.foundation.workload_identities.ingress}"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "channel_broker_slack_ingress_invoker" {
+  count    = var.enable_channel_broker ? 1 : 0
+  project  = local.foundation.project_id
+  location = local.foundation.region
+  name     = google_cloud_run_v2_service.channel_broker[0].name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.slack_ingress}"
 }
 
 resource "google_cloud_run_v2_service_iam_member" "channel_broker_control_plane_invoker" {

@@ -16,6 +16,7 @@ locals {
     retention_scheduler      = "ret-sched"
     worker                   = "worker"
     secret_broker            = "secrets"
+    slack_ingress            = "slack-ing"
     task_dispatch            = "dispatch"
     audit_writer             = "audit"
   }
@@ -149,7 +150,7 @@ resource "google_service_account_iam_member" "cloud_tasks_token_creator" {
 resource "google_secret_manager_secret_iam_member" "broker_access" {
   for_each = {
     for name, secret in google_secret_manager_secret.platform : name => secret
-    if !contains(["channel-reference-hmac", "identity-bootstrap", "llm-api-key"], name)
+    if !contains(["channel-reference-hmac", "identity-bootstrap", "llm-api-key", "slack-client", "slack-signing-secret"], name)
   }
   project   = var.project_id
   secret_id = each.value.secret_id
@@ -167,6 +168,20 @@ resource "google_secret_manager_secret_iam_member" "model_gateway_llm_access" {
 resource "google_secret_manager_secret_iam_member" "channel_broker_hmac_access" {
   project   = var.project_id
   secret_id = google_secret_manager_secret.platform["channel-reference-hmac"].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.workload["channel_broker"].email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "slack_ingress_signing_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.platform["slack-signing-secret"].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.workload["slack_ingress"].email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "channel_broker_slack_client_access" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.platform["slack-client"].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.workload["channel_broker"].email}"
 }

@@ -49,6 +49,26 @@ check "google_chat_conversation_activation" {
   }
 }
 
+check "slack_ingress_activation" {
+  assert {
+    condition = !var.enable_slack_ingress || (
+      var.deploy_slack_ingress && var.slack_provider_ready
+    )
+    error_message = "Slack route activation requires deployed ingress and provider-readiness attestation."
+  }
+}
+
+check "slack_conversation_activation" {
+  assert {
+    condition = !var.enable_slack_conversation || (
+      var.enable_slack_ingress &&
+      try(local.runtime.slack_channel_enabled, false) &&
+      local.runtime.dispatch_broker != null
+    )
+    error_message = "Slack conversation ingress requires the routed provider endpoint, the configured broker Slack routes, and the fixed dispatch broker."
+  }
+}
+
 check "customer_export_activation" {
   assert {
     condition = !var.enable_customer_exports || (
@@ -597,6 +617,144 @@ resource "google_cloud_run_v2_service" "google_chat_ingress" {
   }
 }
 
+resource "google_cloud_run_v2_service" "slack_ingress" {
+  count                = var.deploy_slack_ingress ? 1 : 0
+  project              = local.foundation.project_id
+  name                 = "${local.prefix}-slack-ingress"
+  location             = local.foundation.region
+  deletion_protection  = true
+  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  default_uri_disabled = true
+  invoker_iam_disabled = true
+  labels               = merge(local.labels, { component = "slack-ingress" })
+
+  template {
+    service_account                  = local.foundation.workload_identities.slack_ingress
+    timeout                          = "15s"
+    max_instance_request_concurrency = 8
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 3
+    }
+
+    containers {
+      name  = "slack-ingress"
+      image = var.slack_ingress_image
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "256Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+
+      env {
+        name = "ATTUNE_CHANNEL_BROKER_URL"
+        value = (
+          local.runtime.channel_broker == null
+          ? ""
+          : local.runtime.channel_broker.uri
+        )
+      }
+      env {
+        name = "ATTUNE_CHANNEL_BROKER_AUDIENCE"
+        value = (
+          local.runtime.channel_broker == null
+          ? ""
+          : local.runtime.channel_broker.audience
+        )
+      }
+      env {
+        name  = "ATTUNE_SLACK_SIGNING_SECRET"
+        value = local.foundation.platform_secret_ids["slack-signing-secret"]
+      }
+      env {
+        name  = "ATTUNE_ENABLE_SLACK_CONVERSATION"
+        value = tostring(var.enable_slack_conversation)
+      }
+      dynamic "env" {
+        for_each = var.enable_slack_conversation ? [1] : []
+        content {
+          name  = "ATTUNE_DISPATCH_BROKER_URL"
+          value = local.runtime.dispatch_broker.uri
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_slack_conversation ? [1] : []
+        content {
+          name  = "ATTUNE_DISPATCH_BROKER_AUDIENCE"
+          value = local.runtime.dispatch_broker.audience
+        }
+      }
+
+      startup_probe {
+        initial_delay_seconds = 1
+        timeout_seconds       = 2
+        period_seconds        = 3
+        failure_threshold     = 10
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+
+      liveness_probe {
+        timeout_seconds   = 2
+        period_seconds    = 10
+        failure_threshold = 3
+        http_get {
+          path = "/healthz"
+          port = 8080
+        }
+      }
+    }
+
+    vpc_access {
+      egress = "ALL_TRAFFIC"
+      network_interfaces {
+        network    = local.foundation.network_id
+        subnetwork = local.foundation.subnetwork_id
+        tags       = ["attune-slack-ingress"]
+      }
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition = !var.deploy_slack_ingress || (
+        local.runtime.channel_broker != null &&
+        var.slack_ingress_image != ""
+      )
+      error_message = "Slack ingress deployment requires the private channel broker and a pinned ingress image."
+    }
+
+    precondition {
+      condition = !var.enable_slack_ingress || (
+        var.deploy_slack_ingress && var.slack_provider_ready
+      )
+      error_message = "Slack route activation requires deployed ingress and provider-readiness attestation."
+    }
+
+    precondition {
+      condition = !var.enable_slack_conversation || (
+        var.enable_slack_ingress &&
+        try(local.runtime.slack_channel_enabled, false) &&
+        local.runtime.dispatch_broker != null
+      )
+      error_message = "Slack conversation activation requires the routed ingress, the configured broker Slack routes, and the fixed dispatch broker."
+    }
+  }
+}
+
 resource "google_compute_region_network_endpoint_group" "control_plane" {
   project               = local.foundation.project_id
   name                  = "${local.prefix}-control-plane"
@@ -728,6 +886,18 @@ resource "google_compute_region_network_endpoint_group" "google_chat_ingress" {
 
   cloud_run {
     service = google_cloud_run_v2_service.google_chat_ingress[0].name
+  }
+}
+
+resource "google_compute_region_network_endpoint_group" "slack_ingress" {
+  count                 = var.deploy_slack_ingress ? 1 : 0
+  project               = local.foundation.project_id
+  name                  = "${local.prefix}-slack-ingress"
+  region                = local.foundation.region
+  network_endpoint_type = "SERVERLESS"
+
+  cloud_run {
+    service = google_cloud_run_v2_service.slack_ingress[0].name
   }
 }
 
@@ -1167,6 +1337,49 @@ resource "google_compute_security_policy" "google_chat_ingress" {
   }
 }
 
+resource "google_compute_security_policy" "slack_ingress" {
+  count       = var.deploy_slack_ingress ? 1 : 0
+  project     = local.foundation.project_id
+  name        = "${local.prefix}-slack-ingress-edge"
+  description = "Exact verified Slack event route with bounded source rate"
+  type        = "CLOUD_ARMOR"
+
+  dynamic "rule" {
+    for_each = var.enable_slack_ingress && var.deploy_slack_ingress ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 1000
+      description = "Permit only POST on the exact Slack event endpoint"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.method == 'POST' && request.path == '/v1/provider/slack/events'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 60
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  rule {
+    action      = "deny(403)"
+    priority    = 2147483647
+    description = "Default deny"
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config {
+        src_ip_ranges = ["*"]
+      }
+    }
+  }
+}
+
 resource "google_compute_backend_service" "control_plane" {
   project               = local.foundation.project_id
   name                  = "${local.prefix}-control-plane"
@@ -1277,6 +1490,23 @@ resource "google_compute_backend_service" "google_chat_ingress" {
   }
 }
 
+resource "google_compute_backend_service" "slack_ingress" {
+  count                 = var.deploy_slack_ingress ? 1 : 0
+  project               = local.foundation.project_id
+  name                  = "${local.prefix}-slack-ingress"
+  protocol              = "HTTPS"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  security_policy       = google_compute_security_policy.slack_ingress[0].id
+
+  backend {
+    group = google_compute_region_network_endpoint_group.slack_ingress[0].id
+  }
+
+  log_config {
+    enable = false
+  }
+}
+
 resource "google_compute_global_address" "edge" {
   project      = local.foundation.project_id
   name         = "${local.prefix}-control-plane-edge"
@@ -1336,6 +1566,14 @@ resource "google_compute_url_map" "https" {
       content {
         paths   = ["/v1/provider/google-chat/events"]
         service = google_compute_backend_service.google_chat_ingress[0].id
+      }
+    }
+
+    dynamic "path_rule" {
+      for_each = var.enable_slack_ingress && var.deploy_slack_ingress ? [1] : []
+      content {
+        paths   = ["/v1/provider/slack/events"]
+        service = google_compute_backend_service.slack_ingress[0].id
       }
     }
   }

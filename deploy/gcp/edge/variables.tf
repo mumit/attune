@@ -45,6 +45,17 @@ variable "google_chat_ingress_image" {
   }
 }
 
+variable "slack_ingress_image" {
+  description = "Artifact Registry Slack ingress image pinned by sha256 digest; required only when the Slack ingress is deployed."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.slack_ingress_image == "" || can(regex("@sha256:[0-9a-f]{64}$", var.slack_ingress_image))
+    error_message = "slack_ingress_image must be empty or an immutable @sha256 Artifact Registry reference."
+  }
+}
+
 variable "export_download_image" {
   description = "Artifact Registry export download image pinned by sha256 digest."
   type        = string
@@ -194,6 +205,30 @@ variable "google_chat_project_number" {
     condition     = var.google_chat_project_number == "" || can(regex("^[1-9][0-9]{5,20}$", var.google_chat_project_number))
     error_message = "google_chat_project_number must be empty or a 6-21 digit nonzero project number."
   }
+}
+
+variable "deploy_slack_ingress" {
+  description = "Deploy the signature-verified Slack ingress behind an unrouted load-balancer backend."
+  type        = bool
+  default     = false
+}
+
+variable "enable_slack_ingress" {
+  description = "Route the exact Slack event endpoint after provider and adversarial evidence."
+  type        = bool
+  default     = false
+}
+
+variable "enable_slack_conversation" {
+  description = "Route ordinary verified owner-DM Slack messages into the bounded hosted conversation pipeline."
+  type        = bool
+  default     = false
+}
+
+variable "slack_provider_ready" {
+  description = "Operator attestation that the platform Slack app uses the exact event endpoint and passed negative tests."
+  type        = bool
+  default     = false
 }
 
 variable "google_oauth_provider_ready" {

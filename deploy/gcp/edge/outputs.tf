@@ -22,5 +22,10 @@ output "edge" {
       endpoint = "https://${var.hostname}/v1/provider/google-chat/events"
       routed   = var.enable_google_chat_ingress
     } : null
+    slack_ingress = var.deploy_slack_ingress ? {
+      service  = google_cloud_run_v2_service.slack_ingress[0].name
+      endpoint = "https://${var.hostname}/v1/provider/slack/events"
+      routed   = var.enable_slack_ingress
+    } : null
   }
 }

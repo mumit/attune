@@ -130,6 +130,50 @@ variable "enable_google_chat_conversation" {
   default     = false
 }
 
+variable "slack_channel_enabled" {
+  description = "Configure the private broker's Slack installation routes after the platform Slack app, its secret versions, and their security gates exist."
+  type        = bool
+  default     = false
+}
+
+variable "slack_client_id" {
+  description = "Public client ID of the platform-owned Slack app; required only when the Slack channel is enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.slack_client_id == "" || can(regex("^[0-9]{6,20}\\.[0-9]{6,20}$", var.slack_client_id))
+    error_message = "slack_client_id must be empty or a syntactically valid Slack app client ID."
+  }
+}
+
+variable "slack_app_id" {
+  description = "Public app identifier of the platform-owned Slack app; required only when the Slack channel is enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.slack_app_id == "" || can(regex("^A[A-Z0-9]{5,20}$", var.slack_app_id))
+    error_message = "slack_app_id must be empty or a syntactically valid Slack app ID."
+  }
+}
+
+variable "slack_redirect_uri" {
+  description = "Exact HTTPS OAuth redirect URI of the platform-owned Slack app; required only when the Slack channel is enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = var.slack_redirect_uri == "" || (
+      startswith(var.slack_redirect_uri, "https://") &&
+      !strcontains(var.slack_redirect_uri, "@") &&
+      !strcontains(var.slack_redirect_uri, "#") &&
+      length(var.slack_redirect_uri) <= 1024
+    )
+    error_message = "slack_redirect_uri must be empty or a bounded fixed HTTPS URL without credentials or fragment."
+  }
+}
+
 variable "hosted_timezone" {
   description = "Operator-confirmed IANA timezone used to ground relative dates until per-principal timezone preferences are available."
   type        = string

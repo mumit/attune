@@ -113,6 +113,11 @@ output "google_workspace_verification_enabled" {
   value       = var.enable_google_workspace_verification
 }
 
+output "slack_channel_enabled" {
+  description = "Whether the private broker's Slack installation routes are configured."
+  value       = var.slack_channel_enabled
+}
+
 output "google_chat_conversation_enabled" {
   description = "Whether the bounded Google Chat conversation worker route is registered."
   value       = var.enable_google_chat_conversation
