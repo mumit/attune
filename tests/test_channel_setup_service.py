@@ -179,6 +179,108 @@ def test_disconnect_refuses_unknown_provider_before_audit():
             CONTEXT,
             principal_id=PRINCIPAL,
             session_id=SESSION,
-            provider="slack",
+            provider="teams",
         )
     assert audit.calls == []
+
+
+class SlackDelivery(Delivery):
+    def test_slack_delivery(self, **kwargs):
+        self.calls.append(("slack_test", kwargs))
+        return self.result
+
+    def install_slack(self, **kwargs):
+        self.calls.append(("install", kwargs))
+        return self.result
+
+
+def test_slack_delivery_test_routes_to_slack_broker_with_audits():
+    setups, audit, delivery = Setups(), Audit(), SlackDelivery()
+    HostedChannelSetupService(setups, audit, Writer(), delivery).test_delivery(
+        CONTEXT,
+        principal_id=PRINCIPAL,
+        session_id=SESSION,
+        provider="slack",
+    )
+    assert setups.calls[0][1] == {"principal_id": PRINCIPAL, "provider": "slack"}
+    assert delivery.calls == [(
+        "slack_test",
+        {"destination_id": UUID("10000000-0000-4000-8000-000000000107")},
+    )]
+    assert [item[1]["outcome"] for item in audit.calls] == ["allowed", "observed"]
+
+
+def test_slack_install_completion_binds_session_tenant_and_audits_outcome():
+    setups, audit, delivery = Setups(), Audit(), SlackDelivery()
+    assert HostedChannelSetupService(
+        setups, audit, Writer(), delivery
+    ).complete_slack_install(
+        CONTEXT,
+        principal_id=PRINCIPAL,
+        session_id=SESSION,
+        state="x" * 43,
+        code="code-123",
+    )
+    assert delivery.calls == [(
+        "install",
+        {
+            "state": "x" * 43,
+            "code": "code-123",
+            "tenant_id": TENANT,
+            "principal_id": PRINCIPAL,
+        },
+    )]
+    assert [item[1]["outcome"] for item in audit.calls] == ["allowed", "observed"]
+    assert all(
+        item[1]["action"] == "hosted.channels.slack.install.callback"
+        for item in audit.calls
+    )
+
+
+def test_slack_install_failure_records_failed_outcome_and_returns_false():
+    setups, audit = Setups(), Audit()
+    delivery = SlackDelivery(result=False)
+    assert not HostedChannelSetupService(
+        setups, audit, Writer(), delivery
+    ).complete_slack_install(
+        CONTEXT,
+        principal_id=PRINCIPAL,
+        session_id=SESSION,
+        state="x" * 43,
+        code="code-123",
+    )
+    assert [item[1]["outcome"] for item in audit.calls] == ["allowed", "failed"]
+
+
+def test_slack_install_pre_effect_audit_failure_never_contacts_broker():
+    delivery = SlackDelivery()
+    with pytest.raises(RuntimeError, match="pre-effect"):
+        HostedChannelSetupService(
+            Setups(), Audit(), Writer((False,)), delivery
+        ).complete_slack_install(
+            CONTEXT,
+            principal_id=PRINCIPAL,
+            session_id=SESSION,
+            state="x" * 43,
+            code="code-123",
+        )
+    assert delivery.calls == []
+
+
+def test_slack_disconnect_records_provider_metadata():
+    setups, audit = Setups(), Audit()
+    HostedChannelSetupService(setups, audit, Writer()).disconnect(
+        CONTEXT,
+        principal_id=PRINCIPAL,
+        session_id=SESSION,
+        provider="slack",
+    )
+    disconnects = [
+        item for item in audit.calls
+        if item[1]["action"] == "hosted.channels.destination.disconnect"
+    ]
+    assert disconnects
+    assert all(
+        item[1]["metadata"] == {"schema_version": 1, "provider": "slack"}
+        for item in disconnects
+    )

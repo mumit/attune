@@ -141,7 +141,7 @@ class PostgresHostedChannelSetupRepository:
     ) -> UUID:
         if not isinstance(principal_id, UUID):
             raise TypeError("principal_id must be a UUID")
-        if provider != "google_chat":
+        if provider not in MECHANISMS:
             raise ValueError("unsupported delivery-test provider")
         with closing(self._connect()) as connection:
             with tenant_transaction(connection, context) as cursor:
@@ -178,12 +178,17 @@ class PostgresHostedChannelSetupRepository:
     ) -> bool:
         if not isinstance(principal_id, UUID) or not isinstance(session_id, UUID):
             raise TypeError("principal_id and session_id must be UUIDs")
-        if provider != "google_chat":
+        if provider not in MECHANISMS:
             raise ValueError("unsupported channel disconnect provider")
+        statement = (
+            "SELECT attune.disconnect_hosted_channel_destination(%s, %s, %s)"
+            if provider == "google_chat"
+            else "SELECT attune.disconnect_hosted_channel_destination_v2(%s, %s, %s)"
+        )
         with closing(self._connect()) as connection:
             with tenant_transaction(connection, context) as cursor:
                 cursor.execute(
-                    "SELECT attune.disconnect_hosted_channel_destination(%s, %s, %s)",
+                    statement,
                     (principal_id, session_id, provider),
                 )
                 row = cursor.fetchone()

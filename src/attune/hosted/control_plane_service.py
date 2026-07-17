@@ -16,6 +16,7 @@ from .identity_session import (
     create_identity_session_secrets,
 )
 from .oauth_transaction import create_oauth_transaction_secrets
+from .slack_provider import build_authorize_url as build_slack_authorize_url
 
 HOSTNAME = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -38,6 +39,7 @@ GOOGLE_WORKSPACE_SCOPES = (
 GOOGLE_CLIENT_ID = re.compile(
     r"^[0-9]{6,32}-[0-9A-Za-z_-]{16,96}\.apps\.googleusercontent\.com$"
 )
+SLACK_OAUTH_STATE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 
 class SessionRepository(Protocol):
@@ -95,6 +97,8 @@ class HostedChannelSetup(Protocol):
 
     def begin(self, context, **kwargs): ...
 
+    def complete_slack_install(self, context, **kwargs): ...
+
     def test_delivery(self, context, **kwargs): ...
 
     def disconnect(self, context, **kwargs): ...
@@ -132,6 +136,8 @@ def create_app(
     hosted_channel_setup_enabled: bool = False,
     hosted_channel_setup: HostedChannelSetup | None = None,
     hosted_channel_lifecycle_enabled: bool = False,
+    hosted_slack_install_enabled: bool = False,
+    slack_client_id: str | None = None,
     customer_exports_enabled: bool = False,
     customer_exports: CustomerExports | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
@@ -202,6 +208,15 @@ def create_app(
     if hosted_channel_lifecycle_enabled and not hosted_channel_setup_enabled:
         raise ValueError(
             "enabled hosted channel lifecycle requires hosted channel setup"
+        )
+    if hosted_slack_install_enabled and (
+        not hosted_channel_setup_enabled
+        or not isinstance(slack_client_id, str)
+        or not 1 <= len(slack_client_id) <= 64
+    ):
+        raise ValueError(
+            "enabled hosted Slack installation requires hosted channel setup "
+            "and a public Slack client ID"
         )
     if customer_exports_enabled and (
         not identity_enabled or customer_exports is None
@@ -381,6 +396,11 @@ def create_app(
                     "hosted_channel_lifecycle": (
                         "available"
                         if hosted_channel_lifecycle_enabled
+                        else "not_configured"
+                    ),
+                    "hosted_slack_install": (
+                        "available"
+                        if hosted_slack_install_enabled
                         else "not_configured"
                     ),
                     "customer_exports": (
@@ -917,6 +937,191 @@ def create_app(
                 except Exception:
                     return jsonify({"error": "channel_delivery_unavailable"}), 503
                 return jsonify(_public_channel_installations(states))
+
+            if hosted_slack_install_enabled:
+
+                @app.post("/v1/onboarding/channel-installations/slack/install")
+                def begin_slack_install():
+                    if request.content_length not in {None, 0}:
+                        return jsonify({"error": "invalid_request"}), 400
+                    session = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                        recent=True,
+                    )
+                    if session is None:
+                        current = _authorize_mutation(
+                            request,
+                            expected_origin,
+                            sessions,  # type: ignore[arg-type]
+                        )
+                        if current is not None:
+                            return jsonify(
+                                {"error": "recent_authentication_required"}
+                            ), 409
+                        return jsonify({"error": "invalid_session"}), 401
+                    try:
+                        started = hosted_channel_setup.begin(  # type: ignore[union-attr]
+                            session.context,
+                            principal_id=session.principal_id,
+                            session_id=session.id,
+                            provider="slack",
+                        )
+                        authorize_url = build_slack_authorize_url(
+                            client_id=slack_client_id,  # type: ignore[arg-type]
+                            state=started.one_time_secret,
+                            redirect_uri=(
+                                f"{expected_origin}"
+                                "/v1/onboarding/channel-installations/slack/callback"
+                            ),
+                        )
+                    except ValueError:
+                        return jsonify({"error": "invalid_channel_setup"}), 400
+                    except Exception:
+                        return jsonify({"error": "channel_setup_unavailable"}), 503
+                    return (
+                        jsonify(
+                            {
+                                "schema_version": 1,
+                                "provider": "slack",
+                                "state": started.transaction.state,
+                                "authorize_url": authorize_url,
+                                "expires_at": (
+                                    started.transaction.expires_at.isoformat()
+                                ),
+                            }
+                        ),
+                        201,
+                    )
+
+                @app.get("/v1/onboarding/channel-installations/slack/callback")
+                def complete_slack_install_callback():
+                    # Slack redirects the owner's browser here; this is a
+                    # top-level cross-site navigation, so origin and CSRF
+                    # headers cannot exist. The one-use state and the session
+                    # cookie are the binding, and the private broker's
+                    # database function rechecks both against the setup
+                    # transaction before any mutation.
+                    session = _read_session(request, sessions)  # type: ignore[arg-type]
+                    if session is None:
+                        return jsonify({"error": "invalid_session"}), 401
+                    if set(request.args) - {"code", "state", "error"} != set():
+                        return jsonify({"error": "invalid_request"}), 400
+                    state = request.args.get("state", "")
+                    code = request.args.get("code", "")
+                    provider_error = request.args.get("error")
+                    failure = Response(status=303)
+                    failure.headers["Location"] = f"{expected_origin}/?slack_install=failed"
+                    if provider_error is not None or not code:
+                        return failure
+                    if not SLACK_OAUTH_STATE.fullmatch(state) or not 1 <= len(code) <= 512:
+                        return jsonify({"error": "invalid_request"}), 400
+                    try:
+                        installed = hosted_channel_setup.complete_slack_install(  # type: ignore[union-attr]
+                            session.context,
+                            principal_id=session.principal_id,
+                            session_id=session.id,
+                            state=state,
+                            code=code,
+                        )
+                    except Exception:
+                        installed = False
+                    if not installed:
+                        return failure
+                    success = Response(status=303)
+                    success.headers["Location"] = (
+                        f"{expected_origin}/?slack_install=connected"
+                    )
+                    return success
+
+                @app.post("/v1/onboarding/channel-installations/slack/test")
+                def test_slack_delivery_route():
+                    if request.content_length not in {None, 0}:
+                        return jsonify({"error": "invalid_request"}), 400
+                    session = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                        recent=True,
+                    )
+                    if session is None:
+                        current = _authorize_mutation(
+                            request, expected_origin, sessions  # type: ignore[arg-type]
+                        )
+                        if current is not None:
+                            return jsonify(
+                                {"error": "recent_authentication_required"}
+                            ), 409
+                        return jsonify({"error": "invalid_session"}), 401
+                    try:
+                        states = hosted_channel_setup.test_delivery(  # type: ignore[union-attr]
+                            session.context,
+                            principal_id=session.principal_id,
+                            session_id=session.id,
+                            provider="slack",
+                        )
+                    except ValueError:
+                        return jsonify({"error": "invalid_channel_setup"}), 400
+                    except Exception:
+                        return jsonify({"error": "channel_delivery_unavailable"}), 503
+                    return jsonify(_public_channel_installations(states))
+
+                if hosted_channel_lifecycle_enabled:
+
+                    @app.delete("/v1/onboarding/channel-installations/slack")
+                    def disconnect_slack_destination():
+                        if not request.is_json:
+                            return jsonify({"error": "invalid_request"}), 400
+                        payload = request.get_json(silent=True)
+                        if not isinstance(payload, dict) or payload != {
+                            "confirmation": "disconnect"
+                        }:
+                            return jsonify({"error": "invalid_request"}), 400
+                        session = _authorize_mutation(
+                            request,
+                            expected_origin,
+                            sessions,  # type: ignore[arg-type]
+                            recent=True,
+                        )
+                        if session is None:
+                            current = _authorize_mutation(
+                                request,
+                                expected_origin,
+                                sessions,  # type: ignore[arg-type]
+                            )
+                            if current is not None:
+                                return jsonify(
+                                    {"error": "recent_authentication_required"}
+                                ), 409
+                            return jsonify({"error": "invalid_session"}), 401
+                        try:
+                            states = hosted_channel_setup.disconnect(  # type: ignore[union-attr]
+                                session.context,
+                                principal_id=session.principal_id,
+                                session_id=session.id,
+                                provider="slack",
+                            )
+                            onboarding = hosted_onboarding.read(  # type: ignore[union-attr]
+                                session.context,
+                                principal_id=session.principal_id,
+                            )
+                        except ValueError:
+                            return jsonify(
+                                {"error": "invalid_channel_disconnect"}
+                            ), 400
+                        except Exception:
+                            return jsonify(
+                                {"error": "channel_disconnect_unavailable"}
+                            ), 503
+                        return jsonify(
+                            {
+                                **_public_channel_installations(states),
+                                "onboarding": _public_onboarding(onboarding)
+                                if onboarding is not None
+                                else None,
+                            }
+                        )
 
             if hosted_channel_lifecycle_enabled:
 

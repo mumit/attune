@@ -265,6 +265,12 @@ class ChannelSetup:
             "Started", (), {"transaction": transaction, "one_time_secret": "x" * 43}
         )()
 
+    def complete_slack_install(self, context, **kwargs):
+        self.calls.append(("install", context, kwargs))
+        if self.failure:
+            raise self.failure
+        return True
+
     def test_delivery(self, context, **kwargs):
         self.calls.append(("test", context, kwargs))
         if self.failure:
@@ -1174,3 +1180,153 @@ def test_hosted_google_chat_disconnect_gate_and_recent_auth_fail_closed():
     assert response.status_code == 409
     assert response.get_json() == {"error": "recent_authentication_required"}
     assert not any(call[0] == "disconnect" for call in setup.calls)
+
+
+def slack_client(setup=None, sessions=None, lifecycle=False):
+    onboarding = Onboarding(OnboardingState())
+    kwargs = {
+        "hosted_onboarding_enabled": True,
+        "hosted_onboarding": onboarding,
+        "hosted_channels_enabled": True,
+        "hosted_channels": Channels(onboarding),
+        "hosted_channel_setup_enabled": True,
+        "hosted_channel_setup": setup or ChannelSetup(),
+        "hosted_slack_install_enabled": True,
+        "slack_client_id": "1234567890.0987654321",
+    }
+    if lifecycle:
+        kwargs["hosted_channel_lifecycle_enabled"] = True
+    if sessions is not None:
+        kwargs["sessions"] = sessions
+    return signed_in_client(**kwargs)
+
+
+def test_hosted_slack_install_requires_channel_setup_and_public_client_id():
+    with pytest.raises(ValueError, match="Slack"):
+        identity_client(
+            hosted_slack_install_enabled=True, slack_client_id="1234567890.1",
+        )
+
+
+def test_hosted_slack_install_begin_is_recent_bound_and_returns_authorize_url():
+    setup = ChannelSetup()
+    client, _sessions = slack_client(setup)
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    started = client.post(
+        "/v1/onboarding/channel-installations/slack/install",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert started.status_code == 201
+    payload = started.get_json()
+    assert payload["schema_version"] == 1
+    assert payload["provider"] == "slack"
+    assert payload["state"] == "pending"
+    assert payload["authorize_url"].startswith(
+        "https://slack.com/oauth/v2/authorize?"
+    )
+    assert "x" * 43 in payload["authorize_url"]
+    assert setup.calls[-1][2]["provider"] == "slack"
+    assert setup.calls[-1][2]["principal_id"] == PRINCIPAL_ID
+
+
+def test_hosted_slack_callback_consumes_state_with_session_binding():
+    setup = ChannelSetup()
+    client, _sessions = slack_client(setup)
+    response = client.get(
+        "/v1/onboarding/channel-installations/slack/callback",
+        query_string={"code": "code-123", "state": "x" * 43},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 303
+    assert response.headers["Location"] == (
+        f"https://{HOST}/?slack_install=connected"
+    )
+    call = next(call for call in setup.calls if call[0] == "install")
+    assert call[2] == {
+        "principal_id": PRINCIPAL_ID,
+        "session_id": SESSION_ID,
+        "state": "x" * 43,
+        "code": "code-123",
+    }
+
+
+def test_hosted_slack_callback_fails_closed_without_session_or_state():
+    setup = ChannelSetup()
+    client, _sessions = slack_client(setup)
+    denied = client.get(
+        "/v1/onboarding/channel-installations/slack/callback",
+        query_string={"code": "code-123", "state": "not-canonical"},
+        base_url=f"https://{HOST}",
+    )
+    assert denied.status_code == 400
+    provider_error = client.get(
+        "/v1/onboarding/channel-installations/slack/callback",
+        query_string={"error": "access_denied", "state": "x" * 43},
+        base_url=f"https://{HOST}",
+    )
+    assert provider_error.status_code == 303
+    assert provider_error.headers["Location"].endswith("slack_install=failed")
+    extra = client.get(
+        "/v1/onboarding/channel-installations/slack/callback",
+        query_string={"code": "c", "state": "x" * 43, "tenant": "attacker"},
+        base_url=f"https://{HOST}",
+    )
+    assert extra.status_code == 400
+    assert not any(call[0] == "install" for call in setup.calls)
+
+    fresh = identity_client(
+        sessions=Sessions(opened=False),
+        hosted_onboarding_enabled=True,
+        hosted_onboarding=Onboarding(OnboardingState()),
+        hosted_channels_enabled=True,
+        hosted_channels=Channels(Onboarding(OnboardingState())),
+        hosted_channel_setup_enabled=True,
+        hosted_channel_setup=setup,
+        hosted_slack_install_enabled=True,
+        slack_client_id="1234567890.0987654321",
+    )
+    anonymous = fresh.get(
+        "/v1/onboarding/channel-installations/slack/callback",
+        query_string={"code": "code-123", "state": "x" * 43},
+        base_url=f"https://{HOST}",
+    )
+    assert anonymous.status_code == 401
+
+
+def test_hosted_slack_callback_failure_redirects_without_detail():
+    setup = ChannelSetup(failure=RuntimeError("xoxb-secret"))
+    client, _sessions = slack_client(setup)
+    response = client.get(
+        "/v1/onboarding/channel-installations/slack/callback",
+        query_string={"code": "code-123", "state": "x" * 43},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 303
+    assert response.headers["Location"].endswith("slack_install=failed")
+    assert b"xoxb" not in response.data
+
+
+def test_hosted_slack_delivery_test_and_disconnect_routes_pass_provider():
+    setup = ChannelSetup()
+    client, _sessions = slack_client(setup, lifecycle=True)
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    test = client.post(
+        "/v1/onboarding/channel-installations/slack/test",
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert test.status_code == 200
+    assert setup.calls[-1][2] == {
+        "principal_id": PRINCIPAL_ID,
+        "session_id": SESSION_ID,
+        "provider": "slack",
+    }
+    disconnect = client.delete(
+        "/v1/onboarding/channel-installations/slack",
+        json={"confirmation": "disconnect"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert disconnect.status_code == 200
+    assert setup.calls[-1][2]["provider"] == "slack"

@@ -69,6 +69,12 @@ def create_production_app():
     if channel_lifecycle_enabled_value not in {"true", "false"}:
         raise ValueError("ATTUNE_HOSTED_CHANNEL_LIFECYCLE_ENABLED must be true or false")
     channel_lifecycle_enabled = channel_lifecycle_enabled_value == "true"
+    slack_install_enabled_value = os.environ.get(
+        "ATTUNE_HOSTED_SLACK_INSTALL_ENABLED", "false"
+    )
+    if slack_install_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_HOSTED_SLACK_INSTALL_ENABLED must be true or false")
+    slack_install_enabled = slack_install_enabled_value == "true"
     customer_exports_enabled_value = os.environ.get(
         "ATTUNE_CUSTOMER_EXPORTS_ENABLED", "false"
     )
@@ -83,6 +89,8 @@ def create_production_app():
         raise ValueError("hosted channel setup requires hosted channels")
     if channel_lifecycle_enabled and not channel_setup_enabled:
         raise ValueError("hosted channel lifecycle requires hosted channel setup")
+    if slack_install_enabled and not channel_setup_enabled:
+        raise ValueError("hosted Slack installation requires hosted channel setup")
     if onboarding_enabled and not identity_enabled:
         raise ValueError("hosted onboarding requires identity")
     if test_enabled and not oauth_enabled:
@@ -188,6 +196,10 @@ def create_production_app():
             )
             if channel_setup_enabled
             else None
+        ),
+        hosted_slack_install_enabled=slack_install_enabled,
+        slack_client_id=(
+            os.environ["ATTUNE_SLACK_CLIENT_ID"] if slack_install_enabled else None
         ),
         customer_exports_enabled=customer_exports_enabled,
         customer_exports=(
