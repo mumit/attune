@@ -125,7 +125,9 @@ encryption plus a separate dormant export key and temporary bucket are also
 implemented and deployed: the reserved writer has encrypt/create/delete but no
 decrypt/read/list authority, inherited bucket readers are removed, the bucket
 is empty, and an object-free policy-administrator path keeps Terraform
-manageable. Completion state, cleanup, download, and UI remain.
+manageable. An exact-claim, idempotent encrypted-object completion transition is
+implemented locally and awaiting development migration evidence. No writer can
+invoke it yet. Cleanup, download, and UI remain.
 
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does

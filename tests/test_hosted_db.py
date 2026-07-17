@@ -127,26 +127,26 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         migration.name for migration in migrations
     )
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0030_customer_export_projections.sql"
+    assert migrations[-1].name == "0031_customer_export_completion.sql"
     assert all(
         migration.checksum == hashlib.sha256(migration.sql.encode()).hexdigest()
         for migration in migrations
     )
-    channel_broker = migrations[-8].sql
+    channel_broker = migrations[-9].sql
     assert "GRANT attune_channel_link_executor TO %I" in channel_broker
     assert "GRANT CREATE ON SCHEMA attune TO attune_channel_link_executor" in channel_broker
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in channel_broker
     assert "REVOKE attune_channel_link_executor FROM %I" in channel_broker
-    conversation = migrations[-7].sql
+    conversation = migrations[-8].sql
     assert "LIMIT 2" in conversation
     assert "GRANT attune_channel_message_executor TO %I" in conversation
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_message_executor" in conversation
     assert "TO attune_channel_broker" in conversation
-    delivery = migrations[-6].sql
+    delivery = migrations[-7].sql
     assert "hosted_channel_deliveries" in delivery
     assert "already_delivered boolean" in delivery
     assert "TO attune_channel_broker" in delivery
-    lifecycle = migrations[-5].sql
+    lifecycle = migrations[-6].sql
     assert "attune_channel_lifecycle_executor" in lifecycle
     assert "disconnect_hosted_channel_destination" in lifecycle
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_lifecycle_executor" in lifecycle
@@ -155,23 +155,23 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     assert lifecycle.index("SET LOCAL ROLE attune_channel_link_executor") < replace_link
     assert lifecycle.index("RESET ROLE", replace_link) > replace_link
-    relink_context = migrations[-4].sql
+    relink_context = migrations[-5].sql
     assert "destination.status = 'revoked'" in relink_context
     assert "SET LOCAL ROLE attune_channel_link_executor" in relink_context
-    retention = migrations[-3].sql
+    retention = migrations[-4].sql
     assert "CREATE ROLE attune_retention_executor" in retention
     assert "prune_expired_protocol_records" in retention
     assert "pg_try_advisory_xact_lock" in retention
     assert "FOR UPDATE" not in retention
     assert "interval '24 hours'" in retention
     assert "interval '7 days'" in retention
-    export = migrations[-2].sql
+    export = migrations[-3].sql
     assert "legacy export jobs require explicit reviewed adoption" in export
     assert "request_customer_export" in export
     assert "claim_customer_export" in export
     assert "recent owner session is required" in export
     assert "REVOKE INSERT, UPDATE ON attune.export_jobs" in export
-    projection = migrations[-1].sql
+    projection = migrations[-2].sql
     assert "read_customer_export_records" in projection
     assert "credential_ref" not in projection
     assert "external_ref_hash" not in projection
@@ -182,6 +182,11 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     assert "u.attributes" not in projection
     assert "lease_run_id = p_run_id" in projection
     assert "owner_state.owner_principal_id = job.requested_by" in projection
+    completion = migrations[-1].sql
+    assert "complete_customer_export" in completion
+    assert "ciphertext_bytes = archive_bytes + 16" in completion
+    assert "interval '24 hours'" in completion
+    assert "job.lease_run_id = p_run_id" in completion
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -318,7 +323,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 30
+    assert apply_migrations(admin) == 31
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -2808,6 +2813,39 @@ def test_customer_export_request_and_claim_are_fixed_recent_and_function_only(
             )
             assert cursor.fetchone() is None
         executor.commit()
+        object_id = UUID("10000000-0000-4000-8000-000000000097")
+        completion = (
+            requested[0], run_id, object_id, 7, b"w" * 64, b"n" * 12,
+            "projects/test/locations/test/keyRings/test/cryptoKeys/customer-export",
+            hashlib.sha256(b"archive").digest(),
+            hashlib.sha256(b"ciphertext").digest(), 123, 139, 1,
+        )
+        with executor.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.complete_customer_export("
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                completion,
+            )
+            ready = cursor.fetchone()
+        executor.commit()
+        assert ready[:2] == (requested[0], "ready")
+        assert ready[2] <= datetime.now(timezone.utc) + timedelta(hours=24)
+        with executor.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.complete_customer_export("
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                completion,
+            )
+            assert cursor.fetchone() == ready
+        executor.commit()
+        with executor.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "SELECT * FROM attune.complete_customer_export("
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (*completion[:3], 8, *completion[4:]),
+                )
+        executor.rollback()
         with executor.cursor() as cursor:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 cursor.execute("SELECT * FROM attune.export_jobs")
@@ -2824,6 +2862,7 @@ def test_customer_export_request_and_claim_are_fixed_recent_and_function_only(
         assert cursor.fetchall() == [
             ("export.requested", "observed"),
             ("export.claimed", "observed"),
+            ("export.ready", "observed"),
         ]
 
 

@@ -149,6 +149,18 @@ tests cover each authenticated field. The development key, bucket, exact IAM,
 emptiness, and empty Terraform plan are live verified; this still provides no
 path that can generate or download an export.
 
+Migration `0031_customer_export_completion.sql` defines the dormant handoff
+from a live five-minute claim to `ready`. The export identity must present the
+exact job and run IDs plus the opaque object UUID, positive immutable storage
+generation, wrapped data key, 12-byte nonce, full KMS resource, plaintext and
+ciphertext SHA-256 digests, bounded sizes with the exact 16-byte GCM overhead,
+and format version 1. The database chooses `ready_at` and an expiry no later
+than 24 hours, clears the lease, and atomically emits content-free audit
+evidence. Exact retry is idempotent; any changed metadata or stale claim is
+refused. The transition alone neither proves an object exists nor makes it
+downloadable, so it remains unusable until the fail-closed writer and cleanup
+paths are independently implemented and tested.
+
 ## Required evidence before activation
 
 - real-PostgreSQL cross-tenant, role, claim/replay, transition, and concurrency

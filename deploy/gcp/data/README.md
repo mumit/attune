@@ -626,6 +626,16 @@ Development projection evidence on 2026-07-16:
   job, object, key, storage permission, completion transition, queue route,
   endpoint, or UI was created.
 
+Migration `0031_customer_export_completion.sql` adds only a dormant,
+claim-bound transition to `ready`. It validates and stores an opaque object ID,
+positive immutable generation, wrapped key, nonce, exact key resource, archive
+and ciphertext digests and sizes, format version, server-selected ready time,
+and expiry no later than 24 hours. It clears the lease and emits one
+content-free audit intent atomically. An exact replay is idempotent; stale
+claims and changed metadata fail closed. Apply and verify this migration before
+building a writer, but do not describe export as available: no export job,
+upload orchestrator, cleanup, download authority, endpoint, or UI exists.
+
 ## Production gates
 
 Before this job or schema is promoted beyond development:

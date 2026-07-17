@@ -154,9 +154,12 @@ restore. It never falls back to activating the snapshot.
    the executor has no direct table access. Migration 0030 adds a current-owner,
    claim- and lease-bound positive projection with a 100,000-record ceiling.
    Unreviewed nested JSON is excluded, and the returned records pass through a
-   deterministic, bounded, secret-negative archive builder. There is
-   deliberately no ready or publish transition, envelope key, object store,
-   KMS authority, download surface, cleanup executor, or UI yet.
+   deterministic, bounded, secret-negative archive builder. A separately
+   keyed temporary object store exists as dormant substrate.
+   Migration 0031 implements an exact-claim completion transition that binds
+   immutable object generation and encrypted-envelope metadata, chooses the
+   24-hour expiry, and audits atomically. Without a writer it cannot reach
+   `ready`; there is no download surface, cleanup executor, or UI yet.
 4. **Deletion authority:** independent restore-suppression ledger and complete
    account erasure orchestrator, initially dormant.
 5. **Recovery proof:** isolated backup restore exercise demonstrating that a
