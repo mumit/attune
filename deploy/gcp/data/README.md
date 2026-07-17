@@ -777,3 +777,29 @@ Before this job or schema is promoted beyond development:
 Customer data remains prohibited until broker-mediated provider authorization,
 identity-link, verified-ingress, capability-gateway, export/deletion, and
 assurance gates pass.
+
+## Customer-export request, download, and scheduled cleanup
+
+Migrations `0036_customer_export_control_plane.sql` and
+`0037_customer_export_download.sql` add the owner-bound request/status API and
+one-time download state machine. The verifier expects 37 tenant tables,
+including forced-RLS `export_download_grants`, and the distinct
+`attune_export_download` role.
+
+The export-cleanup schedule is deployed paused first. After its IAM, manual
+invocation, empty/backlog result, and alert paths are verified, set
+`enable_export_cleanup_schedule = true`; it then runs every ten minutes through the separate
+`export_cleanup_scheduler` identity. That identity has only
+`roles/run.invoker` on this job; the job assumes the delete-only cleanup
+identity. Verify both after apply:
+
+```bash
+gcloud scheduler jobs describe attune-development-export-cleanup \
+  --location=northamerica-northeast1 --project="$PROJECT_ID"
+gcloud run jobs get-iam-policy attune-development-export-cleanup \
+  --region=northamerica-northeast1 --project="$PROJECT_ID"
+```
+
+A consumed export is operationally complete only after cleanup deletes its
+exact generation, clears the wrapped DEK, and reports
+`backlog_possible=false`.

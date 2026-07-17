@@ -24,15 +24,16 @@ The configuration creates:
   empty, non-versioned customer-export bucket and KMS key with public access
   prevention and a one-day lifecycle backstop.
 
-The export substrate does not make export available. No export compute job,
-queue route, completion transition, download identity, endpoint, or UI exists.
-The dormant export identity can wrap a fresh data key with the export key and
-create or delete opaque objects only; it cannot decrypt a wrapped key, read an
-object, or list the bucket. An authoritative bucket policy removes inherited
-legacy project-basic-role bindings. Soft delete is disabled so an application-erased
-temporary object does not remain recoverable through that feature. The
-one-day bucket lifecycle is a backstop to the future immediate-consumption and
-bounded cleanup paths, not their replacement.
+The export bucket policy encodes three disjoint runtime identities. The writer
+can wrap a fresh data key and create/delete opaque objects, but cannot decrypt,
+read, or list. The download gateway can read exact objects and decrypt, but
+cannot list, create, overwrite, or delete. Cleanup can delete only, with no read
+or KMS access. A fourth scheduler identity has no data authority and may invoke
+only the cleanup job. An authoritative bucket policy removes inherited legacy
+project-basic-role bindings. Soft delete is disabled so an
+application-erased temporary object does not remain recoverable. The one-day
+bucket lifecycle is a backstop, not a replacement for immediate consumed-object
+cleanup.
 
 Set `export_bucket_policy_admin_members` to at least one reviewed deployment
 principal. Its custom project role can read bucket metadata and get/set bucket
@@ -321,7 +322,7 @@ bucket metadata and get/set-IAM permissions, the bucket remains empty, and the
 foundation plan is empty. The full suite passed 999 tests with 35 optional
 tests skipped.
 
-## Not created yet
+## Not created by this root
 
 - public load balancer, Cloud Armor, public DNS, or certificates;
 - Cloud Run control-plane, ingress, worker, or secret-broker services;

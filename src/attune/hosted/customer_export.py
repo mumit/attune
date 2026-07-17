@@ -24,6 +24,24 @@ class CustomerExportRequest:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class CustomerExportStart(CustomerExportRequest):
+    was_created: bool
+
+
+@dataclass(frozen=True)
+class CustomerExportStatus:
+    id: UUID
+    scope: ExportScope
+    state: str
+    created_at: datetime
+    updated_at: datetime
+    ready_at: datetime | None
+    expires_at: datetime | None
+    archive_bytes: int | None
+    failure_code: str | None
+
+
 class PostgresCustomerExportRequests:
     """Create only canonical, recent-session-bound export requests."""
 
@@ -54,6 +72,50 @@ class PostgresCustomerExportRequests:
                 if row is None:
                     raise RuntimeError("customer export request was not created")
                 return CustomerExportRequest(*row)
+
+    def request_or_existing(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        session_id: UUID,
+        scope: ExportScope,
+        idempotency_key: bytes,
+    ) -> CustomerExportStart:
+        if not isinstance(principal_id, UUID) or not isinstance(session_id, UUID):
+            raise TypeError("principal_id and session_id must be UUIDs")
+        if scope not in EXPORT_SCOPES:
+            raise ValueError("unsupported customer export scope")
+        _fixed_hash("idempotency_key", idempotency_key)
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    "SELECT * FROM attune.request_or_read_customer_export(%s,%s,%s,%s)",
+                    (principal_id, session_id, scope, idempotency_key),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("customer export request was not created")
+                return CustomerExportStart(*row)
+
+    def list(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        limit: int = 10,
+    ) -> tuple[CustomerExportStatus, ...]:
+        if not isinstance(principal_id, UUID):
+            raise TypeError("principal_id must be a UUID")
+        if not 1 <= limit <= 20:
+            raise ValueError("customer export limit must be between 1 and 20")
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    "SELECT * FROM attune.list_customer_exports(%s,%s)",
+                    (principal_id, limit),
+                )
+                return tuple(CustomerExportStatus(*row) for row in cursor.fetchall())
 
 
 @dataclass(frozen=True)

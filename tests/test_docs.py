@@ -52,7 +52,8 @@ def test_customer_export_contract_is_fixed_scope_and_not_overstated():
     assert "connector credentials" in normalized
     assert "first successful download or after 24 hours" in normalized
     assert "No principal receives bucket-wide read/list plus key-decrypt authority" in normalized
-    assert "must not present a decorative or nonfunctional download control" in normalized
+    assert "90-second one-time authorization" in normalized
+    assert "default-off environment gate" in normalized
 
 
 def test_protocol_retention_scheduler_is_paused_and_least_privileged():
@@ -60,10 +61,10 @@ def test_protocol_retention_scheduler_is_paused_and_least_privileged():
     data_main = (ROOT / "deploy" / "gcp" / "data" / "main.tf").read_text()
     data_guide = (ROOT / "deploy" / "gcp" / "data" / "README.md").read_text()
 
-    assert 'retention            = "retention"' in foundation
-    assert 'retention_scheduler  = "ret-sched"' in foundation
-    assert 'if !contains(["export", "retention_scheduler"], name)' in foundation
-    assert '"oauth_exchange", "retention_scheduler"' in foundation
+    assert 'retention                = "retention"' in foundation
+    assert 'retention_scheduler      = "ret-sched"' in foundation
+    assert '"export_cleanup_scheduler"' in foundation
+    assert '"export_download"' in foundation
     assert 'service_account = local.foundation.workload_identities.retention' in data_main
     assert 'command = ["python", "-m", "attune.hosted.protocol_retention"]' in data_main
     assert 'resource "google_cloud_scheduler_job" "protocol_retention"' in data_main
@@ -79,13 +80,12 @@ def test_protocol_retention_scheduler_is_paused_and_least_privileged():
     assert "deployed paused" in data_guide
 
 
-def test_customer_export_identity_has_only_dormant_write_and_wrap_authority():
+def test_customer_export_identities_keep_write_download_and_cleanup_disjoint():
     foundation = (ROOT / "deploy" / "gcp" / "foundation" / "iam.tf").read_text()
     data_main = (ROOT / "deploy" / "gcp" / "data" / "main.tf").read_text()
 
-    assert 'export               = "export"' in foundation
-    assert '["export", "retention_scheduler"]' in foundation
-    assert '["export", "oauth_callback", "oauth_exchange", "retention_scheduler"]' in foundation
+    assert 'export                   = "export"' in foundation
+    assert '"export_download"' in foundation
     assert "attune_export = trimsuffix(" in data_main
     assert "workload_identities.export" in data_main
     assert "google_cloud_run_v2_job\" \"customer_export" not in data_main
@@ -93,10 +93,19 @@ def test_customer_export_identity_has_only_dormant_write_and_wrap_authority():
     assert 'member        = "serviceAccount:${google_service_account.workload["export"].email}"' in foundation
     assert '"storage.objects.create"' in foundation
     assert '"storage.objects.delete"' in foundation
-    assert '"storage.objects.get"' not in foundation
+    reader = foundation[foundation.index('resource "google_project_iam_custom_role" "export_object_reader"'):]
+    assert 'permissions = ["storage.objects.get"]' in reader
     assert '"storage.objects.list"' not in foundation
+    assert 'role          = "roles/cloudkms.cryptoKeyDecrypter"' in foundation
+    assert 'workload["export_download"].email' in foundation
+    bucket_policy = foundation.split(
+        'data "google_iam_policy" "customer_export"', 1
+    )[1].split('resource "google_storage_bucket_iam_policy"', 1)[0]
+    assert 'export_object_writer' in bucket_policy
+    assert 'export_object_reader' in bucket_policy
+    assert 'export_object_cleanup' in bucket_policy
     assert 'resource "google_storage_bucket_iam_policy" "customer_export"' in foundation
-    assert 'export_cleanup       = "exp-clean"' in foundation
+    assert 'export_cleanup           = "exp-clean"' in foundation
     assert 'resource "google_project_iam_custom_role" "export_object_cleanup"' in foundation
     assert 'permissions = ["storage.objects.delete"]' in foundation
     assert '"storage.buckets.getIamPolicy"' in foundation
@@ -390,7 +399,10 @@ def test_oauth_callback_identity_has_no_data_or_log_writer_authority():
     iam = (ROOT / "deploy" / "gcp" / "foundation" / "iam.tf").read_text()
 
     assert re.search(r'oauth_callback\s*=\s*"oauth-cb"', iam)
-    assert 'if !contains(["export", "oauth_callback", "oauth_exchange", "retention_scheduler"], name)' in iam
+    logging_exclusions = iam.split(
+        'resource "google_project_iam_member" "runtime_logging"', 1
+    )[1].split('resource "google_project_iam_member" "runtime_metrics"', 1)[0]
+    assert '"oauth_callback"' in logging_exclusions
     database_identity_set = iam.split(
         'resource "google_project_iam_member" "database_client"', 1
     )[1].split('resource "google_cloud_tasks_queue_iam_member"', 1)[0]
@@ -494,7 +506,7 @@ def test_initial_identity_provisioning_is_private_one_purpose_and_secret_aware()
         / "0016_initial_identity_provisioning.sql"
     ).read_text()
 
-    assert 'identity_provisioner = "id-prov"' in foundation
+    assert re.search(r'identity_provisioner\s*=\s*"id-prov"', foundation)
     broker_access = foundation.split(
         'resource "google_secret_manager_secret_iam_member" "broker_access"', 1
     )[1].split('resource "google_secret_manager_secret_iam_member"', 1)[0]
@@ -525,7 +537,7 @@ def test_model_gateway_is_private_fixed_and_owns_only_model_secret():
         'resource "google_cloud_run_v2_service" "model_gateway"', 1
     )[1].split('resource "google_cloud_run_v2_service_iam_member"', 1)[0]
 
-    assert 'model_gateway        = "model"' in foundation
+    assert re.search(r'model_gateway\s*=\s*"model"', foundation)
     assert '"llm-api-key"' in foundation
     assert 'workload["model_gateway"]' in foundation
     assert "INGRESS_TRAFFIC_INTERNAL_ONLY" in model

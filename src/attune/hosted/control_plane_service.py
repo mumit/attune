@@ -100,6 +100,14 @@ class HostedChannelSetup(Protocol):
     def disconnect(self, context, **kwargs): ...
 
 
+class CustomerExports(Protocol):
+    def request(self, context, **kwargs): ...
+
+    def list(self, context, **kwargs): ...
+
+    def authorize_download(self, context, **kwargs): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -124,6 +132,8 @@ def create_app(
     hosted_channel_setup_enabled: bool = False,
     hosted_channel_setup: HostedChannelSetup | None = None,
     hosted_channel_lifecycle_enabled: bool = False,
+    customer_exports_enabled: bool = False,
+    customer_exports: CustomerExports | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -192,6 +202,12 @@ def create_app(
     if hosted_channel_lifecycle_enabled and not hosted_channel_setup_enabled:
         raise ValueError(
             "enabled hosted channel lifecycle requires hosted channel setup"
+        )
+    if customer_exports_enabled and (
+        not identity_enabled or customer_exports is None
+    ):
+        raise ValueError(
+            "enabled customer exports require identity and an export service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -366,6 +382,9 @@ def create_app(
                         "available"
                         if hosted_channel_lifecycle_enabled
                         else "not_configured"
+                    ),
+                    "customer_exports": (
+                        "available" if customer_exports_enabled else "not_configured"
                     ),
                 }
             )
@@ -625,6 +644,116 @@ def create_app(
                         "onboarding": _public_onboarding(state),
                     }
                 )
+
+        if customer_exports_enabled:
+
+            @app.get("/v1/exports")
+            def list_customer_exports():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    exports = customer_exports.list(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except Exception:
+                    return jsonify({"error": "exports_unavailable"}), 503
+                return jsonify(
+                    {
+                        "schema_version": 1,
+                        "exports": [_public_export(item) for item in exports],
+                    }
+                )
+
+            @app.post("/v1/exports")
+            def request_customer_export():
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if not isinstance(payload, dict) or payload != {
+                    "scope": "account",
+                    "confirmation": "create export",
+                }:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify(
+                            {"error": "recent_authentication_required"}
+                        ), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    started = customer_exports.request(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        scope="account",
+                    )
+                except Exception:
+                    return jsonify({"error": "export_unavailable"}), 503
+                return (
+                    jsonify(
+                        {
+                            "schema_version": 1,
+                            "export": _public_export(started.export),
+                        }
+                    ),
+                    202 if started.accepted else 200,
+                )
+
+            @app.post("/v1/exports/<uuid:export_id>/download-authorizations")
+            def authorize_customer_export_download(export_id):
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if not isinstance(payload, dict) or payload != {
+                    "confirmation": "download export"
+                }:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify(
+                            {"error": "recent_authentication_required"}
+                        ), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    grant = customer_exports.authorize_download(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        export_id=export_id,
+                    )
+                except Exception:
+                    return jsonify({"error": "download_not_available"}), 409
+                return jsonify(
+                    {
+                        "schema_version": 1,
+                        "grant_id": str(grant.id),
+                        "secret": grant.secret,
+                        "expires_at": grant.expires_at.isoformat(),
+                    }
+                ), 201
 
         if hosted_channels_enabled:
 
@@ -935,6 +1064,20 @@ def _public_channels(preferences, status: str) -> dict:
             {"id": "slack", "label": "Slack"},
         ],
         "installation": "required",
+    }
+
+
+def _public_export(item) -> dict:
+    return {
+        "id": str(item.id),
+        "scope": item.scope,
+        "state": item.state,
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+        "ready_at": item.ready_at.isoformat() if item.ready_at else None,
+        "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+        "archive_bytes": item.archive_bytes,
+        "download_available": item.state == "ready",
     }
 
 

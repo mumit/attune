@@ -141,7 +141,7 @@ def run_export_cleanup(
     else:
         attempt_backlog = len(candidates) == batch_size
 
-    exports_expired = 0
+    exports_cleaned = 0
     expiry_batches = 0
     expiry_backlog = False
     for batch_index in range(max_batches):
@@ -159,16 +159,16 @@ def run_export_cleanup(
             except ObjectNotFound:
                 pass
             repository.complete_expiration(expiration, cleanup_run_id=cleanup_run_id)
-            exports_expired += 1
+            exports_cleaned += 1
         if len(expirations) < batch_size:
             break
     else:
         expiry_backlog = len(expirations) == batch_size
 
     return {
-        "objects_deleted": attempts_deleted + exports_expired,
+        "objects_deleted": attempts_deleted + exports_cleaned,
         "attempts_deleted": attempts_deleted,
-        "exports_expired": exports_expired,
+        "exports_cleaned": exports_cleaned,
         "batches": attempt_batches + expiry_batches,
         "backlog_possible": attempt_backlog or expiry_backlog,
     }

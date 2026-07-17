@@ -143,10 +143,28 @@ button.danger {
 }
 
 #policy-review,
-#channel-preferences {
+#channel-preferences,
+#customer-exports {
   margin-top: 2rem;
   padding-top: 1.5rem;
   border-top: 1px solid rgb(23 33 28 / 10%);
+}
+
+#customer-exports p,
+.customer-export-item {
+  color: #526058;
+  line-height: 1.55;
+}
+
+.customer-export-item {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid rgb(23 33 28 / 14%);
+  border-radius: 0.75rem;
+}
+
+.customer-export-item button {
+  margin-top: 0.75rem;
 }
 
 #channel-preferences p,

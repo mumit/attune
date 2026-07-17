@@ -7,6 +7,7 @@ initial_tenant_slug     = "owner-dev"
 enable_protocol_retention_schedule = false
 protocol_retention_schedule        = "17 3 * * *"
 protocol_retention_time_zone       = "Etc/UTC"
+enable_export_cleanup_schedule     = false
 
 # Required before enabling retention scheduling.
 alert_notification_channels = [

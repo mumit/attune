@@ -49,6 +49,17 @@ check "google_chat_conversation_activation" {
   }
 }
 
+check "customer_export_activation" {
+  assert {
+    condition = !var.enable_customer_exports || (
+      var.enable_identity_sign_in &&
+      try(local.runtime.export_writer != null, false) &&
+      local.runtime.dispatch_broker != null
+    )
+    error_message = "Customer exports require identity, the private export writer, and the dispatch broker."
+  }
+}
+
 resource "google_cloud_run_v2_service" "control_plane" {
   project              = local.foundation.project_id
   name                 = "${local.prefix}-control-plane"
@@ -126,6 +137,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "ATTUNE_HOSTED_CHANNEL_LIFECYCLE_ENABLED"
         value = tostring(var.enable_hosted_channel_lifecycle)
       }
+      env {
+        name  = "ATTUNE_CUSTOMER_EXPORTS_ENABLED"
+        value = tostring(var.enable_customer_exports)
+      }
       dynamic "env" {
         for_each = var.enable_hosted_channel_setup ? [1] : []
         content {
@@ -148,14 +163,14 @@ resource "google_cloud_run_v2_service" "control_plane" {
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_URL"
           value = local.runtime.dispatch_broker.uri
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_workspace_verification_enabled ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_AUDIENCE"
           value = local.runtime.dispatch_broker.audience
@@ -592,6 +607,106 @@ resource "google_compute_region_network_endpoint_group" "control_plane" {
   }
 }
 
+resource "google_cloud_run_v2_service" "export_download" {
+  count                = var.enable_customer_exports ? 1 : 0
+  project              = local.foundation.project_id
+  name                 = "${local.prefix}-export-download"
+  location             = local.foundation.region
+  deletion_protection  = true
+  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  default_uri_disabled = true
+  invoker_iam_disabled = true
+  labels               = merge(local.labels, { component = "export-download" })
+  template {
+    service_account                  = local.foundation.workload_identities.export_download
+    timeout                          = "120s"
+    max_instance_request_concurrency = 1
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 2
+    }
+    containers {
+      name  = "export-download"
+      image = var.export_download_image
+      ports { container_port = 8080 }
+      resources {
+        limits            = { cpu = "1", memory = "256Mi" }
+        cpu_idle          = true
+        startup_cpu_boost = true
+      }
+      env {
+        name  = "ATTUNE_PUBLIC_HOST"
+        value = var.hostname
+      }
+      env {
+        name  = "ATTUNE_CLOUD_SQL_INSTANCE"
+        value = local.foundation.database_instance
+      }
+      env {
+        name  = "ATTUNE_DB_NAME"
+        value = local.foundation.database_name
+      }
+      env {
+        name  = "ATTUNE_DB_USER"
+        value = trimsuffix(local.foundation.workload_identities.export_download, ".gserviceaccount.com")
+      }
+      env {
+        name  = "ATTUNE_EXPORT_BUCKET"
+        value = local.foundation.customer_export_bucket
+      }
+      env {
+        name  = "ATTUNE_EXPORT_KMS_KEY"
+        value = local.foundation.customer_export_kms_key
+      }
+      startup_probe {
+        initial_delay_seconds = 1
+        timeout_seconds       = 2
+        period_seconds        = 3
+        failure_threshold     = 10
+        http_get {
+          path = "/healthz"
+          port = 8080
+          http_headers {
+            name  = "Host"
+            value = var.hostname
+          }
+        }
+      }
+      liveness_probe {
+        timeout_seconds   = 2
+        period_seconds    = 10
+        failure_threshold = 3
+        http_get {
+          path = "/healthz"
+          port = 8080
+          http_headers {
+            name  = "Host"
+            value = var.hostname
+          }
+        }
+      }
+    }
+    vpc_access {
+      egress = "ALL_TRAFFIC"
+      network_interfaces {
+        network    = local.foundation.network_id
+        subnetwork = local.foundation.subnetwork_id
+        tags       = ["attune-export-download"]
+      }
+    }
+  }
+  lifecycle { prevent_destroy = true }
+}
+
+resource "google_compute_region_network_endpoint_group" "export_download" {
+  count                 = var.enable_customer_exports ? 1 : 0
+  project               = local.foundation.project_id
+  name                  = "${local.prefix}-export-download"
+  region                = local.foundation.region
+  network_endpoint_type = "SERVERLESS"
+  cloud_run { service = google_cloud_run_v2_service.export_download[0].name }
+}
+
 resource "google_compute_region_network_endpoint_group" "oauth_callback" {
   project               = local.foundation.project_id
   name                  = "${local.prefix}-oauth-callback"
@@ -753,6 +868,29 @@ resource "google_compute_security_policy" "edge" {
         enforce_on_key = "IP"
         rate_limit_threshold {
           count        = 5
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_customer_exports ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 889
+      description = "Permit only authenticated customer export request, status, and authorization paths"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/exports' || request.path.matches('^/v1/exports/[0-9a-f-]{36}/download-authorizations$'))"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 30
           interval_sec = 60
         }
       }
@@ -946,6 +1084,42 @@ resource "google_compute_security_policy" "oauth_callback" {
   }
 }
 
+resource "google_compute_security_policy" "export_download" {
+  count       = var.enable_customer_exports ? 1 : 0
+  project     = local.foundation.project_id
+  name        = "${local.prefix}-export-download-edge"
+  description = "Exact same-origin one-time export download endpoint"
+  type        = "CLOUD_ARMOR"
+  rule {
+    action      = "throttle"
+    priority    = 1000
+    description = "Permit only POST to the fixed export download endpoint"
+    match {
+      expr {
+        expression = "request.headers['host'] == '${var.hostname}' && request.method == 'POST' && request.path == '/v1/export-download'"
+      }
+    }
+    rate_limit_options {
+      conform_action = "allow"
+      exceed_action  = "deny(429)"
+      enforce_on_key = "IP"
+      rate_limit_threshold {
+        count        = 10
+        interval_sec = 60
+      }
+    }
+  }
+  rule {
+    action      = "deny(403)"
+    priority    = 2147483647
+    description = "Default deny"
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config { src_ip_ranges = ["*"] }
+    }
+  }
+}
+
 resource "google_compute_security_policy" "google_chat_ingress" {
   count       = var.deploy_google_chat_ingress ? 1 : 0
   project     = local.foundation.project_id
@@ -1024,6 +1198,64 @@ resource "google_compute_backend_service" "oauth_callback" {
   }
 }
 
+resource "google_compute_backend_service" "export_download" {
+  count                 = var.enable_customer_exports ? 1 : 0
+  project               = local.foundation.project_id
+  name                  = "${local.prefix}-export-download"
+  protocol              = "HTTPS"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  timeout_sec           = 120
+  security_policy       = google_compute_security_policy.export_download[0].id
+  backend { group = google_compute_region_network_endpoint_group.export_download[0].id }
+  # The request body carries a one-time bearer; disable load-balancer request logs.
+  log_config { enable = false }
+}
+
+resource "google_logging_metric" "export_download_failure" {
+  count   = var.enable_customer_exports ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-export-download-failure"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.export_download[0].name}\"",
+    "httpRequest.status>=500",
+  ])
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune customer-export download failures"
+  }
+}
+
+resource "google_monitoring_alert_policy" "export_download_failure" {
+  count        = var.enable_customer_exports ? 1 : 0
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} customer-export download failure"
+  combiner     = "OR"
+  enabled      = true
+  documentation {
+    content   = "A one-time customer-export read, authenticated decryption, or consumption failed. Inspect without logging or replaying the bearer secret."
+    mime_type = "text/markdown"
+  }
+  conditions {
+    display_name = "At least one export download 5xx"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.export_download_failure[0].name}\" AND resource.type=\"cloud_run_revision\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
 resource "google_compute_backend_service" "google_chat_ingress" {
   count                 = var.deploy_google_chat_ingress ? 1 : 0
   project               = local.foundation.project_id
@@ -1085,6 +1317,14 @@ resource "google_compute_url_map" "https" {
     path_rule {
       paths   = ["/oauth/google/callback"]
       service = google_compute_backend_service.oauth_callback.id
+    }
+
+    dynamic "path_rule" {
+      for_each = var.enable_customer_exports ? [1] : []
+      content {
+        paths   = ["/v1/export-download"]
+        service = google_compute_backend_service.export_download[0].id
+      }
     }
 
     dynamic "path_rule" {

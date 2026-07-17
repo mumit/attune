@@ -1,21 +1,23 @@
 locals {
   workload_accounts = {
-    channel_broker       = "chan-broker"
-    control_plane        = "ctl"
-    oauth_callback       = "oauth-cb"
-    oauth_exchange       = "oauth-xchg"
-    dispatch_broker      = "task-broker"
-    export               = "export"
-    export_cleanup       = "exp-clean"
-    ingress              = "ingress"
-    identity_provisioner = "id-prov"
-    model_gateway        = "model"
-    retention            = "retention"
-    retention_scheduler  = "ret-sched"
-    worker               = "worker"
-    secret_broker        = "secrets"
-    task_dispatch        = "dispatch"
-    audit_writer         = "audit"
+    channel_broker           = "chan-broker"
+    control_plane            = "ctl"
+    oauth_callback           = "oauth-cb"
+    oauth_exchange           = "oauth-xchg"
+    dispatch_broker          = "task-broker"
+    export                   = "export"
+    export_cleanup           = "exp-clean"
+    export_cleanup_scheduler = "exp-cln-sch"
+    export_download          = "exp-down"
+    ingress                  = "ingress"
+    identity_provisioner     = "id-prov"
+    model_gateway            = "model"
+    retention                = "retention"
+    retention_scheduler      = "ret-sched"
+    worker                   = "worker"
+    secret_broker            = "secrets"
+    task_dispatch            = "dispatch"
+    audit_writer             = "audit"
   }
 }
 
@@ -29,7 +31,7 @@ resource "google_service_account" "workload" {
 resource "google_project_iam_member" "runtime_logging" {
   for_each = {
     for name, account in google_service_account.workload : name => account
-    if !contains(["export", "oauth_callback", "oauth_exchange", "retention_scheduler"], name)
+    if !contains(["export", "export_cleanup_scheduler", "export_download", "oauth_callback", "oauth_exchange", "retention_scheduler"], name)
   }
   project = var.project_id
   role    = "roles/logging.logWriter"
@@ -39,7 +41,7 @@ resource "google_project_iam_member" "runtime_logging" {
 resource "google_project_iam_member" "runtime_metrics" {
   for_each = {
     for name, account in google_service_account.workload : name => account
-    if !contains(["export", "retention_scheduler"], name)
+    if !contains(["export", "export_cleanup_scheduler", "export_download", "retention_scheduler"], name)
   }
   project = var.project_id
   role    = "roles/monitoring.metricWriter"
@@ -54,6 +56,7 @@ resource "google_project_iam_member" "database_client" {
     "dispatch_broker",
     "export",
     "export_cleanup",
+    "export_download",
     "oauth_exchange",
     "identity_provisioner",
     "retention",
@@ -73,6 +76,7 @@ resource "google_project_iam_member" "database_instance_user" {
     "dispatch_broker",
     "export",
     "export_cleanup",
+    "export_download",
     "oauth_exchange",
     "identity_provisioner",
     "retention",
@@ -192,6 +196,12 @@ resource "google_kms_crypto_key_iam_member" "export_wrap" {
   member        = "serviceAccount:${google_service_account.workload["export"].email}"
 }
 
+resource "google_kms_crypto_key_iam_member" "export_download_unwrap" {
+  crypto_key_id = google_kms_crypto_key.customer_export.id
+  role          = "roles/cloudkms.cryptoKeyDecrypter"
+  member        = "serviceAccount:${google_service_account.workload["export_download"].email}"
+}
+
 resource "google_project_iam_custom_role" "export_object_writer" {
   project     = var.project_id
   role_id     = "attune_${var.environment}_export_writer"
@@ -226,6 +236,15 @@ resource "google_project_iam_custom_role" "export_object_cleanup" {
   stage       = "GA"
 }
 
+resource "google_project_iam_custom_role" "export_object_reader" {
+  project     = var.project_id
+  role_id     = "attune_${var.environment}_export_reader"
+  title       = "Attune ${var.environment} export object reader"
+  description = "Read only an application-authorized temporary export object without listing, creating, or deleting."
+  permissions = ["storage.objects.get"]
+  stage       = "GA"
+}
+
 resource "google_project_iam_member" "export_bucket_policy_admin" {
   for_each = var.export_bucket_policy_admin_members
   project  = var.project_id
@@ -244,6 +263,12 @@ data "google_iam_policy" "customer_export" {
     role = google_project_iam_custom_role.export_object_cleanup.name
     members = [
       "serviceAccount:${google_service_account.workload["export_cleanup"].email}",
+    ]
+  }
+  binding {
+    role = google_project_iam_custom_role.export_object_reader.name
+    members = [
+      "serviceAccount:${google_service_account.workload["export_download"].email}",
     ]
   }
 }

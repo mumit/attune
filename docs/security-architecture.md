@@ -581,6 +581,26 @@ arguments.
   export database state is independently terminal. The service MUST NOT receive
   connector credentials, object read/list, KMS decrypt, or arbitrary runtime
   arguments.
+- **SEC-618.** Export request and status MUST remain principal-bound database
+  functions. Creation and download authorization require a recent owner
+  session, exact confirmation, same-origin CSRF protection, and a server-fixed
+  scope. Concurrent submissions may adopt only the same active owner/scope
+  request; tenant, object, key, retention, and dispatch authority never come
+  from the browser.
+- **SEC-619.** Download MUST use a distinct function-only identity with object
+  get and KMS decrypt but no list, create, overwrite, or delete. A 90-second
+  random one-time secret MUST travel only in no-store JSON bodies, never URLs,
+  redirects, signed storage links, or logged fields. The gateway MUST lease the
+  exact grant, generation, and cryptographic context, authenticate/decrypt
+  before atomically consuming it, and release failed attempts without making a
+  replay or parallel plaintext response possible.
+- **SEC-620.** Consumed objects MUST become immediate exact-generation cleanup
+  candidates. The delete-only cleanup identity MUST destroy storage and then
+  clear the wrapped DEK and object metadata; it cannot read or decrypt. Its
+  scheduler identity may invoke only the bounded cleanup job and has no
+  database, storage, KMS, secret, queue, or telemetry-writer authority. The
+  schedule MUST be deployed paused, exercised manually through the exact
+  scheduler path, and enabled only in a second reviewed state change.
 
 The lifecycle policy, complete storage inventory, customer ceremonies, and
 restore procedure are defined in [Hosted data lifecycle](data-lifecycle.md).

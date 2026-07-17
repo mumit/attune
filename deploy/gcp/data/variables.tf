@@ -118,3 +118,9 @@ variable "export_cleanup_max_batches" {
     error_message = "export_cleanup_max_batches must be an integer between 1 and 10."
   }
 }
+
+variable "enable_export_cleanup_schedule" {
+  description = "Activate the verified ten-minute customer-export cleanup schedule."
+  type        = bool
+  default     = false
+}

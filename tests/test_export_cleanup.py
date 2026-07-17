@@ -74,7 +74,7 @@ def test_cleanup_deletes_known_names_and_treats_absence_as_success():
     assert result == {
         "objects_deleted": 2,
         "attempts_deleted": 2,
-        "exports_expired": 0,
+        "exports_cleaned": 0,
         "batches": 2,
         "backlog_possible": False,
     }
@@ -93,7 +93,7 @@ def test_cleanup_expires_ready_export_only_after_exact_generation_delete():
     assert result == {
         "objects_deleted": 1,
         "attempts_deleted": 0,
-        "exports_expired": 1,
+        "exports_cleaned": 1,
         "batches": 2,
         "backlog_possible": False,
     }
@@ -160,7 +160,7 @@ def test_cleanup_is_bounded_and_reports_possible_backlog():
     assert result == {
         "objects_deleted": 2,
         "attempts_deleted": 2,
-        "exports_expired": 0,
+        "exports_cleaned": 0,
         "batches": 3,
         "backlog_possible": True,
     }

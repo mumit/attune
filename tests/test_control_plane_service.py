@@ -131,6 +131,47 @@ class OnboardingState:
     activation = "not_started"
 
 
+class CustomerExports:
+    def __init__(self):
+        self.calls = []
+        now = datetime.now(timezone.utc)
+        self.export = type(
+            "Export",
+            (),
+            {
+                "id": JOB_ID,
+                "scope": "account",
+                "state": "ready",
+                "created_at": now,
+                "updated_at": now,
+                "ready_at": now,
+                "expires_at": now + timedelta(hours=1),
+                "archive_bytes": 123,
+                "failure_code": None,
+            },
+        )()
+
+    def list(self, context, **kwargs):
+        self.calls.append(("list", context, kwargs))
+        return (self.export,)
+
+    def request(self, context, **kwargs):
+        self.calls.append(("request", context, kwargs))
+        return type("Started", (), {"export": self.export, "accepted": True})()
+
+    def authorize_download(self, context, **kwargs):
+        self.calls.append(("authorize", context, kwargs))
+        return type(
+            "Grant",
+            (),
+            {
+                "id": UUID(int=99),
+                "secret": "s" * 43,
+                "expires_at": datetime.now(timezone.utc) + timedelta(seconds=90),
+            },
+        )()
+
+
 class Policies:
     def __init__(self, onboarding, status="validated", failure=None):
         self.onboarding = onboarding
@@ -833,6 +874,53 @@ def test_hosted_policy_requires_recent_auth_and_audited_service():
     assert response.status_code == 503
     assert response.get_json() == {"error": "policy_unavailable"}
     assert b"private audit" not in response.data
+
+
+def test_customer_exports_are_owner_recent_bound_and_secret_is_returned_once():
+    exports = CustomerExports()
+    client, _sessions = signed_in_client(
+        customer_exports_enabled=True, customer_exports=exports
+    )
+    listed = client.get("/v1/exports", base_url=f"https://{HOST}")
+    assert listed.status_code == 200
+    assert listed.get_json()["exports"][0]["download_available"] is True
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    headers = {**same_origin(), "X-Attune-CSRF": csrf}
+    requested = client.post(
+        "/v1/exports",
+        json={"scope": "account", "confirmation": "create export"},
+        headers=headers,
+        base_url=f"https://{HOST}",
+    )
+    assert requested.status_code == 202
+    issued = client.post(
+        f"/v1/exports/{JOB_ID}/download-authorizations",
+        json={"confirmation": "download export"},
+        headers=headers,
+        base_url=f"https://{HOST}",
+    )
+    assert issued.status_code == 201
+    assert issued.get_json()["secret"] == "s" * 43
+    assert [call[0] for call in exports.calls] == ["list", "request", "authorize"]
+
+
+def test_customer_export_mutations_require_recent_auth_and_exact_body():
+    exports = CustomerExports()
+    client, _sessions = signed_in_client(
+        sessions=Sessions(recent=False),
+        customer_exports_enabled=True,
+        customer_exports=exports,
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    response = client.post(
+        "/v1/exports",
+        json={"scope": "account", "confirmation": "create export"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "recent_authentication_required"}
+    assert exports.calls == []
 
 
 def test_hosted_channels_are_bounded_recent_auth_and_effect_free():

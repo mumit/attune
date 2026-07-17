@@ -23,8 +23,9 @@ to the first GCP implementation.
 | Audit writer | Private intent-only service writing canonical events to PostgreSQL and retained Cloud Storage | No | Implemented in development |
 | Retention scheduler | Cloud Scheduler OAuth call to one Cloud Run job; distinct non-database identity | No | No |
 | Protocol-retention executor | Bounded Cloud Run job with function-only database authority | No | No |
-| Customer-export writer | Not deployed; reserved identity has function-only database claim/read, export-key encrypt, and opaque object create/delete authority | No plaintext credentials | No |
-| Customer-export cleanup | Manual-only bounded Cloud Run job with function-only quarantined-attempt leases and exact opaque-object delete authority; no scheduler until activation gates pass | No secret or KMS access | No |
+| Customer-export writer | Private single-concurrency Cloud Run service; canonical task envelope, function-only projection, export-key encrypt, opaque object create/delete | No plaintext credentials | No |
+| Customer-export download | Separate load-balanced exact-path service; one-time function claim, exact object read, export-key decrypt; no list/create/delete | Plaintext only in response memory | Yes, when gated on |
+| Customer-export cleanup | Bounded Cloud Run job invoked every ten minutes by a distinct scheduler identity; exact-generation delete only | No secret or KMS access | No |
 | Temporary export storage | Separate non-versioned CMEK bucket; public access prevented, soft delete disabled, one-day lifecycle backstop | Encrypted export objects only | No |
 | Images | Artifact Registry with provenance and vulnerability policy gates | No | No |
 

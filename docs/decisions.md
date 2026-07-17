@@ -408,6 +408,21 @@ Newest first. This log records decisions that constrain current implementation.
 - The bulk-access migrator remains migration-only and accepts no runtime
   overrides. It is not an identity administration interface.
 
+## 2026-07 — Customer exports use disjoint write, download, and cleanup identities
+
+- The control plane exposes only the account-and-preferences scope during the
+  private alpha. Request and download authorization require recent owner auth;
+  status remains owner-bound but does not expose storage or key metadata.
+- The writer has object create/delete plus KMS encrypt, the download gateway has
+  exact object get plus KMS decrypt, and cleanup has exact object delete. None
+  combines read/decrypt with delete, and no identity can list export objects.
+- Download uses a 90-second random one-time secret in POST bodies, never a URL
+  or signed storage link. It authenticates/decrypts before atomically consuming
+  the grant; consumed objects are scheduled for exact-generation deletion.
+- Automated cleanup uses a fourth scheduler identity that can invoke only the
+  bounded cleanup job. The bucket lifecycle remains disaster backstop, not
+  application deletion evidence.
+
 ## 2026-07 — Qdrant server mode is the memory default
 
 - Attune defaults to the durable Qdrant server at `127.0.0.1:6333`; embedded

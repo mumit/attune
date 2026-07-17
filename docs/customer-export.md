@@ -6,9 +6,9 @@ not constitute a working export.
 
 ## Customer journey
 
-1. A signed-in owner chooses one server-defined scope: account and preferences,
-   conversations, memories, or customer-visible activity. The page describes
-   what is and is not included.
+1. A signed-in owner chooses the server-defined account and preferences export.
+   Other reviewed scopes remain disabled in the private alpha until their
+   customer disclosures and controls are activated.
 2. Attune requires a fresh web authentication and an exact confirmation. The
    browser supplies neither tenant identity, table names, object paths, nor
    retention duration.
@@ -79,10 +79,10 @@ second fail-closed check, not a substitute for that review.
   the winning attempt. A terminal failure is forbidden unless the writer has
   proved its current object absent; bucket lifecycle remains the backstop for
   a process that dies between a storage write and cleanup.
-- **Download gateway:** after a second recent-auth ceremony, atomically consumes
-  the download authorization, reads exactly the referenced object generation,
-  unwraps and streams it, and schedules immediate erasure. It never redirects
-  to a public or long-lived bearer URL.
+- **Download gateway:** after a second recent-auth ceremony, leases the exact
+  one-time authorization, reads and authenticates the referenced object
+  generation, then atomically consumes the grant immediately before returning
+  the attachment. It never redirects to a public or long-lived bearer URL.
 - **Cleanup executor:** deletes expired/consumed object generations and wrapped
   keys in bounded batches, then records content-free evidence. Bucket lifecycle
   is a backstop, not proof that application cleanup succeeded.
@@ -97,7 +97,8 @@ principal receives bucket-wide read/list plus key-decrypt authority.
 The allowed transitions are:
 
 ```text
-requested -> running -> ready -> consumed -> expired
+requested -> running -> ready -> consumed
+                           \-> expired
                     \-> failed
 requested ---------> cancelled
 ```
@@ -131,116 +132,49 @@ names, connector ciphertext, route ciphertext, sessions, link secrets, raw
 embeddings, internal task authority, and unreviewed tables fail the job closed.
 Regex redaction is not the authorization boundary.
 
-The dormant database reader and archive builder now implement the reviewed
-projection and format boundary with fixed ZIP member
-names, timestamps, modes, schema version, scope-specific record kinds, member
-record counts and SHA-256 digests, and a whole-archive digest. It caps each
-record at 2 MiB, the archive at 50 MiB, total records at 100,000, and nesting at
-20 levels. It recursively normalizes field spelling before rejecting reviewed
-credential, authorization, identity-hash, route, claim, and audit-chain keys.
-No compute path connects them to an envelope key or object store, and there is
-no completion transition, cleanup executor, or download path; customer export
-therefore remains unavailable.
+## Current implementation
 
-The next dormant substrate defines a separate export KMS key and temporary
-bucket. The writer can encrypt/wrap and create or delete opaque objects, but
-cannot decrypt, read, or list. The bucket is non-versioned, has uniform access,
-enforced public-access prevention, disabled soft delete, a one-day lifecycle
-backstop, and provider-enforced protection against accidental Terraform
-destruction. No writer job or completion path is deployed, so the bucket must
-remain empty.
+Migrations `0029` through `0035` implement request authority, positive
+projections, bounded archive generation, envelope encryption, immutable object
+attempts, exact completion, failure recovery, abandoned/expired cleanup, and
+the canonical task relationship. The private writer is deployed at concurrency
+one. Only the task-dispatch identity can invoke it. The writer can wrap keys and
+create/delete canonical objects, but cannot decrypt, read, or list.
 
-The archive encryption format authenticates tenant ID, export job ID, fixed
-scope, opaque object ID, plaintext digest and size, and format version with
-AES-256-GCM. It uses a fresh random data key and nonce for every encryption,
-wraps the data key with the separate export KMS key, verifies ciphertext and
-plaintext digests, and refuses key/context/metadata substitution. Adversarial
-tests cover each authenticated field. The development key, bucket, exact IAM,
-emptiness, and empty Terraform plan are live verified; this still provides no
-path that can generate or download an export.
+Migration `0036_customer_export_control_plane.sql` adds the owner-facing
+request and status boundary. A recent identity session is checked again in the
+database. Double-clicks and concurrent requests adopt only the exact active
+owner/scope row. Status is returned through a principal-bound function capped
+at twenty rows; the control plane has no export-content access. The private
+alpha exposes only the `account` scope in the web API and UI. The remaining
+reviewed scopes stay server-side unavailable until their separate product
+disclosures are enabled.
 
-Migration `0031_customer_export_completion.sql` defines the dormant handoff
-from a live five-minute claim to `ready`. The export identity must present the
-exact job and run IDs plus the opaque object UUID, positive immutable storage
-generation, wrapped data key, 12-byte nonce, full KMS resource, plaintext and
-ciphertext SHA-256 digests, bounded sizes with the exact 16-byte GCM overhead,
-and format version 1. The database chooses `ready_at` and an expiry no later
-than 24 hours, clears the lease, and atomically emits content-free audit
-evidence. Exact retry is idempotent; any changed metadata or stale claim is
-refused. The transition alone neither proves an object exists nor makes it
-downloadable, so it remains unusable until the fail-closed writer and cleanup
-paths are independently implemented and tested.
+Migration `0037_customer_export_download.sql` adds a separate download role and
+90-second one-time authorization. The opaque secret is returned once in a JSON
+body and posted to a fixed same-origin endpoint; it never appears in a URL,
+redirect, object name, or access-log field. The gateway leases the exact grant,
+reads the exact immutable generation with CRC32C verification, unwraps the DEK,
+authenticates every AES-GCM context field and digest, and only then atomically
+marks the grant used and the export consumed. Failed read/decrypt attempts
+release the exact lease without consuming the grant. Replays and parallel
+claims cannot obtain a second plaintext response.
 
-The completion migration is deployed in development. Its exact-lease,
-idempotency, altered-metadata refusal, expiry, audit, role, and schema tests
-pass against real PostgreSQL, the live migrator verifier passes, and both
-infrastructure plans are empty. No export object was generated.
+The download identity has only database function execution, object `get`, and
+KMS decrypt. It cannot list, create, overwrite, or delete objects. The
+delete-only cleanup identity has none of its read/decrypt authority. Consumed
+objects become immediate exact-generation cleanup candidates; expired ready
+objects use the same bounded queue. Cleanup destroys the object and wrapped DEK
+only after deletion or verified absence. A distinct scheduler identity may
+invoke only this cleanup job every ten minutes. The one-day bucket lifecycle is
+still only a backstop.
 
-Migration `0032_customer_export_recovery.sql` and the dormant writer library
-close the interrupted-execution boundary. The migration permits only expired
-leases to be reclaimed, records one opaque object attempt per run, returns
-known cleanup candidates through an exact-claim function, and exposes a fixed
-failure transition with five content-free codes. The writer deletes prior
-candidates, builds the positive projection, encrypts with a fresh DEK, uploads
-with create-if-absent plus CRC32C, binds the returned generation at completion,
-and deletes that exact generation if completion fails. An ambiguous upload is
-deleted before failure is recorded. If deletion cannot be verified, the job
-remains nonterminal and raises a cleanup incident. The storage adapter exposes
-no read or list operation. Migration 0032 is deployed in development; the
-writer library is not deployed or invocable. There is still no export executor,
-queue route, download gateway, cleanup service, endpoint, or UI, so customer
-export remains unavailable. The rollout applied exactly one migration, verified
-all 34 forced-RLS tenant tables and exact privileges, and converged both
-Terraform states to empty plans without generating an export object.
+The archive remains bounded to 50 MiB and 100,000 records. It uses fixed ZIP
+members, deterministic JSON Lines, schema/version manifests, record and archive
+digests, and structural rejection of credential, authorization, identity-hash,
+route, session, claim, embedding, and audit-chain fields.
 
-Migration `0033_customer_export_cleanup_authority.sql` defines the next dormant
-boundary for abandoned attempts. A distinct cleanup role can lease at most 100
-known object UUIDs after a 15-minute quarantine. The active writer attempt and
-the object referenced by a ready export are excluded. Its separate storage
-identity has delete only—no create, read, list, or KMS permission—and records
-claim-bound, content-free evidence only after deletion or verified absence.
-Failures leave the lease to expire for retry. The bounded cleanup entry point
-reports possible backlog. Migration 0033 and its distinct IAM/database identity
-are deployed in development; live verification passed with all 34 forced-RLS
-tables and exact privileges. A manual-only Cloud Run cleanup job is deployed
-with the delete-only identity, bounded inputs fixed by Terraform, failure and
-batch-ceiling paging, and no scheduler or runtime argument overrides. Execution
-`attune-development-export-cleanup-ntjd4` completed successfully with zero
-candidates and no possible backlog. The authoritative bucket policy contains
-only the writer create/delete role and cleanup delete-only role, and both
-Terraform states are converged. Expired ready-object cleanup remains a separate
-gate before writer activation.
-
-Migration `0034_customer_export_expiry_cleanup.sql` implements that gate. The
-same delete-only cleanup identity can lease only `ready` exports whose
-server-selected expiry has passed. Each claim returns a canonical opaque object
-ID and immutable generation; storage deletion must use that exact generation.
-Only deletion or verified absence allows the claim-bound database completion to
-move the job to `expired`, clear the wrapped DEK and every object/cryptographic
-field, close the winning attempt, and emit content-free audit evidence. A stale
-lease, substituted generation, or storage error leaves the export ready and
-retryable. Migration 0034 is deployed in development. Execution
-`attune-development-database-migrate-xjhbb` applied exactly one migration and
-verified all 34 forced-RLS tenant tables and exact privileges. Manual execution
-`attune-development-export-cleanup-gftvm` then exercised both bounded queues and
-reported zero abandoned attempts, zero expired exports, and no possible
-backlog. Both infrastructure plans are empty; the job remains unscheduled.
-
-Migration `0035_customer_export_task_authority.sql` and the private writer
-service define the generation delivery boundary. The canonical dispatch job
-contains only an export UUID; the authenticated Cloud Tasks envelope supplies
-the tenant, generic job, and delivery UUIDs. Function-only authority validates
-that exact relationship, leases it for bounded retry, and then makes a
-tenant-bound export claim. The service derives a fresh run/object ID, projection
-scope, archive format, KMS key, bucket, and expiry entirely server-side. It has
-KMS encrypt and opaque object create/delete but no decrypt, read, list,
-connector, or general job-table authority. Task completion succeeds only after
-the export itself is ready or otherwise terminal. Process-death and uncertain
-cleanup return retryable failure. This slice is dormant until migration 0035,
-the private service, fixed broker route, paging, and a synthetic export ceremony
-are deployed and reviewed.
-
-## Required evidence before activation
+## Required evidence before production activation
 
 - real-PostgreSQL cross-tenant, role, claim/replay, transition, and concurrency
   tests through the exact runtime identities;
@@ -257,5 +191,6 @@ are deployed and reviewed.
   and
 - independent security review before any production customer export.
 
-Until these gates pass, the control plane must describe export as unavailable;
-it must not present a decorative or nonfunctional download control.
+The control must remain behind its default-off environment gate until the
+development rollout ceremony below is complete. Production remains prohibited
+until the independent review and recovery gates pass.

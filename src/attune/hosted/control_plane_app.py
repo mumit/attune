@@ -27,6 +27,9 @@ from .hosted_policy import PostgresHostedPolicyRepository
 from .hosted_policy_service import HostedPolicyService
 from .repositories import PostgresJobRepository
 from .secret_broker_mutation_client import SecretBrokerMutationClient
+from .customer_export import PostgresCustomerExportRequests
+from .customer_export_service import CustomerExportService
+from .export_download import PostgresExportDownloadAuthorizations
 
 
 def create_production_app():
@@ -66,6 +69,12 @@ def create_production_app():
     if channel_lifecycle_enabled_value not in {"true", "false"}:
         raise ValueError("ATTUNE_HOSTED_CHANNEL_LIFECYCLE_ENABLED must be true or false")
     channel_lifecycle_enabled = channel_lifecycle_enabled_value == "true"
+    customer_exports_enabled_value = os.environ.get(
+        "ATTUNE_CUSTOMER_EXPORTS_ENABLED", "false"
+    )
+    if customer_exports_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_CUSTOMER_EXPORTS_ENABLED must be true or false")
+    customer_exports_enabled = customer_exports_enabled_value == "true"
     if policy_enabled and not onboarding_enabled:
         raise ValueError("hosted policy requires hosted onboarding")
     if channels_enabled and not onboarding_enabled:
@@ -78,6 +87,8 @@ def create_production_app():
         raise ValueError("hosted onboarding requires identity")
     if test_enabled and not oauth_enabled:
         raise ValueError("Google connection test requires Google Workspace OAuth")
+    if customer_exports_enabled and not identity_enabled:
+        raise ValueError("customer exports require identity")
     google_oauth = (
         PostgresGoogleOAuthStartRepository(iam_connection) if oauth_enabled else None
     )
@@ -176,6 +187,22 @@ def create_production_app():
                 ),
             )
             if channel_setup_enabled
+            else None
+        ),
+        customer_exports_enabled=customer_exports_enabled,
+        customer_exports=(
+            CustomerExportService(
+                PostgresCustomerExportRequests(iam_connection),
+                PostgresDispatchProducerRepository(
+                    iam_connection, producer_kind="control_plane"
+                ),
+                DispatchBrokerClient(
+                    os.environ["ATTUNE_DISPATCH_BROKER_URL"],
+                    os.environ["ATTUNE_DISPATCH_BROKER_AUDIENCE"],
+                ),
+                PostgresExportDownloadAuthorizations(iam_connection),
+            )
+            if customer_exports_enabled
             else None
         ),
     )

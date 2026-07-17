@@ -45,6 +45,15 @@ variable "google_chat_ingress_image" {
   }
 }
 
+variable "export_download_image" {
+  description = "Artifact Registry export download image pinned by sha256 digest."
+  type        = string
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.export_download_image))
+    error_message = "export_download_image must be an immutable @sha256 Artifact Registry reference."
+  }
+}
+
 variable "hostname" {
   description = "Exact lower-case public DNS hostname for the development edge."
   type        = string
@@ -66,6 +75,19 @@ variable "labels" {
   description = "Additional non-sensitive resource labels."
   type        = map(string)
   default     = {}
+}
+
+variable "alert_notification_channels" {
+  description = "Monitoring notification-channel resource names for edge security alerts."
+  type        = list(string)
+  default     = []
+  validation {
+    condition = alltrue([
+      for channel in var.alert_notification_channels :
+      can(regex("^projects/[^/]+/notificationChannels/[0-9]+$", channel))
+    ])
+    error_message = "alert_notification_channels entries must be full Monitoring notification-channel resource names."
+  }
 }
 
 variable "enable_identity_sign_in" {
@@ -123,6 +145,12 @@ variable "enable_hosted_channel_setup" {
 
 variable "enable_hosted_channel_lifecycle" {
   description = "Expose the recent-authenticated hosted channel disconnect and replacement ceremony."
+  type        = bool
+  default     = false
+}
+
+variable "enable_customer_exports" {
+  description = "Expose recent-authenticated account export requests and owner-bound status."
   type        = bool
   default     = false
 }

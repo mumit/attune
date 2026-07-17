@@ -82,7 +82,7 @@ RELATIONAL_ASSETS = (
         "usage_records dispatch_intents credential_intents job_reconciliations "
         "oauth_transactions identity_sessions hosted_channel_setup_transactions "
         "hosted_channel_routes hosted_channel_deliveries export_jobs "
-        "export_object_attempts",
+        "export_object_attempts export_download_grants",
         DataClass.OPERATIONAL,
         DeletionRule.ERASE,
         customer_export=False,

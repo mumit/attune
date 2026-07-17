@@ -375,3 +375,18 @@ query-free probes return 303 after a documented soak, multi-location synthetic
 markers return 303, and every marker is absent from all project logs after the
 normal ingestion window. This ordering prevents real authorization codes from
 arriving while an older logged route is still serving.
+
+## Customer export edge journey
+
+`enable_customer_exports = false` is an independent default-off gate. Enable
+it only after the runtime export writer is active and migrations through 0037
+are verified. The control plane exposes owner-bound `/v1/exports` routes. A
+distinct service handles only `POST /v1/export-download`; the load balancer
+routes that exact path and disables backend request logging.
+
+The browser posts a 90-second one-time secret in JSON, so no bearer enters a
+URL, redirect, or object-store link. The service has concurrency one and only
+download database, object-read, and KMS-decrypt authority. The private-alpha
+journey is: sign in recently, create an account export, wait for **Ready to
+download**, select **Download once**, receive a local ZIP, and see the export
+become consumed while scheduled cleanup removes ciphertext and wrapped key.

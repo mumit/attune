@@ -43,6 +43,10 @@ locals {
       local.foundation.workload_identities.export_cleanup,
       ".gserviceaccount.com",
     )
+    attune_export_download = trimsuffix(
+      local.foundation.workload_identities.export_download,
+      ".gserviceaccount.com",
+    )
     attune_secret_broker = trimsuffix(
       local.foundation.workload_identities.secret_broker,
       ".gserviceaccount.com",
@@ -379,6 +383,44 @@ resource "google_cloud_run_v2_job" "export_cleanup" {
   lifecycle {
     prevent_destroy = true
   }
+}
+
+resource "google_cloud_run_v2_job_iam_member" "export_cleanup_scheduler" {
+  project  = local.foundation.project_id
+  location = google_cloud_run_v2_job.export_cleanup.location
+  name     = google_cloud_run_v2_job.export_cleanup.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.export_cleanup_scheduler}"
+}
+
+resource "google_cloud_scheduler_job" "export_cleanup" {
+  project          = local.foundation.project_id
+  region           = local.foundation.region
+  name             = "${local.prefix}-export-cleanup"
+  description      = "Runs bounded exact-generation cleanup for abandoned, expired, and consumed customer exports."
+  schedule         = "*/10 * * * *"
+  time_zone        = "Etc/UTC"
+  paused           = !var.enable_export_cleanup_schedule
+  attempt_deadline = "300s"
+  retry_config {
+    retry_count          = 1
+    max_retry_duration   = "600s"
+    min_backoff_duration = "30s"
+    max_backoff_duration = "60s"
+    max_doublings        = 1
+  }
+  http_target {
+    uri         = "https://run.googleapis.com/v2/projects/${local.foundation.project_id}/locations/${local.foundation.region}/jobs/${google_cloud_run_v2_job.export_cleanup.name}:run"
+    http_method = "POST"
+    body        = base64encode("{}")
+    headers     = { "Content-Type" = "application/json" }
+    oauth_token {
+      service_account_email = local.foundation.workload_identities.export_cleanup_scheduler
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+  depends_on      = [google_cloud_run_v2_job_iam_member.export_cleanup_scheduler]
+  deletion_policy = "PREVENT"
 }
 
 # The scheduler can start only this job. It has no database, logging, metrics,

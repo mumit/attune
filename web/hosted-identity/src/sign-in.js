@@ -31,12 +31,16 @@ const policyReview = document.querySelector("#policy-review");
 const policyAutomatic = document.querySelector("#policy-automatic");
 const policyExcluded = document.querySelector("#policy-excluded");
 const policyConfirm = document.querySelector("#policy-confirm");
+const customerExports = document.querySelector("#customer-exports");
+const customerExportCreate = document.querySelector("#customer-export-create");
+const customerExportList = document.querySelector("#customer-export-list");
 const sessionSignOut = document.querySelector("#session-sign-out");
 const status = document.querySelector("#status");
 let hostedPolicyAvailable = false;
 let hostedChannelsAvailable = false;
 let hostedChannelSetupAvailable = false;
 let hostedChannelLifecycleAvailable = false;
+let customerExportsAvailable = false;
 
 function show(message, kind = "info") {
   status.textContent = message;
@@ -268,6 +272,7 @@ async function showOnboarding(session) {
   hostedChannelsAvailable = session.hosted_channels === "available";
   hostedChannelSetupAvailable = session.hosted_channel_setup === "available";
   hostedChannelLifecycleAvailable = session.hosted_channel_lifecycle === "available";
+  customerExportsAvailable = session.customer_exports === "available";
   const state = await json(
     await fetch("/v1/onboarding", {
       credentials: "same-origin",
@@ -283,6 +288,138 @@ async function showOnboarding(session) {
   }
   if (hostedChannelSetupAvailable && state.status !== "not_started") {
     await showChannelInstallations();
+  }
+  if (customerExportsAvailable) await showCustomerExports();
+}
+
+function exportStateLabel(item) {
+  const labels = {
+    requested: "Queued",
+    running: "Creating encrypted archive…",
+    ready: "Ready to download",
+    consumed: "Downloaded and queued for secure cleanup",
+    expired: "Expired and securely erased",
+    failed: "Could not be created",
+    cancelled: "Cancelled",
+  };
+  return labels[item.state] || "Unavailable";
+}
+
+function renderCustomerExports(payload) {
+  customerExports.hidden = false;
+  customerExportList.replaceChildren(
+    ...(payload.exports || []).map((item) => {
+      const container = document.createElement("div");
+      container.className = "customer-export-item";
+      const state = document.createElement("strong");
+      state.textContent = exportStateLabel(item);
+      const detail = document.createElement("div");
+      detail.textContent = `Account export requested ${new Date(item.created_at).toLocaleString()}.`;
+      container.append(state, detail);
+      if (item.download_available) {
+        const download = document.createElement("button");
+        download.type = "button";
+        download.textContent = "Download once";
+        download.addEventListener("click", () => downloadCustomerExport(item.id, download));
+        container.append(download);
+      }
+      return container;
+    }),
+  );
+  customerExportCreate.disabled = (payload.exports || []).some((item) =>
+    ["requested", "running", "ready"].includes(item.state),
+  );
+}
+
+async function showCustomerExports() {
+  const payload = await json(
+    await fetch("/v1/exports", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    }),
+  );
+  renderCustomerExports(payload);
+  return payload;
+}
+
+customerExportCreate.addEventListener("click", async () => {
+  customerExportCreate.disabled = true;
+  show("Creating a private encrypted export…");
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    await json(
+      await fetch("/v1/exports", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({ scope: "account", confirmation: "create export" }),
+      }),
+    );
+    await showCustomerExports();
+    show("Export requested. This page will show when it is ready.", "success");
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await wait(2000);
+      const payload = await showCustomerExports();
+      if (!(payload.exports || []).some((item) => ["requested", "running"].includes(item.state))) break;
+    }
+  } catch (error) {
+    customerExportCreate.disabled = false;
+    show(
+      error.code === "recent_authentication_required"
+        ? "Sign out and sign in again before creating an export."
+        : "The export could not be requested. Please try again.",
+      error.code === "recent_authentication_required" ? "pending" : "error",
+    );
+  }
+});
+
+async function downloadCustomerExport(exportId, button) {
+  button.disabled = true;
+  show("Authorizing one-time download…");
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    const grant = await json(
+      await fetch(`/v1/exports/${encodeURIComponent(exportId)}/download-authorizations`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({ confirmation: "download export" }),
+      }),
+    );
+    const response = await fetch("/v1/export-download", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ grant_id: grant.grant_id, secret: grant.secret }),
+    });
+    if (!response.ok) throw new Error("download refused");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "attune-account-export.zip";
+    link.click();
+    URL.revokeObjectURL(url);
+    await showCustomerExports();
+    show("Export downloaded once and queued for secure deletion.", "success");
+  } catch (error) {
+    button.disabled = false;
+    show(
+      error.code === "recent_authentication_required"
+        ? "Sign out and sign in again before downloading your export."
+        : "The one-time download could not be completed. Please try again.",
+      error.code === "recent_authentication_required" ? "pending" : "error",
+    );
   }
 }
 

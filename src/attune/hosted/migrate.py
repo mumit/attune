@@ -31,6 +31,7 @@ RUNTIME_ROLES = (
     "attune_retention",
     "attune_export",
     "attune_export_cleanup",
+    "attune_export_download",
 )
 
 FUNCTION_OWNER_ROLES = (
@@ -48,6 +49,7 @@ FUNCTION_OWNER_ROLES = (
     "attune_retention_executor",
     "attune_export_coordinator",
     "attune_export_cleanup_coordinator",
+    "attune_export_download_coordinator",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -297,6 +299,15 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
         ("attune_export_cleanup_coordinator", "attune.export_jobs", "UPDATE"),
         ("attune_export_cleanup_coordinator", "attune.audit_intents", "SELECT"),
         ("attune_export_cleanup_coordinator", "attune.audit_intents", "INSERT"),
+        ("attune_export_download_coordinator", "attune.export_jobs", "SELECT"),
+        ("attune_export_download_coordinator", "attune.export_jobs", "UPDATE"),
+        ("attune_export_download_coordinator", "attune.export_download_grants", "SELECT"),
+        ("attune_export_download_coordinator", "attune.export_download_grants", "INSERT"),
+        ("attune_export_download_coordinator", "attune.export_download_grants", "UPDATE"),
+        ("attune_export_download_coordinator", "attune.identity_sessions", "SELECT"),
+        ("attune_export_download_coordinator", "attune.principals", "SELECT"),
+        ("attune_export_download_coordinator", "attune.audit_intents", "INSERT"),
+        ("attune_export_download_coordinator", "attune.audit_intents", "SELECT"),
     }
 )
 
@@ -327,6 +338,7 @@ TENANT_TABLES = (
     "usage_records",
     "export_jobs",
     "export_object_attempts",
+    "export_download_grants",
     "deletion_markers",
     "dispatch_intents",
     "audit_intents",
@@ -611,6 +623,7 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             "attune_retention_executor": (True, False, True, False),
             "attune_export_coordinator": (True, False, True, False),
             "attune_export_cleanup_coordinator": (True, False, True, False),
+            "attune_export_download_coordinator": (True, False, True, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
