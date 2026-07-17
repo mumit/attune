@@ -29,12 +29,16 @@ def create_production_app():
         audit=audit,
         routes=parse_routes(os.environ["ATTUNE_DISPATCH_ROUTES"]),
     )
+    ingress_accounts: tuple[str, ...] = (os.environ["ATTUNE_INGRESS_SERVICE_ACCOUNT"],)
+    slack_ingress_account = os.environ.get("ATTUNE_SLACK_INGRESS_SERVICE_ACCOUNT")
+    if slack_ingress_account:
+        ingress_accounts = ingress_accounts + (slack_ingress_account,)
     return create_app(
         broker,
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_callers={
             "control_plane": os.environ["ATTUNE_CONTROL_PLANE_SERVICE_ACCOUNT"],
-            "ingress": os.environ["ATTUNE_INGRESS_SERVICE_ACCOUNT"],
+            "ingress": ingress_accounts,
             "worker": os.environ["ATTUNE_WORKER_SERVICE_ACCOUNT"],
         },
     )

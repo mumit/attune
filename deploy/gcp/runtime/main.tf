@@ -504,6 +504,13 @@ resource "google_cloud_run_v2_service" "dispatch_broker" {
         name  = "ATTUNE_INGRESS_SERVICE_ACCOUNT"
         value = local.foundation.workload_identities.ingress
       }
+      dynamic "env" {
+        for_each = var.enable_slack_conversation ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_INGRESS_SERVICE_ACCOUNT"
+          value = local.foundation.workload_identities.slack_ingress
+        }
+      }
       env {
         name  = "ATTUNE_WORKER_SERVICE_ACCOUNT"
         value = local.foundation.workload_identities.worker
@@ -605,11 +612,19 @@ resource "google_cloud_run_v2_service" "dispatch_broker" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "dispatch_broker_invoker" {
-  for_each = var.enable_dispatch_broker ? toset([
-    local.foundation.workload_identities.control_plane,
-    local.foundation.workload_identities.ingress,
-    local.foundation.workload_identities.worker,
-  ]) : toset([])
+  # The Slack ingress runs on its own identity (distinct broker-caller
+  # attribution) and therefore needs its own dispatch invoker grant when
+  # Slack conversations are enabled.
+  for_each = var.enable_dispatch_broker ? toset(concat(
+    [
+      local.foundation.workload_identities.control_plane,
+      local.foundation.workload_identities.ingress,
+      local.foundation.workload_identities.worker,
+    ],
+    var.enable_slack_conversation ? [
+      local.foundation.workload_identities.slack_ingress,
+    ] : [],
+  )) : toset([])
   project  = local.foundation.project_id
   location = local.foundation.region
   name     = google_cloud_run_v2_service.dispatch_broker[0].name

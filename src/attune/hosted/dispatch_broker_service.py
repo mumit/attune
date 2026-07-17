@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence, Union
 from uuid import UUID
 
 from .dispatch_broker import DispatchBroker
@@ -14,12 +14,14 @@ LOG = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 1024
 PRODUCER_KINDS = frozenset({"control_plane", "ingress", "worker"})
 
+CallerEmails = Union[str, Sequence[str]]
+
 
 def create_app(
     broker: DispatchBroker,
     *,
     expected_audience: str,
-    expected_callers: Mapping[str, str],
+    expected_callers: Mapping[str, CallerEmails],
     token_verifier: Callable[[str, str], Mapping[str, Any]] | None = None,
 ):
     from flask import Flask, jsonify, request
@@ -28,12 +30,20 @@ def create_app(
         raise ValueError("expected audience must be HTTPS")
     if set(expected_callers) != PRODUCER_KINDS:
         raise ValueError("every dispatch producer identity must be configured")
-    if len(set(expected_callers.values())) != len(PRODUCER_KINDS) or any(
-        not email.endswith(".gserviceaccount.com")
-        for email in expected_callers.values()
-    ):
+    normalized_callers: dict[str, tuple[str, ...]] = {
+        kind: ((emails,) if isinstance(emails, str) else tuple(emails))
+        for kind, emails in expected_callers.items()
+    }
+    all_emails = [email for emails in normalized_callers.values() for email in emails]
+    if not all_emails or any(
+        not email.endswith(".gserviceaccount.com") for email in all_emails
+    ) or any(not emails for emails in normalized_callers.values()):
         raise ValueError("dispatch producer identities must be distinct service accounts")
-    caller_kinds = {email: kind for kind, email in expected_callers.items()}
+    if len(set(all_emails)) != len(all_emails):
+        raise ValueError("dispatch producer identities must be distinct service accounts")
+    caller_kinds = {
+        email: kind for kind, emails in normalized_callers.items() for email in emails
+    }
     verifier = token_verifier or _google_token_verifier
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
