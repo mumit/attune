@@ -378,11 +378,15 @@ arriving while an older logged route is still serving.
 
 ## Customer export edge journey
 
-`enable_customer_exports = false` is an independent default-off gate. Enable
-it only after the runtime export writer is active and migrations through 0037
-are verified. The control plane exposes owner-bound `/v1/exports` routes. A
-distinct service handles only `POST /v1/export-download`; the load balancer
-routes that exact path and disables backend request logging.
+Customer exports use separate deployment and routing gates. First set
+`deploy_customer_export_download = true` while leaving
+`enable_customer_exports = false`. This creates the service and a default-deny,
+unrouted backend so its identity, health, and ingress can be verified without a
+public request path. Enable `enable_customer_exports` only after the runtime
+export writer is active, migrations through 0037 are verified, and that staged
+service passes its checks. The control plane then exposes owner-bound
+`/v1/exports` routes. The load balancer routes only `POST /v1/export-download`
+to the distinct download service and disables backend request logging.
 
 The browser posts a 90-second one-time secret in JSON, so no bearer enters a
 URL, redirect, or object-store link. The service has concurrency one and only

@@ -16,6 +16,7 @@ enable_hosted_channels         = false
 enable_hosted_channel_setup    = false
 enable_hosted_channel_lifecycle = false
 enable_customer_exports         = false
+deploy_customer_export_download = false
 deploy_google_chat_ingress     = false
 enable_google_chat_ingress     = false
 enable_google_chat_conversation = false

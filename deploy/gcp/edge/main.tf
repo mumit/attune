@@ -52,6 +52,7 @@ check "google_chat_conversation_activation" {
 check "customer_export_activation" {
   assert {
     condition = !var.enable_customer_exports || (
+      var.deploy_customer_export_download &&
       var.enable_identity_sign_in &&
       try(local.runtime.export_writer != null, false) &&
       local.runtime.dispatch_broker != null
@@ -608,7 +609,7 @@ resource "google_compute_region_network_endpoint_group" "control_plane" {
 }
 
 resource "google_cloud_run_v2_service" "export_download" {
-  count                = var.enable_customer_exports ? 1 : 0
+  count                = var.deploy_customer_export_download ? 1 : 0
   project              = local.foundation.project_id
   name                 = "${local.prefix}-export-download"
   location             = local.foundation.region
@@ -699,7 +700,7 @@ resource "google_cloud_run_v2_service" "export_download" {
 }
 
 resource "google_compute_region_network_endpoint_group" "export_download" {
-  count                 = var.enable_customer_exports ? 1 : 0
+  count                 = var.deploy_customer_export_download ? 1 : 0
   project               = local.foundation.project_id
   name                  = "${local.prefix}-export-download"
   region                = local.foundation.region
@@ -1085,27 +1086,30 @@ resource "google_compute_security_policy" "oauth_callback" {
 }
 
 resource "google_compute_security_policy" "export_download" {
-  count       = var.enable_customer_exports ? 1 : 0
+  count       = var.deploy_customer_export_download ? 1 : 0
   project     = local.foundation.project_id
   name        = "${local.prefix}-export-download-edge"
   description = "Exact same-origin one-time export download endpoint"
   type        = "CLOUD_ARMOR"
-  rule {
-    action      = "throttle"
-    priority    = 1000
-    description = "Permit only POST to the fixed export download endpoint"
-    match {
-      expr {
-        expression = "request.headers['host'] == '${var.hostname}' && request.method == 'POST' && request.path == '/v1/export-download'"
+  dynamic "rule" {
+    for_each = var.enable_customer_exports ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 1000
+      description = "Permit only POST to the fixed export download endpoint"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.method == 'POST' && request.path == '/v1/export-download'"
+        }
       }
-    }
-    rate_limit_options {
-      conform_action = "allow"
-      exceed_action  = "deny(429)"
-      enforce_on_key = "IP"
-      rate_limit_threshold {
-        count        = 10
-        interval_sec = 60
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 10
+          interval_sec = 60
+        }
       }
     }
   }
@@ -1199,7 +1203,7 @@ resource "google_compute_backend_service" "oauth_callback" {
 }
 
 resource "google_compute_backend_service" "export_download" {
-  count                 = var.enable_customer_exports ? 1 : 0
+  count                 = var.deploy_customer_export_download ? 1 : 0
   project               = local.foundation.project_id
   name                  = "${local.prefix}-export-download"
   protocol              = "HTTPS"
@@ -1212,7 +1216,7 @@ resource "google_compute_backend_service" "export_download" {
 }
 
 resource "google_logging_metric" "export_download_failure" {
-  count   = var.enable_customer_exports ? 1 : 0
+  count   = var.deploy_customer_export_download ? 1 : 0
   project = local.foundation.project_id
   name    = "${local.prefix}-export-download-failure"
   filter = join(" AND ", [
@@ -1229,7 +1233,7 @@ resource "google_logging_metric" "export_download_failure" {
 }
 
 resource "google_monitoring_alert_policy" "export_download_failure" {
-  count        = var.enable_customer_exports ? 1 : 0
+  count        = var.deploy_customer_export_download ? 1 : 0
   project      = local.foundation.project_id
   display_name = "${local.prefix} customer-export download failure"
   combiner     = "OR"

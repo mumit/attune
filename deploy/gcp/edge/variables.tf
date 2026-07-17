@@ -155,6 +155,12 @@ variable "enable_customer_exports" {
   default     = false
 }
 
+variable "deploy_customer_export_download" {
+  description = "Deploy the customer-export download service behind an unrouted, default-deny backend."
+  type        = bool
+  default     = false
+}
+
 variable "deploy_google_chat_ingress" {
   description = "Deploy the verified Google Chat ingress behind an unrouted load-balancer backend."
   type        = bool
