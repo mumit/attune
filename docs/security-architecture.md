@@ -564,6 +564,13 @@ arguments.
   MUST NOT create, read, list, decrypt, or choose customer objects. Ready
   objects and the active writer attempt are ineligible. Cleanup acknowledgement
   is claim-bound and occurs only after deletion or verified absence.
+- **SEC-616.** Expired ready exports MUST be leased in bounded batches and
+  deleted with an exact storage-generation precondition. Only verified deletion
+  or absence permits the atomic `ready` to `expired` transition, destruction of
+  the wrapped data-encryption key and all object metadata, closure of the
+  winning attempt, and content-free audit evidence. A storage failure or stale
+  lease MUST leave the export nonterminal and retryable; lifecycle deletion
+  alone is not sufficient evidence.
 
 The lifecycle policy, complete storage inventory, customer ceremonies, and
 restore procedure are defined in [Hosted data lifecycle](data-lifecycle.md).

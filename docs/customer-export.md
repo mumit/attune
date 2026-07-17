@@ -211,6 +211,17 @@ only the writer create/delete role and cleanup delete-only role, and both
 Terraform states are converged. Expired ready-object cleanup remains a separate
 gate before writer activation.
 
+Migration `0034_customer_export_expiry_cleanup.sql` implements that gate. The
+same delete-only cleanup identity can lease only `ready` exports whose
+server-selected expiry has passed. Each claim returns a canonical opaque object
+ID and immutable generation; storage deletion must use that exact generation.
+Only deletion or verified absence allows the claim-bound database completion to
+move the job to `expired`, clear the wrapped DEK and every object/cryptographic
+field, close the winning attempt, and emit content-free audit evidence. A stale
+lease, substituted generation, or storage error leaves the export ready and
+retryable. The code and migration remain undeployed until their development
+migration and manual cleanup ceremony are reviewed.
+
 ## Required evidence before activation
 
 - real-PostgreSQL cross-tenant, role, claim/replay, transition, and concurrency

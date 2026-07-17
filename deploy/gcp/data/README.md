@@ -722,6 +722,14 @@ Development cleanup-authority evidence on 2026-07-16:
   afterward. No scheduler, writer job, object, queue route, download path,
   endpoint, or UI exists.
 
+Migration `0034_customer_export_expiry_cleanup.sql` extends the same bounded
+manual job to expired ready exports without broadening IAM. It leases only
+server-expired rows, returns the immutable object generation, and requires an
+exact-generation delete before an atomic `ready` to `expired` transition clears
+the wrapped DEK and object metadata. Storage failure, generation substitution,
+and stale claims leave the row nonterminal. Apply and verify the migration, then
+repeat the manual cleanup ceremony before considering writer activation.
+
 ## Production gates
 
 Before this job or schema is promoted beyond development:

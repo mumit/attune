@@ -291,6 +291,7 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
         ("attune_export_cleanup_coordinator", "attune.export_object_attempts", "SELECT"),
         ("attune_export_cleanup_coordinator", "attune.export_object_attempts", "UPDATE"),
         ("attune_export_cleanup_coordinator", "attune.export_jobs", "SELECT"),
+        ("attune_export_cleanup_coordinator", "attune.export_jobs", "UPDATE"),
         ("attune_export_cleanup_coordinator", "attune.audit_intents", "SELECT"),
         ("attune_export_cleanup_coordinator", "attune.audit_intents", "INSERT"),
     }
