@@ -199,6 +199,110 @@ top-level resource name; if nested `spaceType` is present it must also be
 `DIRECT_MESSAGE`, but its absence is valid. The deprecated `type` spelling is
 accepted only as a fallback when canonical `spaceType` is absent.
 
+## Slack implementation
+
+Migration `0038_slack_channel_installation.sql` and the accompanying services
+implement the Slack half of this design. It is code-complete and tested
+offline and against real PostgreSQL; no Slack app, ingress, or broker route is
+deployed or activated by merging it. Every stage remains behind its own
+default-off gate.
+
+State machine. Slack reuses the shared `hosted_channel_setup_transactions`
+and `hosted_channel_destinations` tables with `provider = 'slack'` and
+`mechanism = 'oauth'`. The one-use OAuth `state` is the 256-bit setup secret:
+the control plane returns it once inside the fixed
+`https://slack.com/oauth/v2/authorize` URL and stores only its hash. The
+broker's `claim_slack_install`, `release_slack_install_claim`, and
+`consume_slack_install` functions mirror the Google Chat claim ceremony: a
+60-second-or-shorter claim, a durable pre-effect audit through the private
+audit writer before mutation, single use, preference-revision equality, and
+replacement-ceremony refusal when a live destination exists. Reinstall after
+an explicit disconnect reuses the canonical revoked destination row under new
+proof, exactly like Google Chat relink.
+
+Browser binding. Slack's callback is a top-level cross-site navigation, so
+origin and CSRF headers cannot exist there. The control plane requires the
+Attune session cookie, accepts only the exact `code`/`state`/`error` query
+fields, and forwards the state, code, and the session's tenant and principal
+to the private broker over workload identity. `consume_slack_install`
+independently rechecks that the one-use setup transaction belongs to exactly
+that tenant and principal, so a stolen callback URL cannot bind another
+account's installation, and a signed-in browser cannot consume another
+tenant's state.
+
+Credential boundary. Only the private channel broker holds the Slack client
+secret and calls `oauth.v2.access`. It verifies the fixed app ID, `bot`
+token type, exact scope set (`chat:write`, `im:write`, `im:history`), and
+canonical team/installer/bot identifiers, refuses any response carrying a
+user token, and resolves exactly one installer DM with `conversations.open`.
+The bot token and the team/DM route are stored only as per-destination
+AES-256-GCM envelopes whose DEKs are wrapped by the connector KMS key: the
+route in `hosted_channel_routes` and the token in the new forced-RLS
+`hosted_channel_credentials` table (`purpose = 'slack_bot_token'`, lifecycle
+class credential/crypto-erase). The ordinary control plane can read neither
+table; the memberless link executor owns the fixed functions.
+
+Ingress. `attune.hosted.slack_ingress_app` is a separate public service with
+its own workload identity. It verifies the v0 signature over the unmodified
+raw body with a five-minute timestamp window, enforces a 64 KiB body limit,
+answers the signed `url_verification` handshake, and accepts only a plain
+human `message` event with `channel_type = "im"` and no subtype, bot, or edit
+markers. Everything else is acknowledged with a content-free `{"ok": true}`
+so Slack does not retry. Normalized signals use domain-separated references
+(`teams/{team}`, `teams/{team}/users/{user}`,
+`teams/{team}/channels/{channel}`, `.../messages/{ts}`) that the broker
+HMACs under the `slack` domain, so Slack and Google Chat references can never
+collide. The ingress holds no tenant, database, model, bot, or Workspace
+credential.
+
+Conversation and delivery. `accept_slack_owner_message` mirrors the Google
+Chat acceptance: it resolves authority only from stored, hashed provider
+facts on an active owner-DM destination with live routes and credentials,
+requires an active Google connector and policy, and idempotently creates the
+`channel.slack.converse` job, dispatch intent, and content-free audit. The
+worker executes it with the same bounded read-only conversation executor
+(fixed model tasks, brokered Gmail/Calendar reads, mutation refusal,
+authoritative server time) and delivers through the broker's
+`/v1/slack/deliver-reply`, which decrypts the route and token, posts through
+the fixed `chat.postMessage` URL, and records the provider timestamp
+reference hash. The delivery test sends the same immutable connection-test
+sentence used for Google Chat.
+
+Lifecycle. `disconnect_hosted_channel_destination_v2` extends the owner
+disconnect ceremony to Slack: it cancels outstanding setup attempts, deletes
+the encrypted route and bot-token envelopes, revokes the destination and
+installation, and returns onboarding to `authorized`. Google Chat requests
+continue to delegate to the original audited function.
+
+Caller separation. The private channel broker now recognizes four distinct
+workload identities—Google Chat ingress, Slack ingress, control plane, and
+worker—and refuses configuration where any two coincide. Slack routes are
+absent entirely unless the Slack broker is configured
+(`ATTUNE_SLACK_CHANNEL_ENABLED`, client ID/secret resource, app ID, redirect
+URI, and the Slack ingress service account).
+
+Slack deployment order (none of this is performed by merging the code):
+
+1. Apply and verify migration 0038; the live verifier must report
+   `hosted_channel_credentials` forced through RLS and the executor grants.
+2. Create the platform-owned Slack app with the exact three bot scopes, the
+   exact redirect URL
+   `/v1/onboarding/channel-installations/slack/callback`, and the exact
+   events URL `/v1/provider/slack/events`; store the client secret and
+   signing secret in Secret Manager readable only by the channel broker and
+   Slack ingress respectively.
+3. Add the Slack ingress service account, Cloud Run service
+   (`deploy/slack-ingress`), dormant edge configuration, and channel-broker
+   invoker binding to the Terraform foundation/runtime/edge modules, mirroring
+   the Google Chat ingress dormant-first sequence.
+4. Deploy the channel broker with `ATTUNE_SLACK_CHANNEL_ENABLED=true` and the
+   control plane with `ATTUNE_HOSTED_SLACK_INSTALL_ENABLED=true` only after
+   negative identity, replay, and state-binding probes pass.
+5. Complete one real owner installation, the explicit fixed delivery test,
+   replay rejection, disconnect, and reinstall with live evidence and empty
+   Terraform plans before enabling `ATTUNE_ENABLE_SLACK_CONVERSATION` on the
+   worker and ingress.
+
 ## Development rollout
 
 On 2026-07-16 UTC, commit `27cda78` was deployed dormant-first. Migration

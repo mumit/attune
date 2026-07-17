@@ -535,3 +535,42 @@ Newest first. This log records decisions that constrain current implementation.
   and authorization failures are appended to the audit trail.
 - Mem0/Qdrant provide current memory storage behind an internal interface so a
   future temporal/entity store can replace them without changing workflows.
+
+## 2026-07 — Hosted Slack installation and conversation
+
+- The one-use Slack OAuth `state` is the channel setup secret: the browser
+  receives it exactly once inside the fixed authorize URL, the database stores
+  only its hash, and the private broker consumes it through the same
+  claim/pre-audit/consume ceremony as a Google Chat link code.
+- Because Slack's callback is a cross-site top-level navigation, origin and
+  CSRF headers cannot authenticate it. The binding is the Attune session
+  cookie plus the one-use state, and `consume_slack_install` independently
+  rechecks the session's tenant and principal against the setup transaction.
+  Tenant identity is accepted only from the exact control-plane workload
+  identity, mirroring the delivery-test trust decision.
+- Only the private channel broker holds the Slack client secret and bot
+  token. The bot token is retained solely as a per-destination AES-256-GCM
+  envelope in the forced-RLS `hosted_channel_credentials` table
+  (credential/crypto-erase lifecycle class), separate from the destination
+  route envelope, and a returned Slack user token is refused outright.
+- The broker verifies the fixed app ID, `bot` token type, and the exact scope
+  set `chat:write`, `im:write`, `im:history`; any extra or missing scope
+  fails installation. The initial hosted release supports installer owner-DMs
+  only.
+- Slack ingress is a separate public service with its own workload identity.
+  It authenticates requests by v0 HMAC over the raw body within a five-minute
+  window, accepts only plain human `im` messages (no subtype, bot, or edit
+  markers), and acknowledges everything else content-free so Slack does not
+  retry. The channel broker requires all four caller identities (both
+  ingresses, control plane, worker) to be distinct.
+- Slack provider references are HMAC-hashed under a `slack` domain separator
+  (`teams/…`, `teams/…/users/…`, `teams/…/channels/…`, `…/messages/{ts}`),
+  so Google Chat and Slack references can never collide in shared tables.
+- The bounded read-only conversation executor is shared: Slack parameterizes
+  the job kind (`channel.slack.converse`), surface, event kind, and reply
+  route as SQL parameters and constructor arguments rather than duplicating
+  the executor. Workspace reads still use the tenant's Google connector.
+- Google Chat SQL functions are never modified for Slack; migration 0038 adds
+  parallel Slack functions plus `disconnect_hosted_channel_destination_v2`,
+  which delegates Google Chat to the original audited function and extends
+  the ceremony to delete Slack credentials.

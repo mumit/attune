@@ -90,11 +90,21 @@ the step becomes `validated` only after the selected installations and exact
 owner-only destinations pass bounded live tests.
 
 For Google Chat, the owner generates a ten-minute link code in Attune and sends
-it only in a direct message to the Attune Chat app. For Slack, the owner follows
-the browser-bound Slack installation flow; Attune binds the verified installer
-to a one-user DM. Each provider then shows installation, ingress, destination,
-and fixed-content test as separate checks. Shared spaces and channels are not
-accepted by the initial hosted release.
+it only in a direct message to the Attune Chat app. For Slack, the owner starts
+installation from the setup page after recent authentication: Attune returns a
+ten-minute, one-use Slack authorize link, the owner approves the fixed
+`chat:write`, `im:write`, and `im:history` scopes in Slack's own consent
+screen, and Slack returns the browser to Attune, which verifies the app, team,
+installer, and scopes through a private broker and binds the verified
+installer to a one-user DM. The browser never sees a Slack token, and Attune
+never retains a Slack user token. Each provider then shows installation,
+ingress, destination, and fixed-content test as separate checks. Shared
+spaces and channels are not accepted by the initial hosted release. After
+installation, Slack requires the same explicit fixed connection test as
+Google Chat before its destination becomes active, and **Disconnect Slack**
+is the same recent-authenticated, confirmed lifecycle ceremony: it deletes
+the stored bot-token and route envelopes immediately, and reconnecting
+requires a fresh installation plus a new delivery test.
 
 After Google Chat says the one-time link succeeded, return to the setup page.
 If the page says the delivery test remains, select **Send fixed connection

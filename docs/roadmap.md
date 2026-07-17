@@ -106,9 +106,23 @@ development channel. A separate, non-database scheduler identity now invokes
 only that job; its daily development schedule was activated after paused-first
 authenticated-path, paging, verifier, IAM, and convergence evidence. New
 environments remain paused by default. Customer content retention and controls
-are not active yet. Slack installation/lifecycle,
-export/deletion, support repair, customer-visible audit, adversarial assurance,
-and external security review remain later independent slices.
+are not active yet. Export/deletion, support repair, customer-visible audit,
+adversarial assurance, and external security review remain later independent
+slices.
+
+The Slack half of the channel-installation design is now implemented and
+tested but not deployed: migration 0038 adds the one-use OAuth-state claim
+ceremony, the forced-RLS encrypted bot-token store, owner-DM acceptance, the
+`channel.slack.converse` conversation route, delivery, and the extended
+disconnect/reinstall lifecycle; the Python layer adds the signature-verified
+Slack ingress service, the broker-held OAuth exchange with fixed app/scope
+verification, browser-bound callback consumption, and the reused bounded
+read-only conversation executor. All Slack stages are behind independent
+default-off gates (`ATTUNE_SLACK_CHANNEL_ENABLED`,
+`ATTUNE_HOSTED_SLACK_INSTALL_ENABLED`, `ATTUNE_ENABLE_SLACK_CONVERSATION`),
+and the platform Slack app, Terraform substrate, edge activation, and live
+owner ceremony remain future operator work recorded in
+[`hosted-channel-installation.md`](hosted-channel-installation.md).
 
 The first customer-export authority slice is implemented and deployed:
 four server-defined scopes, recent-session binding, idempotent request,

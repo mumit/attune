@@ -6,6 +6,13 @@ channel linking. A verified destination proves where Attune may communicate;
 it does not by itself authorize model use, Workspace reads, or conversation
 storage.
 
+The route is channel-parameterized: the Slack owner-DM surface reuses the
+same acceptance, job, executor, and delivery state machine with Slack proofs
+and the `channel.slack.converse` job kind
+(see [`hosted-channel-installation.md`](hosted-channel-installation.md)).
+This document narrates the Google Chat instance, which has live development
+evidence.
+
 ## User contract
 
 An owner sends an ordinary direct message to the Attune Google Chat app. Attune

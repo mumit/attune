@@ -59,12 +59,13 @@ serializes changes, and is idempotent.
 
 Slack OAuth/app installation, Google Chat app installation, verified callbacks,
 owner-only destination binding, and test delivery remain separate ceremonies.
-Google Chat replacement/disconnection is now a separate recent-authenticated
-lifecycle ceremony; it is never inferred from a preference edit. Slack
-replacement/disconnection remains future work. None may infer completion from
-this preference.
+Google Chat and Slack replacement/disconnection are each a separate
+recent-authenticated lifecycle ceremony; neither is ever inferred from a
+preference edit. None may infer completion from this preference.
 Their shared state and distinct provider proofs are specified in
-[`hosted-channel-installation.md`](hosted-channel-installation.md).
+[`hosted-channel-installation.md`](hosted-channel-installation.md), whose
+Slack implementation section records the implemented, default-off Slack
+installation, ingress, conversation, and lifecycle slice.
 
 ## Development rollout evidence
 

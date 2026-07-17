@@ -639,6 +639,18 @@ minimal event, and returns promptly.
   the raw body using the signing secret, compare in constant time, enforce the
   timestamp window, and deduplicate/reject replays. See Slack's
   [request verification guide](https://docs.slack.dev/authentication/verifying-requests-from-slack/).
+- **SEC-700A.** Hosted Slack installation MUST use a one-use, ten-minute,
+  hash-stored OAuth state created by a recent-authenticated owner session. The
+  callback MUST bind the returning browser's application session, and the
+  consuming database function MUST independently recheck that the setup
+  transaction belongs to that session's tenant and principal. Only the private
+  channel broker may hold the Slack client secret, call `oauth.v2.access`, or
+  see a bot token. The broker MUST verify the fixed app identifier, `bot`
+  token type, and exact reviewed scope set, MUST refuse any response carrying
+  a user token, and MUST retain the bot token only as a tenant-, destination-,
+  purpose-, and version-bound AEAD envelope in a forced-RLS credential table
+  with a crypto-erase lifecycle. Slack and Google Chat provider references
+  MUST be HMAC-hashed under distinct domain separators.
 - **SEC-701.** Google Chat, Google provider callbacks, and Pub/Sub delivery MUST
   use the strongest documented provider verification, including expected
   audience/issuer and channel tokens where applicable.

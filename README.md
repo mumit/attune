@@ -62,7 +62,10 @@ See [Getting started](docs/getting-started.md), the complete
 [Deployment](docs/deployment.md). Operators building the managed service should
 start with the [GCP operated-service architecture](docs/hosted-gcp.md); the
 [hosted sign-in guide](docs/identity-platform.md) documents the separate Google
-Identity Platform and Workspace consent clients. The normative
+Identity Platform and Workspace consent clients. External reviewers should
+begin with the [security review guide](docs/security-review.md), which maps
+the implemented architecture, service inventory, cryptography, and channel
+trust model to code and evidence. The normative
 [security architecture](docs/security-architecture.md) defines trust boundaries,
 control requirements, red-team cases, and hosted launch gates; the
 [hosted data-lifecycle contract](docs/data-lifecycle.md) defines retention,
