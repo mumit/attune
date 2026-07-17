@@ -688,8 +688,9 @@ at 100, and acknowledges success through an exact unexpired lease. Its
 separate service account has Cloud SQL login plus a custom bucket role
 containing only `storage.objects.delete`; it has no create, read, list, or KMS
 authority. The bounded library treats absence as successful deletion, leaves
-failed storage work leased for retry, and reports possible backlog. No cleanup
-job or schedule is deployed by this slice.
+failed storage work leased for retry, and reports possible backlog. A
+manual-only Cloud Run job now runs that library with fixed Terraform inputs;
+there is deliberately no scheduler until the cleanup ceremony is complete.
 
 Development cleanup-authority evidence on 2026-07-16:
 
@@ -707,8 +708,19 @@ Development cleanup-authority evidence on 2026-07-16:
   0 destroyed`). Execution `attune-development-database-migrate-b2b7b`
   applied exactly migration 0033 and verified all 34 tenant tables and exact
   runtime/function-owner privileges.
-- Both foundation and data plans were empty afterward. No cleanup or writer
-  job, scheduler, object, queue route, download path, endpoint, or UI exists.
+- The first job execution exposed that pg8000 cursors are closeable but are not
+  context managers. Commit `6abd6d1` added the adapter regression test and used
+  explicit cursor closing; immutable image digest
+  `sha256:8ded66e3445f16aa054224ab1e81a39be68e63cc70fbc3a9bd7efabc3ad3a0a9`
+  contains that fix.
+- The cleanup-job apply added one manual job, two log metrics, and two paging
+  policies. Alert creation was retried after the new metric descriptors became
+  visible; both policies are enabled and target the development paging channel.
+- Execution `attune-development-export-cleanup-ntjd4` exited successfully and
+  reported `objects_deleted=0`, `batches=1`, and
+  `backlog_possible=false`. Both foundation and data plans were empty
+  afterward. No scheduler, writer job, object, queue route, download path,
+  endpoint, or UI exists.
 
 ## Production gates
 

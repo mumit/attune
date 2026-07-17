@@ -200,11 +200,16 @@ the object referenced by a ready export are excluded. Its separate storage
 identity has delete only—no create, read, list, or KMS permission—and records
 claim-bound, content-free evidence only after deletion or verified absence.
 Failures leave the lease to expire for retry. The bounded cleanup entry point
-reports possible backlog but is not yet deployed or scheduled. Migration 0033
-and its distinct IAM/database identity are deployed in development; live
-verification passed with all 34 forced-RLS tables and exact privileges. The
-authoritative bucket policy contains only the writer create/delete role and the
-cleanup delete-only role, and both Terraform states are converged.
+reports possible backlog. Migration 0033 and its distinct IAM/database identity
+are deployed in development; live verification passed with all 34 forced-RLS
+tables and exact privileges. A manual-only Cloud Run cleanup job is deployed
+with the delete-only identity, bounded inputs fixed by Terraform, failure and
+batch-ceiling paging, and no scheduler or runtime argument overrides. Execution
+`attune-development-export-cleanup-ntjd4` completed successfully with zero
+candidates and no possible backlog. The authoritative bucket policy contains
+only the writer create/delete role and cleanup delete-only role, and both
+Terraform states are converged. Expired ready-object cleanup remains a separate
+gate before writer activation.
 
 ## Required evidence before activation
 
