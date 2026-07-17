@@ -117,6 +117,114 @@ class ChannelBrokerClient:
             raise RuntimeError("channel message acceptance is invalid")
         return intent_id
 
+    def install_slack(
+        self, *, state: str, code: str, tenant_id: UUID, principal_id: UUID
+    ) -> bool:
+        if not isinstance(tenant_id, UUID) or not isinstance(principal_id, UUID):
+            raise TypeError("install identifiers must be UUIDs")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/slack/install",
+            json={
+                "version": 1,
+                "state": state,
+                "code": code,
+                "tenant_id": str(tenant_id),
+                "principal_id": str(principal_id),
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return body == {"status": "installed", "destination_status": "pending_test"}
+
+    def test_slack_delivery(self, *, destination_id: UUID) -> bool:
+        if not isinstance(destination_id, UUID):
+            raise TypeError("destination_id must be a UUID")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/slack/test-delivery",
+            json={"version": 1, "destination_id": str(destination_id)},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return body == {"status": "delivered", "destination_status": "active"}
+
+    def accept_slack_message(
+        self, *, team_ref: str, actor_ref: str, destination_ref: str,
+        message_ref: str, text: str,
+    ) -> UUID:
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/slack/accept-message",
+            json={
+                "version": 1, "team_ref": team_ref, "actor_ref": actor_ref,
+                "destination_ref": destination_ref, "message_ref": message_ref,
+                "text": text,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            raise RuntimeError("channel message was not accepted")
+        try:
+            body = response.json()
+            intent_id = UUID(body["dispatch_intent_id"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("channel message acceptance is invalid") from error
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"status", "dispatch_intent_id", "accepted_new"}
+            or body["status"] != "accepted"
+            or not isinstance(body["accepted_new"], bool)
+        ):
+            raise RuntimeError("channel message acceptance is invalid")
+        return intent_id
+
+    def deliver_slack_reply(self, *, destination_id: UUID, job_id: UUID) -> bool:
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/slack/deliver-reply",
+            json={
+                "version": 1,
+                "destination_id": str(destination_id),
+                "job_id": str(job_id),
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            return response.json() == {"status": "delivered"}
+        except ValueError:
+            return False
+
     def deliver_google_chat_reply(
         self, *, destination_id: UUID, job_id: UUID
     ) -> bool:
