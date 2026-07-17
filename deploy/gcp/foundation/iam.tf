@@ -200,10 +200,18 @@ resource "google_project_iam_custom_role" "export_object_writer" {
   stage = "GA"
 }
 
-resource "google_storage_bucket_iam_member" "export_write" {
-  bucket = google_storage_bucket.customer_export.name
-  role   = google_project_iam_custom_role.export_object_writer.name
-  member = "serviceAccount:${google_service_account.workload["export"].email}"
+data "google_iam_policy" "customer_export" {
+  binding {
+    role = google_project_iam_custom_role.export_object_writer.name
+    members = [
+      "serviceAccount:${google_service_account.workload["export"].email}",
+    ]
+  }
+}
+
+resource "google_storage_bucket_iam_policy" "customer_export" {
+  bucket      = google_storage_bucket.customer_export.name
+  policy_data = data.google_iam_policy.customer_export.policy_data
 }
 
 resource "google_storage_bucket_iam_member" "audit_create" {

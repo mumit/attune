@@ -541,9 +541,10 @@ arguments.
   and connector storage. Its runtime identity may encrypt/wrap and create or
   delete opaque temporary objects, but MUST NOT decrypt, read, or list. The
   bucket MUST prevent public access, disable versioning and soft delete, apply
-  a one-day lifecycle backstop, and resist accidental infrastructure
-  destruction. A separately authenticated download gateway and cleanup
-  executor receive disjoint authority in later reviewed slices.
+  a one-day lifecycle backstop, remove inherited basic-role bucket bindings,
+  and resist accidental infrastructure destruction. A separately authenticated
+  download gateway and cleanup executor receive disjoint authority in later
+  reviewed slices.
 
 The lifecycle policy, complete storage inventory, customer ceremonies, and
 restore procedure are defined in [Hosted data lifecycle](data-lifecycle.md).

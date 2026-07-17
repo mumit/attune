@@ -28,7 +28,8 @@ The export substrate does not make export available. No export compute job,
 queue route, completion transition, download identity, endpoint, or UI exists.
 The dormant export identity can wrap a fresh data key with the export key and
 create or delete opaque objects only; it cannot decrypt a wrapped key, read an
-object, or list the bucket. Soft delete is disabled so an application-erased
+object, or list the bucket. An authoritative bucket policy removes inherited
+legacy project-basic-role bindings. Soft delete is disabled so an application-erased
 temporary object does not remain recoverable through that feature. The
 one-day bucket lifecycle is a backstop to the future immediate-consumption and
 bounded cleanup paths, not their replacement.

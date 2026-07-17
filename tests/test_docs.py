@@ -95,6 +95,7 @@ def test_customer_export_identity_has_only_dormant_write_and_wrap_authority():
     assert '"storage.objects.delete"' in foundation
     assert '"storage.objects.get"' not in foundation
     assert '"storage.objects.list"' not in foundation
+    assert 'resource "google_storage_bucket_iam_policy" "customer_export"' in foundation
 
 
 def test_customer_export_bucket_is_private_ephemeral_and_separately_keyed():
