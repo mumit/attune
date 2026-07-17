@@ -68,3 +68,13 @@ def test_google_chat_conversation_route_requires_explicit_executor():
     )
     route = routes["channel.google_chat.converse"]
     assert route.capability == "assistant.conversation.read"
+
+
+def test_slack_conversation_route_requires_explicit_executor():
+    calls = []
+    assert "channel.slack.converse" not in registered_routes()
+    routes = registered_routes(
+        slack_conversation=lambda *args: calls.append(args)
+    )
+    route = routes["channel.slack.converse"]
+    assert route.capability == "assistant.conversation.read"

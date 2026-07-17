@@ -76,11 +76,32 @@ class ReplyBroker(Protocol):
 
 
 class PostgresGoogleChatConversationWorkRepository:
-    def __init__(self, connection_factory: ConnectionFactory):
+    """Resolves canonical conversation authority for one channel surface.
+
+    Defaults bind the Google Chat surface; the Slack repository reuses this
+    implementation with its own fixed provider constants. All variability is
+    supplied as SQL parameters, never string-formatted into the statement.
+    """
+
+    def __init__(
+        self,
+        connection_factory: ConnectionFactory,
+        *,
+        job_kind: str = PURPOSE,
+        surface: str = "google_chat",
+        destination_provider: str = "google_chat",
+        event_provider: str = "google",
+        event_kind: str = "google_chat.message",
+    ):
         self._connect = connection_factory
+        self._job_kind = job_kind
+        self._surface = surface
+        self._destination_provider = destination_provider
+        self._event_provider = event_provider
+        self._event_kind = event_kind
 
     def resolve(self, context: TenantContext, job: HostedJob) -> ConversationWork:
-        payload = _payload(job)
+        payload = _payload(job, purpose=self._job_kind)
         with closing(self._connect()) as connection:
             with tenant_transaction(connection, context) as cursor:
                 cursor.execute(
@@ -109,19 +130,19 @@ class PostgresGoogleChatConversationWorkRepository:
                        AND connector.principal_id = conversation.principal_id
                        AND connector.provider = 'google'
                      WHERE job.tenant_id = %s AND job.id = %s
-                       AND job.kind = 'channel.google_chat.converse'
+                       AND job.kind = %s
                        AND job.capability = 'assistant.conversation.read'
                        AND job.state = 'leased'
-                       AND conversation.surface = 'google_chat'
+                       AND conversation.surface = %s
                        AND principal.status = 'active'
                        AND connector.status = 'active'
-                       AND destination.provider = 'google_chat'
+                       AND destination.provider = %s
                        AND destination.visibility = 'owner_dm'
                        AND destination.status = 'active'
                        AND destination.delivery_verified_at IS NOT NULL
-                       AND 'google_chat' = ANY(preference.interaction_channels)
-                       AND event.provider = 'google'
-                       AND event.kind = 'google_chat.message'
+                       AND %s = ANY(preference.interaction_channels)
+                       AND event.provider = %s
+                       AND event.kind = %s
                        AND event.signal->>'conversation_id' = conversation.id::text
                        AND event.signal->>'destination_id' = destination.id::text
                        AND event.signal->>'user_sequence' = job.payload->>'user_sequence'
@@ -138,7 +159,16 @@ class PostgresGoogleChatConversationWorkRepository:
                        )
                      LIMIT 2
                     """,
-                    (context.tenant_id, job.id),
+                    (
+                        context.tenant_id,
+                        job.id,
+                        self._job_kind,
+                        self._surface,
+                        self._destination_provider,
+                        self._destination_provider,
+                        self._event_provider,
+                        self._event_kind,
+                    ),
                 )
                 rows = cursor.fetchall()
         if len(rows) != 1:
@@ -235,12 +265,16 @@ class GoogleChatConversationExecutor:
         *,
         now: Callable[[], datetime] | None = None,
         timezone_name: str = "UTC",
+        reply_method: str = "deliver_google_chat_reply",
+        intent_key_prefix: str = "attune-google-chat-converse-v1:",
     ):
         self._work = work
         self._intents = intents
         self._workspace = workspace
         self._models = models
         self._replies = replies
+        self._reply_method = reply_method
+        self._intent_key_prefix = intent_key_prefix
         self._now = now or (lambda: datetime.now(timezone.utc))
         if not isinstance(timezone_name, str) or not 1 <= len(timezone_name) <= 255:
             raise ValueError("hosted timezone is invalid")
@@ -330,10 +364,9 @@ class GoogleChatConversationExecutor:
             context, conversation_id=authority.conversation_id,
             content=answer, job_id=job.id,
         )
-        if not self._replies.deliver_google_chat_reply(
-            destination_id=authority.destination_id, job_id=job.id
-        ):
-            raise RuntimeError("Google Chat reply was not delivered")
+        deliver = getattr(self._replies, self._reply_method)
+        if not deliver(destination_id=authority.destination_id, job_id=job.id):
+            raise RuntimeError("channel reply was not delivered")
 
     def _intent(
         self, context: TenantContext, job: HostedJob, connector_id: UUID,
@@ -341,8 +374,8 @@ class GoogleChatConversationExecutor:
     ) -> UUID:
         key = hashlib.sha256(
             (
-                "attune-google-chat-converse-v1:"
-                f"{capability}:{context.tenant_id}:{job.id}:{job.attempts}:{connector_id}"
+                self._intent_key_prefix
+                + f"{capability}:{context.tenant_id}:{job.id}:{job.attempts}:{connector_id}"
             ).encode()
         ).digest()
         intent = self._intents.request(
@@ -355,8 +388,8 @@ class GoogleChatConversationExecutor:
         return intent.id
 
 
-def _payload(job: HostedJob) -> dict[str, object]:
-    if job.kind != PURPOSE or job.capability != CAPABILITY:
+def _payload(job: HostedJob, *, purpose: str = PURPOSE) -> dict[str, object]:
+    if job.kind != purpose or job.capability != CAPABILITY:
         raise ValueError("conversation job does not match the fixed route")
     expected = {
         "schema_version", "provider_event_id", "conversation_id",

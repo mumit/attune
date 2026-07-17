@@ -19,6 +19,7 @@ def registered_routes(
     google_gmail_profile: JobExecutor | None = None,
     google_workspace_verification: JobExecutor | None = None,
     google_chat_conversation: JobExecutor | None = None,
+    slack_conversation: JobExecutor | None = None,
 ) -> dict[str, TaskRoute]:
     smoke = TaskRoute("platform.smoke", "platform.smoke", platform_smoke)
     routes = {smoke.purpose: smoke}
@@ -41,6 +42,13 @@ def registered_routes(
             "channel.google_chat.converse",
             "assistant.conversation.read",
             google_chat_conversation,
+        )
+        routes[conversation.purpose] = conversation
+    if slack_conversation is not None:
+        conversation = TaskRoute(
+            "channel.slack.converse",
+            "assistant.conversation.read",
+            slack_conversation,
         )
         routes[conversation.purpose] = conversation
     return routes

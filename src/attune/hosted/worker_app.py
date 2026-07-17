@@ -16,6 +16,10 @@ from .google_chat_conversation_executor import (
     PostgresGoogleChatConversationWorkRepository,
 )
 from .channel_broker_client import ChannelBrokerClient
+from .slack_conversation_executor import (
+    PostgresSlackConversationWorkRepository,
+    SlackConversationExecutor,
+)
 from .model_gateway_client import ModelGatewayClient
 from .repositories import PostgresJobRepository
 from .reconciliation import PostgresJobReconciliationRepository
@@ -97,6 +101,32 @@ def create_production_app():
             ),
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
         )
+    slack_conversation = None
+    slack_conversation_enabled = os.environ.get(
+        "ATTUNE_ENABLE_SLACK_CONVERSATION", "false"
+    )
+    if slack_conversation_enabled not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_SLACK_CONVERSATION must be true or false")
+    if slack_conversation_enabled == "true":
+        slack_conversation = SlackConversationExecutor(
+            PostgresSlackConversationWorkRepository(iam_connection),
+            PostgresCredentialIntentRepository(
+                iam_connection, producer_kind="worker",
+            ),
+            SecretBrokerClient(
+                os.environ["ATTUNE_SECRET_BROKER_URL"],
+                os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
+            ),
+            ModelGatewayClient(
+                os.environ["ATTUNE_MODEL_GATEWAY_URL"],
+                os.environ["ATTUNE_MODEL_GATEWAY_AUDIENCE"],
+            ),
+            ChannelBrokerClient(
+                os.environ["ATTUNE_CHANNEL_BROKER_URL"],
+                os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
+            ),
+            timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
+        )
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),
         audit=audit,
@@ -105,6 +135,7 @@ def create_production_app():
             google_gmail_profile=google_gmail_profile,
             google_workspace_verification=google_workspace_verification,
             google_chat_conversation=google_chat_conversation,
+            slack_conversation=slack_conversation,
         ),
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_service_account=os.environ[
