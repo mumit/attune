@@ -247,3 +247,20 @@ variable "google_oauth_client_id" {
     error_message = "google_oauth_client_id must be empty or a syntactically valid Google web client ID."
   }
 }
+
+variable "enable_hosted_slack_install" {
+  description = "Expose hosted Slack app installation from the control plane; requires the runtime Slack channel and the deployed Slack ingress."
+  type        = bool
+  default     = false
+}
+
+variable "slack_client_id" {
+  description = "Public client ID of the platform-owned Slack app; required only when hosted Slack installation is enabled."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.slack_client_id == "" || can(regex("^[0-9]{6,20}\\.[0-9]{6,20}$", var.slack_client_id))
+    error_message = "slack_client_id must be empty or a syntactically valid Slack app client ID."
+  }
+}

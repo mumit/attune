@@ -214,6 +214,10 @@ resource "google_cloud_run_v2_service" "worker" {
         value = tostring(var.enable_google_chat_conversation)
       }
       env {
+        name  = "ATTUNE_ENABLE_SLACK_CONVERSATION"
+        value = tostring(var.enable_slack_conversation)
+      }
+      env {
         name  = "ATTUNE_HOSTED_TIMEZONE"
         value = var.hosted_timezone
       }
@@ -226,28 +230,28 @@ resource "google_cloud_run_v2_service" "worker" {
         value = local.secret_broker_audience
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
         content {
           name  = "ATTUNE_MODEL_GATEWAY_URL"
           value = google_cloud_run_v2_service.model_gateway[0].uri
         }
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
         content {
           name  = "ATTUNE_MODEL_GATEWAY_AUDIENCE"
           value = local.model_gateway_audience
         }
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
         content {
           name  = "ATTUNE_CHANNEL_BROKER_URL"
           value = google_cloud_run_v2_service.channel_broker[0].uri
         }
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
         content {
           name  = "ATTUNE_CHANNEL_BROKER_AUDIENCE"
           value = local.channel_broker_audience

@@ -162,6 +162,17 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "ATTUNE_CUSTOMER_EXPORTS_ENABLED"
         value = tostring(var.enable_customer_exports)
       }
+      env {
+        name  = "ATTUNE_HOSTED_SLACK_INSTALL_ENABLED"
+        value = tostring(var.enable_hosted_slack_install)
+      }
+      dynamic "env" {
+        for_each = var.enable_hosted_slack_install ? [1] : []
+        content {
+          name  = "ATTUNE_SLACK_CLIENT_ID"
+          value = var.slack_client_id
+        }
+      }
       dynamic "env" {
         for_each = var.enable_hosted_channel_setup ? [1] : []
         content {
@@ -332,6 +343,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
     precondition {
       condition     = !var.enable_hosted_channel_lifecycle || var.enable_hosted_channel_setup
       error_message = "Hosted channel lifecycle requires active hosted channel setup."
+    }
+    precondition {
+      condition     = !var.enable_hosted_slack_install || var.slack_client_id != ""
+      error_message = "Hosted Slack installation requires the platform Slack app's public client ID."
     }
   }
 }

@@ -130,6 +130,12 @@ variable "enable_google_chat_conversation" {
   default     = false
 }
 
+variable "enable_slack_conversation" {
+  description = "Register the bounded Slack conversation route and grant its worker/broker edges after all executors pass security review."
+  type        = bool
+  default     = false
+}
+
 variable "slack_channel_enabled" {
   description = "Configure the private broker's Slack installation routes after the platform Slack app, its secret versions, and their security gates exist."
   type        = bool
