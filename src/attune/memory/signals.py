@@ -24,10 +24,13 @@ rather than a premature paraphrase.
 from __future__ import annotations
 
 import difflib
+import logging
 from enum import Enum
 from typing import Any
 
 from .base import MemoryStore, Message
+
+logger = logging.getLogger(__name__)
 
 
 class ActionSignal(str, Enum):
@@ -103,15 +106,38 @@ def capture_action_signal(
     signal: ActionSignal,
     summary: str,
     metadata: dict[str, Any] | None = None,
+    importance_profile: Any = None,
+    sender: str | None = None,
 ) -> list[Any]:
     """Record an approve/edit/ignore/reject signal verbatim (``infer=False``).
 
     Stored raw so the scheduled consolidation pass (design 2.2), running on the
     strong model, can find cross-signal patterns from ground truth rather than
     from an eagerly-paraphrased summary.
+
+    Learning is one behavior with two stores (Phase 1, ``docs/future-state.md``):
+    the same implicit-feedback event that feeds the soft memory search here
+    also feeds the deterministic, inspectable per-sender profile in
+    ``orchestrator/importance.py``. When both ``importance_profile`` (an
+    :class:`~orchestrator.importance.ImportanceProfile`) and ``sender`` are
+    given, the signal is additionally recorded there. Absent either, this
+    function's memory-write behavior is unchanged — every existing caller
+    that doesn't know about the profile keeps working untouched. A profile
+    write failure is logged and swallowed: the importance profile is a
+    fast-acting *addition* to learning, and it must never be able to break
+    the memory write that everything else already depends on.
     """
     meta = {"signal": "action", "action": signal.value, "domain": domain}
     if metadata:
         meta.update(metadata)
     text = f"[{signal.value}] {domain}: {summary}"
-    return store.add(text, user_id=user_id, metadata=meta, infer=False)
+    result = store.add(text, user_id=user_id, metadata=meta, infer=False)
+    if importance_profile is not None and sender:
+        try:
+            importance_profile.record_signal(sender, signal)
+        except Exception:  # noqa: BLE001 — profile write must never break memory
+            logger.warning(
+                "importance profile record_signal failed for sender=%s", sender,
+                exc_info=True,
+            )
+    return result

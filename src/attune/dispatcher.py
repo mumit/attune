@@ -63,6 +63,7 @@ from .ingestion.gmail_watch import WatchState
 from .interaction import InteractionIntent, InteractionPlan, plan_interaction
 from .llm import Task, create_chat_completion, model_for
 from .orchestrator.draft_approve import apply_confirmation
+from .orchestrator.importance import ImportanceTier
 from .orchestrator.scheduling import ConflictResult, detect_conflict, propose_free_slots
 from .orchestrator.triage import Priority, TriageResult, triage_thread
 
@@ -167,7 +168,7 @@ def handle_gmail_notification(
     gmail_service: Any,
     watch_state: WatchState,
     connector: WorkspaceConnector,
-    post_approval: Callable[[str, str, list[str] | None], None],
+    post_approval: Callable[..., None],
     user_id: str,
     thread_id_prefix: str = "gmail",
     audit_log: AuditLog | None = None,
@@ -283,13 +284,24 @@ def handle_gmail_notification(
     return submitted
 
 
+def _triage_audit_fields(triage: TriageResult) -> dict[str, Any]:
+    """Content-free triage fields shared by both the NOISE-skip and the
+    proceed-path audit events (Phase 1, G4) — the effective priority, what
+    the model itself said, and whether the importance profile moved it."""
+    return {
+        "priority": triage.priority.value,
+        "base_priority": triage.base_priority.value,
+        "adjusted": triage.adjusted,
+    }
+
+
 def submit_gmail_thread(
     app_ctx: AppContext,
     thread: Any,
     *,
     gmail_tid: str,
     history_id: str,
-    post_approval: Callable[[str, str, list[str] | None], None],
+    post_approval: Callable[..., None],
     user_id: str,
     thread_id_prefix: str = "gmail",
     audit_log: AuditLog | None = None,
@@ -307,6 +319,7 @@ def submit_gmail_thread(
         triage = triage_thread(
             app_ctx.client, incoming_summary,
             store=app_ctx.store, sender=thread.from_addr, user_id=user_id,
+            importance_profile=app_ctx.importance_profile,
         )
     else:
         triage = triage_fn(app_ctx.client, incoming_summary)
@@ -316,7 +329,8 @@ def submit_gmail_thread(
                 thread_id=lg_tid, workflow="triage",
                 events=[{"event": "triaged_noise",
                          "ts": datetime.now(timezone.utc).isoformat(),
-                         "reason": triage.reason}],
+                         "reason": triage.reason,
+                         **_triage_audit_fields(triage)}],
                 domain="mail", user_id=user_id,
             )
         return None
@@ -324,6 +338,9 @@ def submit_gmail_thread(
     state: dict[str, Any] = {
         "incoming_summary": incoming_summary,
         "incoming_ref": gmail_tid,
+        "sender": thread.from_addr,
+        "priority": triage.priority.value,
+        "priority_adjusted": triage.adjusted,
         "source_snapshot": (
             thread.last_message_at.isoformat()
             if getattr(thread, "last_message_at", None) is not None else None
@@ -335,9 +352,15 @@ def submit_gmail_thread(
         state, {"configurable": {"thread_id": lg_tid}}
     )
     if audit_log is not None:
+        triage_event = {
+            "event": "triaged",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            **_triage_audit_fields(triage),
+        }
         audit_log.record(
             thread_id=lg_tid, workflow="draft_approve",
-            events=result.get("audit_events", []), domain="mail", user_id=user_id,
+            events=[triage_event] + list(result.get("audit_events", [])),
+            domain="mail", user_id=user_id,
         )
     rung = _auto_rung(result)
     if rung is not None:
@@ -348,14 +371,30 @@ def submit_gmail_thread(
         )
         return lg_tid
 
+    # URGENT gets differentiated presentation (Phase 1, G4/G6-adjacent): the
+    # card itself carries a marker + the model's own reason, and — separately
+    # from the card — a short heads-up goes to the notification route so an
+    # urgent thread doesn't wait on the recipient noticing a new card. Both
+    # are presentation only: the graph above never branched on priority, and
+    # nothing here grants autonomy (rule 3) — priority-based autonomy gating
+    # is explicitly Phase 4, out of scope.
+    title = None
+    if triage.priority == Priority.URGENT:
+        title = f"🔴 URGENT — needs same-day response: {triage.reason}"
+    kwargs: dict[str, Any] = {}
+    if title and _accepts_keyword(post_approval, "title"):
+        kwargs["title"] = title
     post_approval(
         lg_tid, result.get("proposed_draft") or "",
         result.get("retrieved_memories") or None,
+        **kwargs,
     )
+    if triage.priority == Priority.URGENT and notify is not None:
+        notify(f"Urgent mail from {thread.from_addr} awaiting your approval decision.")
     if pending is not None:
         pending.register(
             lg_tid=lg_tid, source_ref=gmail_tid, domain="mail",
-            posted_at=datetime.now(timezone.utc),
+            posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
         )
     return lg_tid
 
@@ -434,7 +473,9 @@ def handle_calendar_notification(
         on_reconciled(len(changes.event_ids), False)
 
     conflicts: list[ConflictResult] = []
-    offers_made = 0
+    # (event, conflict) pairs still eligible for a hold offer, in arrival
+    # order — ranked below, before the per-run cap is applied (G2/G10).
+    offerable: list[tuple[Any, ConflictResult]] = []
     for event_id in changes.event_ids:
         try:
             event = _fetch_with_retry(lambda: connector.get_event(event_id))
@@ -465,12 +506,9 @@ def handle_calendar_notification(
                 )
             continue
         try:
-            conflict, offered = submit_calendar_event(
-                app_ctx, connector, event,
-                notify=notify, user_id=user_id, calendar_id=calendar_id,
-                audit_log=audit_log, post_approval=post_approval,
-                pending=pending,
-                allow_offer=offers_made < MAX_HOLD_OFFERS_PER_RUN,
+            conflict = _detect_and_notify_conflict(
+                connector, event, notify=notify, user_id=user_id,
+                calendar_id=calendar_id, audit_log=audit_log,
             )
         except Exception as exc:  # noqa: BLE001 — sync token already advanced
             if retry_queue is None:
@@ -480,12 +518,113 @@ def handle_calendar_notification(
                 error=type(exc).__name__,
             )
             continue
-        if conflict is not None:
-            conflicts.append(conflict)
-        if offered:
-            offers_made += 1
+        if conflict is None:
+            continue
+        conflicts.append(conflict)
+        if post_approval is not None:
+            offerable.append((event, conflict))
+
+    if offerable:
+        ranked = _rank_conflicts_by_importance(
+            offerable, importance_profile=app_ctx.importance_profile
+        )
+        offers_made = 0
+        for event, conflict in ranked:
+            if offers_made >= MAX_HOLD_OFFERS_PER_RUN:
+                break
+            try:
+                offered = _offer_resolution_hold(
+                    app_ctx, connector, conflict, post_approval=post_approval,
+                    pending=pending, audit_log=audit_log, user_id=user_id,
+                    notify=notify,
+                )
+            except Exception as exc:  # noqa: BLE001 — sync token already advanced
+                if retry_queue is None:
+                    raise
+                retry_queue.enqueue(
+                    "calendar_event", event.event_id, {"calendar_id": calendar_id},
+                    error=type(exc).__name__,
+                )
+                continue
+            if offered is not None:
+                offers_made += 1
 
     return conflicts
+
+
+# Deterministic ranking of same-run conflicts before MAX_HOLD_OFFERS_PER_RUN
+# is applied (Phase 1, G2/G10). ``CalendarEvent`` has no organizer field
+# (stage 1 finding) — only ``attendees`` — so "the counterpart's importance"
+# reads as the highest tier among ITS attendees, the closest available proxy.
+_TIER_RANK = {
+    ImportanceTier.HIGH: 2,
+    ImportanceTier.NORMAL: 1,
+    ImportanceTier.LOW: 0,
+}
+
+
+def _conflict_importance_rank(conflict: ConflictResult, importance_profile: Any) -> int:
+    """Sort key (higher = offered first): the best tier among the
+    conflicting event's attendees. No profile, no attendees, or an
+    assessment failure all rank as NORMAL — every conflict is still
+    notified regardless of this; it only orders who gets a card first once
+    the per-run cap is in play."""
+    attendees = conflict.conflicting_with.attendees
+    if importance_profile is None or not attendees:
+        return _TIER_RANK[ImportanceTier.NORMAL]
+    best = _TIER_RANK[ImportanceTier.NORMAL]
+    for address in attendees:
+        try:
+            tier = importance_profile.assess(address).tier
+        except Exception:  # noqa: BLE001 — ranking must never break scheduling
+            continue
+        best = max(best, _TIER_RANK.get(tier, _TIER_RANK[ImportanceTier.NORMAL]))
+    return best
+
+
+def _rank_conflicts_by_importance(
+    offerable: list[tuple[Any, ConflictResult]], *, importance_profile: Any
+) -> list[tuple[Any, ConflictResult]]:
+    """Highest-importance conflict first; stable, so equal-ranked conflicts
+    keep their arrival order (Python's sort guarantees stability even with
+    ``reverse=True`` — ties are never reordered)."""
+    return sorted(
+        offerable,
+        key=lambda pair: _conflict_importance_rank(pair[1], importance_profile),
+        reverse=True,
+    )
+
+
+def _detect_and_notify_conflict(
+    connector: WorkspaceConnector,
+    event: Any,
+    *,
+    notify: Callable[[str], None],
+    user_id: str,
+    calendar_id: str,
+    audit_log: AuditLog | None,
+) -> ConflictResult | None:
+    """Read-only detection + the unconditional notify/audit side effects —
+    shared by :func:`submit_calendar_event` and the ranked-offer path in
+    :func:`handle_calendar_notification`, so detection never runs twice for
+    the same event."""
+    conflict = detect_conflict(connector, event)
+    if conflict is None:
+        return None
+    notify(
+        f'Scheduling conflict: "{event.summary}" overlaps with '
+        f'"{conflict.conflicting_with.summary}".'
+    )
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=f"calendar:{calendar_id}:{event.event_id}",
+            workflow="scheduling",
+            events=[{"event": "conflict_detected",
+                     "ts": datetime.now(timezone.utc).isoformat(),
+                     "conflicting_event_id": conflict.conflicting_with.event_id}],
+            domain="calendar", user_id=user_id,
+        )
+    return conflict
 
 
 def submit_calendar_event(
@@ -501,23 +640,19 @@ def submit_calendar_event(
     pending: Any = None,
     allow_offer: bool = True,
 ) -> tuple[ConflictResult | None, bool]:
-    """Process one fetched event; shared by live ingestion and retry drain."""
-    conflict = detect_conflict(connector, event)
+    """Process one fetched event; shared by live ingestion and retry drain.
+
+    Single-event callers (poll mode, the retry drain) see one conflict at a
+    time, so there's nothing to rank here — ranking-before-the-cap
+    (G2/G10) only matters where several conflicts can arrive in the same
+    run, which is ``handle_calendar_notification``'s job.
+    """
+    conflict = _detect_and_notify_conflict(
+        connector, event, notify=notify, user_id=user_id,
+        calendar_id=calendar_id, audit_log=audit_log,
+    )
     if conflict is None:
         return None, False
-    notify(
-        f'Scheduling conflict: "{event.summary}" overlaps with '
-        f'"{conflict.conflicting_with.summary}".'
-    )
-    if audit_log is not None:
-        audit_log.record(
-            thread_id=f"calendar:{calendar_id}:{event.event_id}",
-            workflow="scheduling",
-            events=[{"event": "conflict_detected",
-                     "ts": datetime.now(timezone.utc).isoformat(),
-                     "conflicting_event_id": conflict.conflicting_with.event_id}],
-            domain="calendar", user_id=user_id,
-        )
     if post_approval is None or not allow_offer:
         return conflict, False
     offered = _offer_resolution_hold(
@@ -574,6 +709,10 @@ def _offer_resolution_hold(
     state = {
         "incoming_summary": incoming_summary,
         "incoming_ref": event.event_id,
+        # No organizer field on CalendarEvent today — the importance profile
+        # simply gets nothing to record for calendar holds until one is
+        # added (capture_action_signal is a no-op without a sender).
+        "sender": None,
         "user_id": user_id,
         "action": "create_hold",
         "domain": "calendar",
@@ -625,7 +764,7 @@ def _offer_resolution_hold(
     if pending is not None:
         pending.register(
             lg_tid=lg_tid, source_ref=event.event_id, domain="calendar",
-            posted_at=datetime.now(timezone.utc),
+            posted_at=datetime.now(timezone.utc), sender=None,
         )
     return lg_tid
 

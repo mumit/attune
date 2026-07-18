@@ -40,6 +40,12 @@ from .grants import (
     suggest_graduations,
     track_records,
 )
+from .importance import (
+    ImportanceProfile,
+    ImportanceTier,
+    JsonImportanceProfile,
+    TierAssessment,
+)
 from .pending import (
     JsonPendingApprovals,
     PendingApproval,
@@ -76,6 +82,10 @@ __all__ = [
     "PendingApproval",
     "PendingApprovals",
     "sweep_ignored",
+    "ImportanceProfile",
+    "ImportanceTier",
+    "JsonImportanceProfile",
+    "TierAssessment",
     "Priority",
     "TriageResult",
     "triage_thread",

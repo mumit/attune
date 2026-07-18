@@ -19,6 +19,14 @@ v2 (roadmap prompt 07) closes three gaps against the design's own bar:
   :func:`find_quiet_threads` is deliberately the single source of that truth
   — the follow-up nudge feature (roadmap prompt 15) reuses it.
 
+Phase 1 (``docs/future-state.md``, gap G11 partial) adds one more ordering,
+not a filter: the unread-mail section is listed HIGH-tier senders first,
+then NORMAL, then LOW, stable within each tier (:func:`_order_by_importance`).
+LOW-tier senders are still shown — the brief is read-only awareness of
+everything unread; deciding what does or doesn't get a drafted reply is
+triage's job (``orchestrator/triage.py``), not the brief's. An absent
+profile, or a profile that raises, leaves the connector's own order alone.
+
 Provenance note: mail subjects/snippets — including prep and quiet-thread
 lines — arrive FETCHED/untrusted and are passed to the model inside the
 untrusted-data block, framed as content to summarize, never as instructions.
@@ -34,9 +42,18 @@ from zoneinfo import ZoneInfo
 
 from .connectors.base import CalendarEvent, EmailThread, WorkspaceConnector
 from .llm import Task, create_chat_completion, model_for
+from .orchestrator.importance import ImportanceTier
 
 MAX_PREP_EVENTS = 8
 QUIET_MIN_AGE_DAYS = 3
+
+# Sort key for the unread-mail section (Phase 1, G11 partial): HIGH first,
+# then NORMAL, then LOW.
+_TIER_SORT_KEY = {
+    ImportanceTier.HIGH: 0,
+    ImportanceTier.NORMAL: 1,
+    ImportanceTier.LOW: 2,
+}
 
 
 @dataclass
@@ -87,6 +104,27 @@ def find_quiet_threads(
     return quiet[:max_results]
 
 
+def _order_by_importance(
+    threads: list[EmailThread], importance_profile: Any
+) -> list[EmailThread]:
+    """Order unread mail HIGH-tier senders first, then NORMAL, then LOW —
+    stable within each tier (module docstring's Phase 1 note). Presentation
+    only, never a filter: every thread stays in the list either way. No
+    profile, or any failure while assessing, leaves ``threads`` exactly as
+    the connector returned them."""
+    if importance_profile is None:
+        return threads
+    try:
+        return sorted(
+            threads,
+            key=lambda t: _TIER_SORT_KEY.get(
+                importance_profile.assess(t.from_addr).tier, 1
+            ),
+        )
+    except Exception:  # noqa: BLE001 — ordering must never break the brief
+        return threads
+
+
 def assemble_brief(
     connector: WorkspaceConnector,
     client: Any,
@@ -98,6 +136,7 @@ def assemble_brief(
     now: datetime | None = None,
     unread_query: str = "is:unread newer_than:1d",
     quiet_min_age_days: int = QUIET_MIN_AGE_DAYS,
+    importance_profile: Any = None,
 ) -> Brief:
     """Read unread mail + today's events (+ prep and quiet threads) and
     produce a short summary.
@@ -106,7 +145,10 @@ def assemble_brief(
     WorkspaceConnector; ``store`` (optional) is a MemoryStore searched for
     per-meeting context; ``user_email`` (optional) enables the quiet-thread
     section — without a real address there's nothing to match the last
-    sender against. All injected, so this is testable without live services.
+    sender against. ``importance_profile`` (optional, Phase 1 G11 partial)
+    orders the unread-mail section HIGH/NORMAL/LOW by sender tier, stable
+    within each tier; absent, or on a profile failure, the connector's own
+    order is kept. All injected, so this is testable without live services.
     """
     now = now or datetime.now(timezone.utc)
     zone = ZoneInfo(tz)
@@ -117,6 +159,7 @@ def assemble_brief(
     day_end = day_start + timedelta(days=1)
 
     threads = connector.list_threads(unread_query, max_results=25)
+    threads = _order_by_importance(threads, importance_profile)
     events = connector.list_events(
         time_min=day_start.astimezone(timezone.utc),
         time_max=day_end.astimezone(timezone.utc),
