@@ -285,6 +285,22 @@ class GoogleChatConversationExecutor:
         self._timezone_name = timezone_name
 
     def __call__(self, context: TenantContext, job: HostedJob) -> None:
+        authority, answer = self._respond(context, job)
+        self._work.append_assistant(
+            context, conversation_id=authority.conversation_id,
+            content=answer, job_id=job.id,
+        )
+        deliver = getattr(self._replies, self._reply_method)
+        if not deliver(destination_id=authority.destination_id, job_id=job.id):
+            raise RuntimeError("channel reply was not delivered")
+
+    def _respond(self, context: TenantContext, job: HostedJob):
+        """Resolve authority and produce a validated answer, without delivery.
+
+        Shared by surfaces that append the assistant turn but skip the reply
+        broker entirely (the web conversation surface has no destination or
+        channel-broker delivery hop; the stored turn is itself the delivery).
+        """
         authority = self._work.resolve(context, job)
         turns = self._work.recent(context, authority.conversation_id, limit=6)
         if not turns or turns[-1].sequence != authority.user_sequence or turns[-1].actor_type != "user":
@@ -362,13 +378,7 @@ class GoogleChatConversationExecutor:
         answer = answer.strip()
         if not 1 <= len(answer) <= 8_000:
             raise RuntimeError("assistant response is invalid")
-        self._work.append_assistant(
-            context, conversation_id=authority.conversation_id,
-            content=answer, job_id=job.id,
-        )
-        deliver = getattr(self._replies, self._reply_method)
-        if not deliver(destination_id=authority.destination_id, job_id=job.id):
-            raise RuntimeError("channel reply was not delivered")
+        return authority, answer
 
     def _intent(
         self, context: TenantContext, job: HostedJob, connector_id: UUID,

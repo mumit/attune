@@ -20,6 +20,10 @@ from .slack_conversation_executor import (
     PostgresSlackConversationWorkRepository,
     SlackConversationExecutor,
 )
+from .web_conversation_executor import (
+    PostgresWebConversationWorkRepository,
+    WebConversationExecutor,
+)
 from .model_gateway_client import ModelGatewayClient
 from .repositories import PostgresJobRepository
 from .reconciliation import PostgresJobReconciliationRepository
@@ -127,6 +131,28 @@ def create_production_app():
             ),
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
         )
+    web_conversation = None
+    web_conversation_enabled = os.environ.get(
+        "ATTUNE_ENABLE_WEB_CONVERSATION", "false"
+    )
+    if web_conversation_enabled not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_WEB_CONVERSATION must be true or false")
+    if web_conversation_enabled == "true":
+        web_conversation = WebConversationExecutor(
+            PostgresWebConversationWorkRepository(iam_connection),
+            PostgresCredentialIntentRepository(
+                iam_connection, producer_kind="worker",
+            ),
+            SecretBrokerClient(
+                os.environ["ATTUNE_SECRET_BROKER_URL"],
+                os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
+            ),
+            ModelGatewayClient(
+                os.environ["ATTUNE_MODEL_GATEWAY_URL"],
+                os.environ["ATTUNE_MODEL_GATEWAY_AUDIENCE"],
+            ),
+            timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
+        )
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),
         audit=audit,
@@ -136,6 +162,7 @@ def create_production_app():
             google_workspace_verification=google_workspace_verification,
             google_chat_conversation=google_chat_conversation,
             slack_conversation=slack_conversation,
+            web_conversation=web_conversation,
         ),
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_service_account=os.environ[

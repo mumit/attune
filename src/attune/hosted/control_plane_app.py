@@ -30,6 +30,7 @@ from .secret_broker_mutation_client import SecretBrokerMutationClient
 from .customer_export import PostgresCustomerExportRequests
 from .customer_export_service import CustomerExportService
 from .export_download import PostgresExportDownloadAuthorizations
+from .web_conversation import PostgresWebConversationRepository, WebConversationService
 
 
 def create_production_app():
@@ -97,6 +98,16 @@ def create_production_app():
         raise ValueError("Google connection test requires Google Workspace OAuth")
     if customer_exports_enabled and not identity_enabled:
         raise ValueError("customer exports require identity")
+    web_conversation_enabled_value = os.environ.get(
+        "ATTUNE_HOSTED_WEB_CONVERSATION_ENABLED", "false"
+    )
+    if web_conversation_enabled_value not in {"true", "false"}:
+        raise ValueError(
+            "ATTUNE_HOSTED_WEB_CONVERSATION_ENABLED must be true or false"
+        )
+    web_conversation_enabled = web_conversation_enabled_value == "true"
+    if web_conversation_enabled and not identity_enabled:
+        raise ValueError("hosted web conversation requires identity")
     google_oauth = (
         PostgresGoogleOAuthStartRepository(iam_connection) if oauth_enabled else None
     )
@@ -215,6 +226,19 @@ def create_production_app():
                 PostgresExportDownloadAuthorizations(iam_connection),
             )
             if customer_exports_enabled
+            else None
+        ),
+        hosted_web_conversation_enabled=web_conversation_enabled,
+        web_conversation=(
+            WebConversationService(
+                PostgresWebConversationRepository(iam_connection),
+                AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
+                DispatchBrokerClient(
+                    os.environ["ATTUNE_DISPATCH_BROKER_URL"],
+                    os.environ["ATTUNE_DISPATCH_BROKER_AUDIENCE"],
+                ),
+            )
+            if web_conversation_enabled
             else None
         ),
     )

@@ -78,3 +78,17 @@ def test_slack_conversation_route_requires_explicit_executor():
     )
     route = routes["channel.slack.converse"]
     assert route.capability == "assistant.conversation.read"
+
+
+def test_web_conversation_route_requires_explicit_executor():
+    calls = []
+    assert "channel.web.converse" not in registered_routes()
+    routes = registered_routes(
+        web_conversation=lambda *args: calls.append(args)
+    )
+    route = routes["channel.web.converse"]
+    assert route.capability == "assistant.conversation.read"
+    context = TenantContext(UUID("10000000-0000-4000-8000-000000000714"))
+    conversation_job = job({"conversation_id": "10000000-0000-4000-8000-000000000715"})
+    route.execute(context, conversation_job)
+    assert calls == [(context, conversation_job)]

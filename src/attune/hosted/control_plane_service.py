@@ -112,6 +112,12 @@ class CustomerExports(Protocol):
     def authorize_download(self, context, **kwargs): ...
 
 
+class WebConversation(Protocol):
+    def send(self, context, **kwargs): ...
+
+    def turns(self, context, **kwargs): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -140,6 +146,8 @@ def create_app(
     slack_client_id: str | None = None,
     customer_exports_enabled: bool = False,
     customer_exports: CustomerExports | None = None,
+    hosted_web_conversation_enabled: bool = False,
+    web_conversation: WebConversation | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -223,6 +231,12 @@ def create_app(
     ):
         raise ValueError(
             "enabled customer exports require identity and an export service"
+        )
+    if hosted_web_conversation_enabled and (
+        not identity_enabled or web_conversation is None
+    ):
+        raise ValueError(
+            "enabled web conversation requires identity and an audited service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -405,6 +419,11 @@ def create_app(
                     ),
                     "customer_exports": (
                         "available" if customer_exports_enabled else "not_configured"
+                    ),
+                    "hosted_web_conversation": (
+                        "available"
+                        if hosted_web_conversation_enabled
+                        else "not_configured"
                     ),
                 }
             )
@@ -774,6 +793,79 @@ def create_app(
                         "expires_at": grant.expires_at.isoformat(),
                     }
                 ), 201
+
+        if hosted_web_conversation_enabled:
+
+            @app.post("/v1/conversation/messages")
+            def send_web_conversation_message():
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"schema_version", "text"}
+                    or payload.get("schema_version") != 1
+                    or not isinstance(payload.get("text"), str)
+                    or not 1 <= len(payload["text"]) <= 8_000
+                ):
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request, expected_origin, sessions,  # type: ignore[arg-type]
+                )
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    accepted = web_conversation.send(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        text=payload["text"],
+                    )
+                except Exception:
+                    return jsonify({"error": "conversation_unavailable"}), 503
+                return jsonify(
+                    {
+                        "schema_version": 1,
+                        "conversation": str(accepted.conversation_id),
+                        "user_sequence": accepted.user_sequence,
+                        "state": "accepted",
+                    }
+                ), 202
+
+            @app.get("/v1/conversation/turns")
+            def read_web_conversation_turns():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                raw_after = request.args.get("after", "0")
+                try:
+                    after = int(raw_after)
+                    if str(after) != raw_after or not 0 <= after < 2**63:
+                        raise ValueError("out of bounds")
+                except ValueError:
+                    return jsonify({"error": "invalid_request"}), 400
+                try:
+                    turns, pending = web_conversation.turns(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        after=after,
+                    )
+                except Exception:
+                    return jsonify({"error": "conversation_unavailable"}), 503
+                return jsonify(
+                    {
+                        "schema_version": 1,
+                        "turns": [
+                            {
+                                "sequence": turn.sequence,
+                                "actor": turn.actor_type,
+                                "text": turn.content,
+                            }
+                            for turn in turns
+                        ],
+                        "pending": pending,
+                    }
+                )
 
         if hosted_channels_enabled:
 
