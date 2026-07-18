@@ -224,3 +224,86 @@ def test_quiet_threads_in_brief_only_with_user_email():
     assemble_brief(conn2, client2, now=now)
     assert "WAITING ON" not in client2.calls[0]["messages"][-1]["content"]
     assert "in:sent" not in conn2.thread_queries
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (docs/future-state.md, G11 partial): unread mail ordered by
+# importance tier — HIGH first, then NORMAL, then LOW; LOW still shown.
+# ---------------------------------------------------------------------------
+
+from attune.orchestrator.importance import ImportanceTier, TierAssessment  # noqa: E402
+
+
+class FakeImportanceProfile:
+    def __init__(self, tiers: dict, raise_for: set | None = None):
+        self._tiers = tiers
+        self._raise_for = raise_for or set()
+
+    def assess(self, sender, *, now=None):
+        if sender in self._raise_for:
+            raise RuntimeError("profile boom")
+        return TierAssessment(
+            self._tiers.get(sender, ImportanceTier.NORMAL), "test", False
+        )
+
+
+def test_unread_mail_ordered_high_then_normal_then_low():
+    threads = [
+        _thread(thread_id="t1", from_addr="low@x.com", subject="Newsletter"),
+        _thread(thread_id="t2", from_addr="normal@x.com", subject="FYI note"),
+        _thread(thread_id="t3", from_addr="high@x.com", subject="Client ask"),
+        _thread(thread_id="t4", from_addr="high2@x.com", subject="VIP followup"),
+    ]
+    conn = FakeConnector(threads=threads)
+    profile = FakeImportanceProfile({
+        "low@x.com": ImportanceTier.LOW,
+        "high@x.com": ImportanceTier.HIGH,
+        "high2@x.com": ImportanceTier.HIGH,
+    })
+    client = FakeClient()
+    assemble_brief(
+        conn, client, now=datetime(2026, 7, 10, 7, tzinfo=timezone.utc),
+        importance_profile=profile,
+    )
+    content = client.calls[0]["messages"][-1]["content"]
+
+    # HIGH-tier senders first (stable within tier: arrival order preserved
+    # between the two HIGH senders), then NORMAL, then LOW last.
+    assert (
+        content.index("Client ask")
+        < content.index("VIP followup")
+        < content.index("FYI note")
+        < content.index("Newsletter")
+    )
+    # LOW is reordered to the back, never dropped — the brief is read-only
+    # awareness of everything unread; triage decides what to draft, not this.
+    assert "Newsletter" in content
+
+
+def test_unread_mail_order_unchanged_without_a_profile():
+    threads = [
+        _thread(thread_id="t1", from_addr="a@x.com", subject="Alpha"),
+        _thread(thread_id="t2", from_addr="b@x.com", subject="Beta"),
+    ]
+    conn = FakeConnector(threads=threads)
+    client = FakeClient()
+    assemble_brief(conn, client, now=datetime(2026, 7, 10, 7, tzinfo=timezone.utc))
+    content = client.calls[0]["messages"][-1]["content"]
+    assert content.index("Alpha") < content.index("Beta")
+
+
+def test_unread_mail_order_falls_back_on_profile_failure():
+    threads = [
+        _thread(thread_id="t1", from_addr="a@x.com", subject="Alpha"),
+        _thread(thread_id="t2", from_addr="b@x.com", subject="Beta"),
+    ]
+    conn = FakeConnector(threads=threads)
+    profile = FakeImportanceProfile({}, raise_for={"a@x.com"})
+    client = FakeClient()
+    assemble_brief(
+        conn, client, now=datetime(2026, 7, 10, 7, tzinfo=timezone.utc),
+        importance_profile=profile,
+    )
+    content = client.calls[0]["messages"][-1]["content"]
+    # a profile failure leaves the connector's own order untouched
+    assert content.index("Alpha") < content.index("Beta")

@@ -1,0 +1,68 @@
+name: memory-eval
+
+# Scheduled memory-quality eval (Phase 1 of docs/future-state.md, roadmap
+# step 5; docs/gap-analysis.md G7). This runs the LIVE variant of
+# tests/test_memory_quality.py — real Mem0 + Qdrant + a configured
+# OpenAI-compatible gateway — which the offline suite (ci.yml) deliberately
+# never exercises (see that test module's own docstring: "manual, never
+# CI"). Weekly + on-demand is the "manual, after memory-pipeline changes"
+# cadence made durable instead of relying on someone remembering to run it
+# locally. ci.yml itself is untouched.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  live-memory-eval:
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.2
+        ports:
+          - 6333:6333
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,memory]"
+      - name: Check required secrets
+        id: check
+        env:
+          ATTUNE_LLM_API_KEY: ${{ secrets.ATTUNE_LLM_API_KEY }}
+          ATTUNE_LLM_BASE_URL: ${{ secrets.ATTUNE_LLM_BASE_URL }}
+          ATTUNE_EMBEDDING_API_KEY: ${{ secrets.ATTUNE_EMBEDDING_API_KEY }}
+          ATTUNE_EMBEDDING_BASE_URL: ${{ secrets.ATTUNE_EMBEDDING_BASE_URL }}
+          ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
+          ATTUNE_EMBEDDING_MODEL: ${{ secrets.ATTUNE_EMBEDDING_MODEL }}
+        # Secrets can't be referenced directly in `if:` conditionals, so
+        # they're exported to the environment above and checked here; a
+        # missing gateway configuration skips the job cleanly (exit 0 with
+        # a notice) instead of failing a scheduled run nobody is watching.
+        run: |
+          if [ -z "$ATTUNE_LLM_API_KEY" ] || [ -z "$ATTUNE_LLM_BASE_URL" ] || \
+             [ -z "$ATTUNE_EMBEDDING_API_KEY" ] || [ -z "$ATTUNE_EMBEDDING_BASE_URL" ] || \
+             [ -z "$ATTUNE_MODEL_DEFAULT" ] || [ -z "$ATTUNE_EMBEDDING_MODEL" ]; then
+            echo "::notice::Live memory eval secrets are not configured (ATTUNE_LLM_API_KEY, ATTUNE_LLM_BASE_URL, ATTUNE_EMBEDDING_API_KEY, ATTUNE_EMBEDDING_BASE_URL, ATTUNE_MODEL_DEFAULT, ATTUNE_EMBEDDING_MODEL) — skipping this run."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run live memory-quality eval
+        if: steps.check.outputs.configured == 'true'
+        env:
+          ATTUNE_LIVE_MEMORY_EVAL: "1"
+          ATTUNE_LLM_API_KEY: ${{ secrets.ATTUNE_LLM_API_KEY }}
+          ATTUNE_LLM_BASE_URL: ${{ secrets.ATTUNE_LLM_BASE_URL }}
+          ATTUNE_EMBEDDING_API_KEY: ${{ secrets.ATTUNE_EMBEDDING_API_KEY }}
+          ATTUNE_EMBEDDING_BASE_URL: ${{ secrets.ATTUNE_EMBEDDING_BASE_URL }}
+          ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
+          ATTUNE_EMBEDDING_MODEL: ${{ secrets.ATTUNE_EMBEDDING_MODEL }}
+          ATTUNE_QDRANT_HOST: "localhost"
+          ATTUNE_QDRANT_PORT: "6333"
+        run: pytest tests/test_memory_quality.py -q -k live

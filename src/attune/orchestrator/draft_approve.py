@@ -65,6 +65,7 @@ def build_draft_approve_graph(
     draft_fn: Callable[[Any, str, list[str], str], str] | None = None,
     apply_fn: Callable[[dict[str, Any]], str | None] | None = None,
     matrix_provider: Callable[[], PermissionMatrix] | None = None,
+    importance_profile: Any = None,
 ):
     """Compile the draft-and-approve graph.
 
@@ -85,6 +86,13 @@ def build_draft_approve_graph(
             evaluation (live policy — grants/revocations bite without a
             restart; see grants.make_matrix_provider). Wins over ``matrix``;
             absent, the static ``matrix`` is wrapped.
+        importance_profile: an optional
+            ``orchestrator.importance.ImportanceProfile``. When present, the
+            capture node also records the human's decision against
+            ``state["sender"]`` (Phase 1, G5/G6) — the same event that
+            already feeds ``store`` via ``capture_action_signal``, so
+            learning stays one behavior with two stores. Absent, or with no
+            ``sender`` in state, capture behaves exactly as before.
     """
     try:
         from langgraph.graph import END, START, StateGraph
@@ -251,6 +259,8 @@ def build_draft_approve_graph(
             domain=domain,
             signal=sig,
             summary=f"{state['action']} on {domain}",
+            importance_profile=importance_profile,
+            sender=state.get("sender"),
         )
         return {"audit_events": [_audit("signal_captured", signal=sig.value)]}
 

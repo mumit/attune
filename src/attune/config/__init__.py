@@ -115,6 +115,7 @@ class Settings:
     chat_poll_state_path: str = "./chat_poll_state.json"
     connector_poll_state_path: str = "./workspace_poll_state.json"
     autonomy_state_path: str = "./autonomy_grants.json"
+    importance_profile_path: str = "./importance_profile.json"
     nudge_state_path: str = "./nudge_state.json"
     retry_queue_db_path: str = "./source_retries.db"
 
@@ -247,6 +248,7 @@ class Settings:
             chat_poll_state_path=_path("ATTUNE_CHAT_POLL_STATE_PATH", "chat_poll_state.json"),
             connector_poll_state_path=_path("ATTUNE_CONNECTOR_POLL_STATE_PATH", "workspace_poll_state.json"),
             autonomy_state_path=_path("ATTUNE_AUTONOMY_STATE_PATH", "autonomy_grants.json"),
+            importance_profile_path=_path("ATTUNE_IMPORTANCE_PATH", "importance_profile.json"),
             nudge_state_path=_path("ATTUNE_NUDGE_STATE_PATH", "nudge_state.json"),
             retry_queue_db_path=_path("ATTUNE_RETRY_QUEUE_DB_PATH", "source_retries.db"),
             approval_ignore_hours=int(e.get("ATTUNE_APPROVAL_IGNORE_HOURS", "48")),

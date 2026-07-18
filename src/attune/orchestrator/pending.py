@@ -50,6 +50,13 @@ class PendingApproval:
     domain: str
     posted_at: datetime  # UTC
     status: str = STATUS_PENDING
+    # The thread's counterparty (mail: thread.from_addr; calendar: organizer,
+    # or None — CalendarEvent carries no organizer field today) — feeds the
+    # importance profile when the sweep captures an IGNORED signal (Phase 1,
+    # G5/G6). Optional and backward compatible: entries persisted before this
+    # field existed simply parse back with sender=None, so an old JSON file
+    # keeps working, it just can't feed the profile.
+    sender: str | None = None
 
 
 class PendingApprovals(Protocol):
@@ -58,7 +65,13 @@ class PendingApprovals(Protocol):
         ...
 
     def register(
-        self, *, lg_tid: str, source_ref: str, domain: str, posted_at: datetime
+        self,
+        *,
+        lg_tid: str,
+        source_ref: str,
+        domain: str,
+        posted_at: datetime,
+        sender: str | None = None,
     ) -> None:
         """Record a newly posted approval card as pending."""
         ...
@@ -108,7 +121,13 @@ class JsonPendingApprovals:
         return None
 
     def register(
-        self, *, lg_tid: str, source_ref: str, domain: str, posted_at: datetime
+        self,
+        *,
+        lg_tid: str,
+        source_ref: str,
+        domain: str,
+        posted_at: datetime,
+        sender: str | None = None,
     ) -> None:
         with self._lock, locked(self._path + ".lock"):
             data = self._load()
@@ -117,6 +136,7 @@ class JsonPendingApprovals:
                 "domain": domain,
                 "posted_at": posted_at.astimezone(timezone.utc).isoformat(),
                 "status": STATUS_PENDING,
+                "sender": sender,
             }
             self._save(data)
 
@@ -166,6 +186,7 @@ class JsonPendingApprovals:
                 domain=raw.get("domain", ""),
                 posted_at=datetime.fromisoformat(raw["posted_at"]),
                 status=raw.get("status", STATUS_PENDING),
+                sender=raw.get("sender"),  # absent on pre-Phase-1 entries
             )
             for tid, raw in data.items()
             if raw.get("status") == STATUS_PENDING
@@ -195,12 +216,20 @@ def sweep_ignored(
     max_age: timedelta = timedelta(hours=48),
     now: datetime | None = None,
     audit_log: Any = None,
+    importance_profile: Any = None,
 ) -> int:
     """Turn stale pending cards into IGNORED signals (design 2.2).
 
     Entries pending longer than ``max_age`` are marked resolved and captured
     via ``capture_action_signal(…, IGNORED)`` — exactly once per entry, since
     resolving removes them from the next sweep. Returns how many were swept.
+
+    ``importance_profile`` (Phase 1, G5/G6) is passed straight through to
+    ``capture_action_signal`` alongside each entry's ``sender``, so an
+    ignored card demotes that sender the same way an explicit reject would.
+    Entries registered before ``sender`` existed (or calendar holds, which
+    carry no organizer) simply have ``sender=None`` — ``capture_action_signal``
+    already treats that as "skip the profile write, keep the memory write".
 
     Memory-write only: the underlying mail is untouched, and the paused
     workflow itself stays resumable in the checkpointer (a very late click
@@ -224,6 +253,8 @@ def sweep_ignored(
                 f"{(now - entry.posted_at).days}d"
             ),
             metadata={"source_ref": entry.source_ref, "lg_tid": entry.lg_tid},
+            importance_profile=importance_profile,
+            sender=entry.sender,
         )
         if audit_log is not None:
             audit_log.record(

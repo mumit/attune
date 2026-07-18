@@ -200,10 +200,10 @@ class _FakeSlackChannel:
         self.approvals: list[dict] = []
         self.briefs: list = []
 
-    def post_approval(self, say, *, thread_id, domain, proposed_draft, rationale=None):
+    def post_approval(self, say, *, thread_id, domain, proposed_draft, rationale=None, title=None):
         self.approvals.append(
             {"say": say, "thread_id": thread_id, "domain": domain,
-             "proposed_draft": proposed_draft, "rationale": rationale}
+             "proposed_draft": proposed_draft, "rationale": rationale, "title": title}
         )
 
     def post_brief(self, say, brief):
@@ -216,10 +216,10 @@ class _FakeGChatChannel:
         self.texts: list[tuple] = []
         self.briefs: list[tuple] = []
 
-    def post_approval(self, space, *, thread_id, domain, proposed_draft, rationale=None):
+    def post_approval(self, space, *, thread_id, domain, proposed_draft, rationale=None, title=None):
         self.approvals.append(
             {"space": space, "thread_id": thread_id, "domain": domain,
-             "proposed_draft": proposed_draft, "rationale": rationale}
+             "proposed_draft": proposed_draft, "rationale": rationale, "title": title}
         )
 
     def post_text(self, space, text):

@@ -166,3 +166,49 @@ def test_action_signal_stored_verbatim(store):
     assert call["infer"] is False  # ground truth, not paraphrased
     assert call["metadata"]["action"] == "approved"
     assert call["payload"].startswith("[approved] calendar:")
+
+
+# --- importance-profile dual-write (Phase 1, docs/future-state.md) -------
+
+
+def test_action_signal_also_records_to_importance_profile(store, tmp_path):
+    from attune.orchestrator.importance import ImportanceTier, JsonImportanceProfile
+
+    profile = JsonImportanceProfile(str(tmp_path / "importance.json"))
+    capture_action_signal(
+        store,
+        user_id="mumit",
+        domain="mail",
+        signal=ActionSignal.APPROVED,
+        summary="approved a reply",
+        importance_profile=profile,
+        sender="vip@example.com",
+    )
+    assert profile.senders() == ["vip@example.com"]
+    assert profile.assess("vip@example.com").tier == ImportanceTier.NORMAL
+
+
+def test_action_signal_without_sender_leaves_profile_untouched(store, tmp_path):
+    from attune.orchestrator.importance import JsonImportanceProfile
+
+    profile = JsonImportanceProfile(str(tmp_path / "importance.json"))
+    capture_action_signal(
+        store, user_id="mumit", domain="mail",
+        signal=ActionSignal.APPROVED, summary="approved a reply",
+        importance_profile=profile,
+    )
+    assert store._memory.add_calls  # memory write still happened
+    assert profile.senders() == []
+
+
+def test_action_signal_profile_failure_does_not_break_memory_write(store):
+    class _FailingProfile:
+        def record_signal(self, *a, **kw):
+            raise RuntimeError("boom")
+
+    capture_action_signal(
+        store, user_id="mumit", domain="mail",
+        signal=ActionSignal.APPROVED, summary="approved a reply",
+        importance_profile=_FailingProfile(), sender="vip@example.com",
+    )
+    assert store._memory.add_calls[-1]["metadata"]["action"] == "approved"

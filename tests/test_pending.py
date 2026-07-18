@@ -62,6 +62,40 @@ def test_register_and_lookup_by_source(tmp_path):
     assert reg.get_pending_for_source("t2") is None
 
 
+def test_register_stores_sender_when_given(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(
+        lg_tid="gmail:t1:100", source_ref="t1", domain="mail",
+        posted_at=T0, sender="Sender@Example.com",
+    )
+    entry = reg.get_pending_for_source("t1")
+    assert entry.sender == "Sender@Example.com"
+
+
+def test_register_defaults_sender_to_none(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+    entry = reg.get_pending_for_source("t1")
+    assert entry.sender is None
+
+
+def test_legacy_entry_without_sender_field_parses_back_as_none(tmp_path):
+    """A JSON file written before ``sender`` existed must still load —
+    PendingApproval.sender defaults to None (backward compatibility)."""
+    import json
+
+    path = tmp_path / "pending.json"
+    path.write_text(json.dumps({
+        "gmail:t1:100": {
+            "source_ref": "t1", "domain": "mail",
+            "posted_at": T0.isoformat(), "status": "pending",
+        }
+    }))
+    entry = JsonPendingApprovals(str(path)).get_pending_for_source("t1")
+    assert entry is not None
+    assert entry.sender is None
+
+
 def test_resolve_removes_from_pending(tmp_path):
     reg = _registry(tmp_path)
     reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
@@ -158,6 +192,44 @@ def test_sweep_captures_each_entry_exactly_once(tmp_path):
     assert sweep_ignored(reg, store, user_id="u1", now=late) == 1
     assert sweep_ignored(reg, store, user_id="u1", now=late) == 0
     assert len(store.added) == 1
+
+
+def test_sweep_passes_sender_to_importance_profile(tmp_path):
+    from attune.orchestrator.importance import JsonImportanceProfile
+
+    reg = _registry(tmp_path)
+    store = FakeStore()
+    profile = JsonImportanceProfile(str(tmp_path / "importance.json"))
+    reg.register(
+        lg_tid="gmail:t1:100", source_ref="t1", domain="mail",
+        posted_at=T0, sender="newsletter@example.com",
+    )
+
+    swept = sweep_ignored(
+        reg, store, user_id="u1", now=T0 + timedelta(hours=49),
+        importance_profile=profile,
+    )
+
+    assert swept == 1
+    assert profile.senders() == ["newsletter@example.com"]
+
+
+def test_sweep_skips_profile_write_when_sender_absent(tmp_path):
+    from attune.orchestrator.importance import JsonImportanceProfile
+
+    reg = _registry(tmp_path)
+    store = FakeStore()
+    profile = JsonImportanceProfile(str(tmp_path / "importance.json"))
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+
+    swept = sweep_ignored(
+        reg, store, user_id="u1", now=T0 + timedelta(hours=49),
+        importance_profile=profile,
+    )
+
+    assert swept == 1          # the memory write still happens
+    assert len(store.added) == 1
+    assert profile.senders() == []  # nothing to record without a sender
 
 
 def test_sweep_respects_custom_max_age(tmp_path):

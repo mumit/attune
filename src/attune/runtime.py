@@ -131,6 +131,7 @@ def _assemble_runtime_brief(connector: Any, app: AppContext, settings: Settings)
         user_id=user,
         user_email=user if "@" in user else None,
         tz=settings.timezone,
+        importance_profile=app.importance_profile,
     )
 
 
@@ -357,17 +358,22 @@ class Runtime:
             self.gchat.post_text(self.settings.chat_default_space, text)
 
     def _post_mail_approval(
-        self, thread_id: str, draft: str, rationale: list[str] | None
+        self, thread_id: str, draft: str, rationale: list[str] | None, *,
+        title: str | None = None,
     ) -> None:
+        """``title`` overrides the card's default header — used for the
+        URGENT marker (Phase 1, G4; see dispatcher.submit_gmail_thread)
+        the same way it already is for follow-up nudges."""
         if self.settings.approval_channel == "slack" and self.slack is not None and self.slack_say is not None:
             self.slack.post_approval(
                 self.slack_say, thread_id=thread_id, domain="mail",
-                proposed_draft=draft, rationale=rationale,
+                proposed_draft=draft, rationale=rationale, title=title,
             )
         if self.settings.approval_channel == "google_chat" and self.gchat is not None and self.settings.chat_default_space:
             self.gchat.post_approval(
                 self.settings.chat_default_space, thread_id=thread_id,
                 domain="mail", proposed_draft=draft, rationale=rationale,
+                title=title,
             )
 
     def _post_calendar_approval(
@@ -645,6 +651,7 @@ class Runtime:
             max_age=timedelta(hours=self.settings.approval_ignore_hours),
             now=now,
             audit_log=self.app.audit_log,
+            importance_profile=self.app.importance_profile,
         )
 
     # --- watch/subscription renewal (testable, called on a daily schedule) --

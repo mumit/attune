@@ -130,6 +130,7 @@ Times use 24-hour `HH:MM` notation in `ATTUNE_TIMEZONE`.
 | `ATTUNE_NUDGE_MIN_AGE_DAYS` | `4` | Minimum age of an unresolved follow-up before it can be nudged. |
 | `ATTUNE_NUDGE_COOLDOWN_DAYS` | `7` | Minimum wait before repeating a nudge for the same item. Increase it if reminders feel noisy. |
 | `ATTUNE_APPROVAL_IGNORE_HOURS` | `48` | Hours after which an unanswered approval request is marked ignored. |
+| `ATTUNE_IMPORTANCE_PATH` | `ATTUNE_DATA_DIR/importance_profile.json` | Path to the deterministic per-sender importance profile (Phase 1: approve/edit/ignore/reject counts, decayed over time). Inspect and correct it with `attune importance`. |
 | `ATTUNE_CONVERSE_WINDOW_TURNS` | `10` | Maximum recent interaction turns retained in conversational context. |
 | `ATTUNE_CONVERSE_TTL_MINUTES` | `120` | Idle minutes after which conversational context expires. |
 | `ATTUNE_LOG_LEVEL` | `INFO` | Python log level. Use `DEBUG` temporarily for diagnosis; `INFO` is recommended in normal operation. |

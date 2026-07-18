@@ -157,7 +157,7 @@ class _FakeClient:
         return _Resp()
 
 
-def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None):
+def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None, importance_profile=None):
     from attune.app import AppContext
     from attune.config import Settings
     s = Settings.from_env({"ATTUNE_WORKSPACE_BACKEND": "mcp",
@@ -168,6 +168,7 @@ def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None):
         store=store or _FakeMemoryStore(),
         settings=s,
         audit_log=audit_log or _FakeAuditLog(),
+        importance_profile=importance_profile,
     )
 
 
@@ -428,7 +429,13 @@ def test_gmail_notification_records_audit_events_when_log_provided():
     assert rec["workflow"] == "draft_approve"
     assert rec["domain"] == "mail"
     assert rec["user_id"] == "me@example.com"
-    assert rec["events"] == [{"event": "drafted", "ts": "2026-07-10T00:00:00+00:00"}]
+    # A "triaged" event (Phase 1, G4) is prepended ahead of the graph's own
+    # audit_events — content-free (priority/base_priority/adjusted only).
+    assert rec["events"][0]["event"] == "triaged"
+    assert rec["events"][0]["priority"] == "routine"
+    assert rec["events"][0]["base_priority"] == "routine"
+    assert rec["events"][0]["adjusted"] is False
+    assert rec["events"][1] == {"event": "drafted", "ts": "2026-07-10T00:00:00+00:00"}
 
 
 def test_gmail_notification_no_audit_calls_when_log_absent():
@@ -673,6 +680,39 @@ def test_default_triage_gets_store_and_sender():
     assert ("reactions to mail from vendor@x.com", "me@example.com") in store.queries
 
 
+def test_default_triage_gets_importance_profile_from_app_ctx():
+    """Deliverable A: the default triage path threads app_ctx.importance_profile
+    into triage_thread, so a demoted sender's mail is skipped end-to-end."""
+
+    class _AlwaysLowProfile:
+        def __init__(self):
+            self.assessed: list[str] = []
+
+        def assess(self, sender, *, now=None):
+            from attune.orchestrator.importance import TierAssessment, ImportanceTier
+
+            self.assessed.append(sender)
+            return TierAssessment(ImportanceTier.LOW, "pinned low", True)
+
+    profile = _AlwaysLowProfile()
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: standard follow-up.")
+    app = _fake_app_ctx(graph=_FakeGraph(), client=client, importance_profile=profile)
+    approvals = []
+
+    result = handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "718"},
+        gmail_service=_FakeGmail(["t1"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=_FakeConnector({"t1": _FakeThread("t1", from_addr="newsletter@x.com")}),
+        post_approval=lambda *a: approvals.append(a),
+        user_id="me@example.com",
+    )
+
+    assert profile.assessed == ["newsletter@x.com"]
+    assert result == []       # ROUTINE demoted to NOISE -> skipped
+    assert approvals == []
+
+
 def test_noise_thread_skips_draft_and_post_approval():
     graph = _FakeGraph()
     app = _fake_app_ctx(graph=graph)
@@ -714,6 +754,151 @@ def test_urgent_thread_proceeds_to_draft():
 
     assert len(result) == 1
     assert len(approvals) == 1
+
+
+def test_urgent_card_gets_marker_title_when_post_approval_accepts_it():
+    """Deliverable B: URGENT gets a card-level marker with the model's own
+    reason, so the approval card itself communicates urgency (Phase 1, G4)."""
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    posted = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "710"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda tid, draft, rationale, *, title=None: posted.append(
+            {"tid": tid, "draft": draft, "title": title}
+        ),
+        user_id="me@example.com",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "client blocked"),
+    )
+
+    assert len(posted) == 1
+    assert posted[0]["title"] is not None
+    assert "URGENT" in posted[0]["title"]
+    assert "client blocked" in posted[0]["title"]
+    # the draft text itself is untouched — the marker never leaks into what
+    # could become the sent reply.
+    assert posted[0]["draft"] == "drafted reply"
+
+
+def test_urgent_card_marker_skipped_for_post_approval_without_title_kwarg():
+    """Back-compat: a post_approval that doesn't accept title (the plain
+    3-positional-arg contract used by direct callers/older tests) must not
+    break — the marker is simply not passed."""
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    approvals = []
+
+    result = handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "711"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda tid, draft, rationale: approvals.append((tid, draft, rationale)),
+        user_id="me@example.com",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "client blocked"),
+    )
+
+    assert len(result) == 1
+    assert len(approvals) == 1
+
+
+def test_routine_card_gets_no_urgent_marker():
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    posted = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "712"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda tid, draft, rationale, *, title=None: posted.append(title),
+        user_id="me@example.com",
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fine"),
+    )
+
+    assert posted == [None]
+
+
+def test_urgent_thread_posts_notification_to_notify_route():
+    """Deliverable B item 2: URGENT also fires a short heads-up on the
+    notification route (reusing the existing notify() channel helper) —
+    separate from, and in addition to, the approval card."""
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1", from_addr="client@x.com")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    notices = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "713"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        notify=notices.append,
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "client blocked"),
+    )
+
+    assert len(notices) == 1
+    assert "Urgent mail" in notices[0]
+    assert "client@x.com" in notices[0]
+
+
+def test_routine_thread_posts_no_urgent_notification():
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    notices = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "714"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        notify=notices.append,
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fine"),
+    )
+
+    assert notices == []
+
+
+def test_urgent_thread_carries_priority_into_graph_state():
+    """Deliverable B item 3: the effective priority + adjusted flag ride
+    into DraftApproveState as a seam for future (Phase 4) autonomy gating —
+    the graph itself does not branch on it today."""
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "715"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "client blocked"),
+    )
+
+    state = graph.calls[0]["state"]
+    assert state["priority"] == "urgent"
+    assert state["priority_adjusted"] is False
 
 
 def test_routine_thread_proceeds_to_draft():
@@ -759,6 +944,54 @@ def test_noise_thread_records_triage_audit_event():
     assert rec["domain"] == "mail"
     assert rec["events"][0]["event"] == "triaged_noise"
     assert rec["events"][0]["reason"] == "automated digest"
+
+
+def test_noise_audit_event_carries_priority_fields():
+    """Deliverable A: the triage audit event is content-free but carries
+    priority/base_priority/adjusted (Phase 1, G4) — here the injected
+    triage_fn's TriageResult is unadjusted (base defaults to priority)."""
+    audit_log = _FakeAuditLog()
+    app = _fake_app_ctx(graph=_FakeGraph(), audit_log=audit_log)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "716"},
+        gmail_service=_FakeGmail(["t1"]), watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        audit_log=audit_log,
+        triage_fn=lambda client, summary: TriageResult(Priority.NOISE, "spam"),
+    )
+
+    event = audit_log.records[0]["events"][0]
+    assert event["priority"] == "noise"
+    assert event["base_priority"] == "noise"
+    assert event["adjusted"] is False
+
+
+def test_proceed_path_audit_event_carries_priority_fields():
+    audit_log = _FakeAuditLog()
+    app = _fake_app_ctx(graph=_FakeGraph(), audit_log=audit_log)
+    connector = _FakeConnector({"t1": _FakeThread("t1")})
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "717"},
+        gmail_service=_FakeGmail(["t1"]), watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        audit_log=audit_log,
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "escalation"),
+    )
+
+    rec = audit_log.records[0]
+    assert rec["workflow"] == "draft_approve"
+    triage_event = rec["events"][0]
+    assert triage_event["event"] == "triaged"
+    assert triage_event["priority"] == "urgent"
+    assert triage_event["base_priority"] == "urgent"
+    assert triage_event["adjusted"] is False
 
 
 def test_no_audit_call_for_noise_when_log_absent():
@@ -838,11 +1071,14 @@ from attune.connectors.base import CalendarEvent
 from attune.dispatcher import handle_calendar_notification
 
 
-def _cal_event(event_id, start_offset_min, duration_min=30, summary="Meeting"):
+def _cal_event(event_id, start_offset_min, duration_min=30, summary="Meeting", attendees=None):
     base = datetime(2026, 7, 10, 9, 0, tzinfo=timezone.utc)
     start = base + timedelta(minutes=start_offset_min)
     end = start + timedelta(minutes=duration_min)
-    return CalendarEvent(event_id=event_id, summary=summary, start=start, end=end)
+    return CalendarEvent(
+        event_id=event_id, summary=summary, start=start, end=end,
+        attendees=attendees or [],
+    )
 
 
 class _FakeCalendarConnector:
@@ -1183,7 +1419,7 @@ def test_symmetric_conflict_pair_gets_one_card():
         def get_pending_for_source(self, ref):
             return registered.get(ref)
 
-        def register(self, *, lg_tid, source_ref, domain, posted_at):
+        def register(self, *, lg_tid, source_ref, domain, posted_at, sender=None):
             registered[source_ref] = object()
 
     handle_calendar_notification(
@@ -1241,6 +1477,113 @@ def test_hold_offers_capped_per_run_but_all_conflicts_notified():
     assert len(result) == 5
     assert len(notifications) == 5   # every conflict still notified
     assert len(posted) == 3          # but at most 3 cards per run
+
+
+def test_hold_offers_ranked_by_importance_before_cap_applies():
+    """Deliverable D (G2/G10): a conflict whose counterpart has a HIGH-tier
+    attendee gets a hold offer ahead of same-run NORMAL-tier conflicts, even
+    if it arrived last — the cap is applied AFTER ranking, not before. Every
+    conflict is still notified regardless of rank (that part is unchanged)."""
+    from attune.orchestrator.importance import ImportanceTier, TierAssessment
+
+    class _AttendeeTierProfile:
+        def __init__(self, tiers):
+            self._tiers = tiers
+
+        def assess(self, address, *, now=None):
+            return TierAssessment(self._tiers.get(address, ImportanceTier.NORMAL), "t", False)
+
+    events = {}
+    changed = []
+    nearby = []
+    for i in range(5):
+        # only the 5th pair's counterpart (b4) has a HIGH-tier attendee
+        attendees = ["vip@example.com"] if i == 4 else []
+        a = _cal_event(f"a{i}", 60 + i * 120, duration_min=30, summary=f"A{i}")
+        b = _cal_event(f"b{i}", 75 + i * 120, duration_min=30, summary=f"B{i}", attendees=attendees)
+        events[a.event_id] = a
+        events[b.event_id] = b
+        changed.append({"id": a.event_id})
+        nearby.extend([a, b])
+
+    class _PairConnector:
+        def get_event(self, event_id):
+            return events[event_id]
+
+        def list_events(self, *, time_min, time_max):
+            return [e for e in nearby if e.start < time_max and time_min < e.end]
+
+    sync_state = _FakeCalendarSyncState({"primary": {"sync_token": "old"}})
+    calendar_service = _FakeCalendarEventsService(pages=[
+        {"items": changed, "nextSyncToken": "new"}
+    ])
+    profile = _AttendeeTierProfile({"vip@example.com": ImportanceTier.HIGH})
+    app = _fake_app_ctx(graph=_FakeGraph(), importance_profile=profile)
+    notifications: list[str] = []
+    posted: list = []
+
+    handle_calendar_notification(
+        app, {"resource_state": "exists"},
+        calendar_service=calendar_service,
+        calendar_sync_state=sync_state,
+        connector=_PairConnector(),
+        notify=notifications.append,
+        user_id="me@example.com",
+        post_approval=lambda tid, *a, **kw: posted.append(tid),
+    )
+
+    assert len(notifications) == 5     # ranking never affects notification
+    assert len(posted) == 3            # still capped at 3
+    # the HIGH-tier conflict (a4) got a card despite arriving last...
+    assert any("a4" in tid for tid in posted)
+    # ...displacing the lowest-priority same-tier conflict that would
+    # otherwise have made the arrival-order cut (a2 pushed out by a4).
+    assert not any("a2" in tid for tid in posted)
+
+
+def test_hold_offer_ranking_falls_back_to_arrival_order_without_a_profile():
+    """No importance_profile on app_ctx -> every conflict ranks NORMAL ->
+    stable sort keeps the original arrival order (back-compat pin)."""
+    events = {}
+    changed = []
+    nearby = []
+    for i in range(5):
+        a = _cal_event(f"a{i}", 60 + i * 120, duration_min=30, summary=f"A{i}")
+        b = _cal_event(f"b{i}", 75 + i * 120, duration_min=30, summary=f"B{i}")
+        events[a.event_id] = a
+        events[b.event_id] = b
+        changed.append({"id": a.event_id})
+        nearby.extend([a, b])
+
+    class _PairConnector:
+        def get_event(self, event_id):
+            return events[event_id]
+
+        def list_events(self, *, time_min, time_max):
+            return [e for e in nearby if e.start < time_max and time_min < e.end]
+
+    sync_state = _FakeCalendarSyncState({"primary": {"sync_token": "old"}})
+    calendar_service = _FakeCalendarEventsService(pages=[
+        {"items": changed, "nextSyncToken": "new"}
+    ])
+    posted: list = []
+
+    handle_calendar_notification(
+        _fake_app_ctx(graph=_FakeGraph()), {"resource_state": "exists"},
+        calendar_service=calendar_service,
+        calendar_sync_state=sync_state,
+        connector=_PairConnector(),
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda tid, *a, **kw: posted.append(tid),
+    )
+
+    assert len(posted) == 3
+    assert any("a0" in tid for tid in posted)
+    assert any("a1" in tid for tid in posted)
+    assert any("a2" in tid for tid in posted)
+    assert not any("a3" in tid for tid in posted)
+    assert not any("a4" in tid for tid in posted)
 
 
 def test_calendar_notification_records_audit_event():
