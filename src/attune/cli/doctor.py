@@ -22,7 +22,8 @@ CheckFn = Callable[[], tuple[str, str]]
 
 # Checks that must pass before `attune run` will start (see run_cmd.py).
 FATAL_CHECKS = (
-    "installation", "env", "data-dir", "llm", "workspace", "channels"
+    "installation", "env", "data-dir", "llm", "workspace", "channels",
+    "source-channels",
 )
 
 
@@ -112,6 +113,32 @@ def check_channel_routes(settings) -> tuple[str, str]:
     if errors:
         return FAIL, "; ".join(dict.fromkeys(errors))
     return PASS, "configured routes have credentials, destinations, and allowlists"
+
+
+def check_source_channels(settings) -> tuple[str, str]:
+    """Validate opt-in Slack/Chat SOURCE ingestion (Phase 2 stage 1 of
+    ``docs/future-state.md``, gaps G1/G3): a configured source with no way
+    to read it would otherwise be a silent no-op — same fail-fast posture as
+    :func:`check_channel_routes` for the conversational routes, and
+    deliberately a SEPARATE check: source ingestion and the interaction
+    allowlists it's unrelated to (see ``ingestion/sources.py``) can be
+    configured entirely independently of each other."""
+    if not settings.slack_source_channels and not settings.chat_source_spaces:
+        return SKIP, "no Slack/Chat source channels or spaces configured"
+
+    errors: list[str] = []
+    if settings.slack_source_channels and not settings.slack_bot_token:
+        errors.append("ATTUNE_SLACK_SOURCE_CHANNELS requires SLACK_BOT_TOKEN")
+    if settings.chat_source_spaces and not settings.chat_credentials_file:
+        errors.append(
+            "ATTUNE_CHAT_SOURCE_SPACES requires ATTUNE_CHAT_CREDENTIALS_FILE"
+        )
+    if errors:
+        return FAIL, "; ".join(errors)
+    return PASS, (
+        f"{len(settings.slack_source_channels)} Slack channel(s), "
+        f"{len(settings.chat_source_spaces)} Chat space(s) configured"
+    )
 
 
 def check_audit_chain(settings) -> tuple[str, str]:
@@ -364,6 +391,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("llm", check_llm),
         Check("workspace", check_workspace),
         Check("channels", lambda: check_channel_routes(settings)),
+        Check("source-channels", lambda: check_source_channels(settings)),
         Check("audit-chain", lambda: check_audit_chain(settings)),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),

@@ -307,3 +307,271 @@ def test_unread_mail_order_falls_back_on_profile_failure():
     content = client.calls[0]["messages"][-1]["content"]
     # a profile failure leaves the connector's own order untouched
     assert content.index("Alpha") < content.index("Beta")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 stage 2 (docs/future-state.md, G11/G3): the unified "what matters
+# now" spine — deterministic cross-source correlation feeding one ranked,
+# capped, cross-source list that leads the brief. The existing sections
+# above are the drill-downs; every test above this line still exercises them
+# unchanged (the spine is additive to the untrusted block, never a
+# replacement for it).
+# ---------------------------------------------------------------------------
+
+from attune.memory.signals import ActionSignal  # noqa: E402
+from attune.orchestrator.attention import AttentionItem  # noqa: E402
+from attune.orchestrator.importance import JsonImportanceProfile  # noqa: E402
+from attune.orchestrator.triage import Priority  # noqa: E402
+
+NOW = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+
+
+def _attention_item(
+    *, source="slack", channel_ref="C1", channel_name="proj-x",
+    sender_ref="U1", sender_display="Someone", summary="hello",
+    ts=NOW, priority=Priority.ROUTINE, mentions_principal=False,
+    thread_ref=None,
+):
+    return AttentionItem(
+        source=source, channel_ref=channel_ref, channel_name=channel_name,
+        sender_ref=sender_ref, sender_display=sender_display, summary=summary,
+        ts=ts, priority=priority, mentions_principal=mentions_principal,
+        thread_ref=thread_ref,
+    )
+
+
+class _StubAttentionStore:
+    """Mimics ``JsonAttentionStore.recent``'s ``since`` filtering (offline,
+    no file I/O) so tests can check that ``assemble_brief`` actually passes
+    the documented 24h cutoff rather than merely trusting a store that
+    ignores it."""
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def recent(self, *, since=None, limit=None):
+        items = [it for it in self._items if since is None or it.ts >= since]
+        items.sort(key=lambda it: it.ts, reverse=True)
+        if limit is not None:
+            items = items[:limit]
+        return items
+
+
+# ---------------------------------------------------------------------------
+# THE PHASE 2 EXIT-CRITERION TEST
+#
+# docs/future-state.md, Phase 2 exit criteria: "a Slack message from the
+# principal's manager about a topic that also has an unanswered email
+# appears as one ranked item in the brief."
+# ---------------------------------------------------------------------------
+
+
+def test_phase2_exit_criterion_slack_and_mail_on_one_topic_are_one_spine_entry(tmp_path):
+    """A HIGH-tier sender's Slack message about "the Q3 launch plan review"
+    and an unread mail thread about "Q3 launch plan" from the same person
+    correlate into ONE spine entry (not two), naming both sources, ranked
+    first among non-urgent entries — the literal Phase 2 exit criterion."""
+    profile = JsonImportanceProfile(str(tmp_path / "importance.json"))
+    for _ in range(5):
+        profile.record_signal("priya@x.com", ActionSignal.APPROVED, ts=NOW - timedelta(days=1))
+
+    q3_mail = _thread(
+        thread_id="t-q3", subject="Q3 launch plan", snippet="deck attached",
+        from_addr="priya@x.com", last_from="priya@x.com",
+        last_at=NOW - timedelta(minutes=10),
+    )
+    other_mail = _thread(
+        thread_id="t-fac", subject="Facilities notice", snippet="garage closed",
+        from_addr="facilities@corp.com", last_from="facilities@corp.com",
+        last_at=NOW - timedelta(minutes=20),
+    )
+    q3_slack = _attention_item(
+        source="slack", channel_name="proj-x", sender_ref="U999",
+        sender_display="Priya Patel", summary="the Q3 launch plan review",
+        ts=NOW - timedelta(minutes=5),
+    )
+    urgent_incident = _attention_item(
+        source="slack", channel_name="incidents", sender_ref="U-ops",
+        sender_display="Ops Bot", summary="Production server is down, need help now",
+        ts=NOW - timedelta(minutes=2), priority=Priority.URGENT,
+    )
+
+    conn = FakeConnector(threads=[q3_mail, other_mail], events=[])
+    store = _StubAttentionStore([q3_slack, urgent_incident])
+    client = FakeClient()
+
+    brief = assemble_brief(
+        conn, client, now=NOW, importance_profile=profile, attention_store=store,
+    )
+
+    # Exactly one spine entry for the Q3 topic, not two.
+    q3_entries = [line for line in brief.spine if "Q3 launch plan" in line]
+    assert len(q3_entries) == 1
+    entry = q3_entries[0]
+
+    # The one entry names both correlated sources.
+    assert "Q3 launch plan" in entry  # mail
+    assert "Slack" in entry and "proj-x" in entry  # the correlated Slack message
+
+    # Ranked first among non-urgent entries (the urgent incident outranks
+    # everything per the sort key's first criterion, but the Q3 entry beats
+    # the unrelated NORMAL-tier facilities notice).
+    non_urgent = [line for line in brief.spine if "🔴" not in line]
+    assert non_urgent[0] is entry
+
+
+# ---------------------------------------------------------------------------
+# Ranking
+# ---------------------------------------------------------------------------
+
+
+def test_spine_urgent_attention_item_ranks_first():
+    high_mail = _thread(
+        thread_id="t1", subject="Contract redline", from_addr="vip@x.com",
+        last_from="vip@x.com", last_at=NOW - timedelta(minutes=30),
+    )
+    urgent = _attention_item(
+        summary="Production outage right now", priority=Priority.URGENT,
+        ts=NOW - timedelta(minutes=1),
+    )
+    conn = FakeConnector(threads=[high_mail], events=[])
+    store = _StubAttentionStore([urgent])
+    profile = FakeImportanceProfile({"vip@x.com": ImportanceTier.HIGH})
+    client = FakeClient()
+
+    brief = assemble_brief(
+        conn, client, now=NOW, importance_profile=profile, attention_store=store,
+    )
+
+    assert brief.spine[0].startswith("🔴")
+    assert "Production outage" in brief.spine[0]
+
+
+def test_spine_mentions_principal_ranks_above_higher_tier_without_mention():
+    high_mail = _thread(
+        thread_id="t1", subject="Contract redline", from_addr="vip@x.com",
+        last_from="vip@x.com", last_at=NOW - timedelta(minutes=30),
+    )
+    mentioned = _attention_item(
+        summary="quick question for you", mentions_principal=True,
+        ts=NOW - timedelta(minutes=1),
+    )
+    conn = FakeConnector(threads=[high_mail], events=[])
+    store = _StubAttentionStore([mentioned])
+    profile = FakeImportanceProfile({"vip@x.com": ImportanceTier.HIGH})
+    client = FakeClient()
+
+    brief = assemble_brief(
+        conn, client, now=NOW, importance_profile=profile, attention_store=store,
+    )
+
+    assert "quick question for you" in brief.spine[0]
+    assert brief.spine[0].startswith("🔴")
+
+
+def test_spine_multi_source_group_ranks_above_single_source():
+    linked_mail = _thread(
+        thread_id="t1", subject="Q3 launch plan", snippet="", from_addr="a@x.com",
+        last_from="a@x.com", last_at=NOW - timedelta(minutes=15),
+    )
+    linked_slack = _attention_item(
+        summary="Q3 launch plan review thread", sender_ref="b@x.com",
+        ts=NOW - timedelta(minutes=10),
+    )
+    solo_mail = _thread(
+        thread_id="t2", subject="Standalone unrelated topic", snippet="",
+        from_addr="c@x.com",
+        last_from="c@x.com", last_at=NOW - timedelta(minutes=5),
+    )
+    conn = FakeConnector(threads=[linked_mail, solo_mail], events=[])
+    store = _StubAttentionStore([linked_slack])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, attention_store=store)
+
+    assert "Q3 launch plan" in brief.spine[0]
+    assert "Standalone unrelated topic" in brief.spine[1]
+
+
+def test_spine_ranked_by_importance_tier():
+    threads = [
+        _thread(thread_id="t1", from_addr="low@x.com", subject="Newsletter blast",
+                snippet="", last_from="low@x.com", last_at=NOW - timedelta(hours=1)),
+        _thread(thread_id="t2", from_addr="normal@x.com", subject="FYI note here",
+                snippet="", last_from="normal@x.com", last_at=NOW - timedelta(hours=2)),
+        _thread(thread_id="t3", from_addr="high@x.com", subject="Client ask now",
+                snippet="", last_from="high@x.com", last_at=NOW - timedelta(hours=3)),
+    ]
+    conn = FakeConnector(threads=threads, events=[])
+    profile = FakeImportanceProfile({
+        "low@x.com": ImportanceTier.LOW, "high@x.com": ImportanceTier.HIGH,
+    })
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, importance_profile=profile)
+
+    assert "Client ask now" in brief.spine[0]
+    assert "FYI note here" in brief.spine[1]
+    assert "Newsletter blast" in brief.spine[2]
+
+
+_DISTINCT_WORDS = [
+    "falcon", "heron", "otter", "walrus", "badger", "condor", "marlin",
+    "toucan", "beetle", "gibbon", "lizard", "weasel",
+]
+
+
+def test_spine_capped_at_ten_entries():
+    # Each subject is a single word, all different, sharing no significant
+    # token with any other — nothing here should correlate into one group.
+    threads = [
+        _thread(
+            thread_id=f"t{i}", from_addr=f"sender{i}@x.com",
+            subject=_DISTINCT_WORDS[i].capitalize(), snippet="",
+            last_from=f"sender{i}@x.com", last_at=NOW - timedelta(minutes=i),
+        )
+        for i in range(12)
+    ]
+    conn = FakeConnector(threads=threads, events=[])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW)
+
+    assert brief.unread_count == 12  # nothing dropped from the drill-down
+    assert len(brief.spine) == 10  # SPINE_CAP
+
+
+def test_attention_items_older_than_24h_excluded_from_spine():
+    stale = _attention_item(
+        summary="Stale ancient topic mention", ts=NOW - timedelta(hours=25),
+    )
+    fresh = _attention_item(
+        summary="Fresh recent topic mention", ts=NOW - timedelta(hours=1),
+    )
+    conn = FakeConnector(threads=[], events=[])
+    store = _StubAttentionStore([stale, fresh])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, attention_store=store)
+
+    joined = "\n".join(brief.spine)
+    assert "Fresh recent topic mention" in joined
+    assert "Stale ancient topic mention" not in joined
+
+
+def test_spine_store_less_backward_compatible():
+    """No ``attention_store`` (the CLI plain-preview path, by design): the
+    spine is built from mail + calendar alone, and every legacy section
+    (asserted by the tests above this section, all still passing unchanged)
+    keeps its exact pre-stage-2 rendering."""
+    conn = FakeConnector(
+        threads=[_thread(subject="Contract redline", from_addr="legal@acme.com")],
+        events=[_event(summary="Falcon sync")],
+    )
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW)
+
+    assert brief.spine  # still leads with something sensible
+    joined = "\n".join(brief.spine)
+    assert "Contract redline" in joined or "Falcon sync" in joined

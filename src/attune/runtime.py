@@ -49,6 +49,7 @@ from .dispatcher import (
     handle_chat_message,
     handle_gmail_notification,
     handle_slack_message,
+    handle_source_message,
     submit_calendar_event,
     submit_gmail_thread,
 )
@@ -61,15 +62,21 @@ from .ingestion import (
     JsonGmailWatchState,
     SqliteRetryQueue,
     JsonWorkspacePollState,
+    SourceMessage,
     calendar_poll_notification,
+    chat_message_to_source,
     ensure_calendar_watch,
     ensure_subscription,
     ensure_watch,
+    poll_chat_source,
     poll_chat_step,
     poll_gmail_step,
+    poll_slack_source,
     poll_workspace_connector,
+    slack_message_to_source,
 )
 from .orchestrator import (
+    JsonAttentionStore,
     JsonNudgeState,
     JsonPendingApprovals,
     make_connector_apply_fn,
@@ -113,16 +120,27 @@ def _meaningful_poll_activity(summary: dict[str, str]) -> str | None:
             continue
         if source == "workspace" and result == "0 thread(s), 0 event(s)":
             continue
+        if source in ("slack_source", "chat_source") and result == "0 message(s)":
+            continue
         active.append(f"{source}={result}")
     return ", ".join(active) or None
 
 
-def _assemble_runtime_brief(connector: Any, app: AppContext, settings: Settings):
+def _assemble_runtime_brief(
+    connector: Any, app: AppContext, settings: Settings, *, attention_store: Any = None
+):
     """The one place brief-assembly arguments are derived from settings, used
     by every surface that produces a brief (scheduled post, Slack DM, Chat
     message). ``user_email`` only when user_id is a real address — the quiet-
     thread section needs something to match the last sender against, and the
-    Gmail "me" alias matches nothing."""
+    Gmail "me" alias matches nothing.
+
+    ``attention_store`` (Phase 2 stage 2, G11) threads the recent-attention
+    seam into the brief's unified spine, mirroring how ``importance_profile``
+    is already threaded here. Only ``Runtime.post_brief`` (the daily posted
+    brief) passes one; every caller that goes through ``Runtime`` directly
+    (Slack/Chat "give me the brief" requests) gets it too since they all call
+    this same helper — see each call site below."""
     user = settings.user_id
     return assemble_brief(
         connector,
@@ -132,6 +150,7 @@ def _assemble_runtime_brief(connector: Any, app: AppContext, settings: Settings)
         user_email=user if "@" in user else None,
         tz=settings.timezone,
         importance_profile=app.importance_profile,
+        attention_store=attention_store,
     )
 
 
@@ -201,6 +220,11 @@ class Runtime:
     nudge_state: Any = None          # orchestrator.followup.NudgeState
     retry_queue: Any = None          # ingestion.retry_queue.SqliteRetryQueue
     connector_poll_state: Any = None
+    # Phase 2 stage 1 (docs/future-state.md, G1/G3): opt-in Slack channels /
+    # Chat spaces attended as signal sources — see ingestion/sources.py.
+    attention_store: Any = None      # orchestrator.attention.AttentionStore
+    source_poll_state: Any = None    # ingestion.state.JsonChatPollState (shared, key-prefixed)
+    slack_client: Any = None         # raw slack_sdk.WebClient, for conversations_history
 
     # --- event processing (testable) ---------------------------------------
 
@@ -232,7 +256,8 @@ class Runtime:
 
         def _brief_fn() -> str:
             return _assemble_runtime_brief(
-                self.connector, self.app, self.settings
+                self.connector, self.app, self.settings,
+                attention_store=self.attention_store,
             ).summary
 
         handle_chat_message(
@@ -346,6 +371,89 @@ class Runtime:
             return
         self.process_chat_interaction(event)
 
+    def _dispatch_source_message(self, message: SourceMessage) -> None:
+        """Bind one decoded :class:`~ingestion.sources.SourceMessage` to
+        ``dispatcher.handle_source_message`` (Phase 2 stage 1, G1/G3) — the
+        ``dispatch`` callable ``poll_slack_source``/``poll_chat_source``
+        invoke per message, so a failure here (exception) is what triggers
+        their durable-retry enqueue rather than losing the message."""
+        handle_source_message(
+            self.app,
+            message,
+            attention_store=self.attention_store,
+            user_id=self.settings.user_id,
+            audit_log=self.app.audit_log,
+            notify=self._notify_all,
+        )
+
+    def poll_sources_once(self) -> dict[str, str]:
+        """One poll tick over every configured Slack/Chat SOURCE (Phase 2
+        stage 1). Separate from ``poll_once`` so it can also run on its own
+        schedule under push ingestion — Pub/Sub has no source-specific feed
+        for arbitrary Slack channels or Chat spaces (Slack sources need
+        channel history, not Socket Mode events; Chat sources need messages
+        from spaces the Workspace Events subscription was never registered
+        for), so sources are polling-only regardless of
+        ``ATTUNE_INGESTION_MODE`` — see ``ingestion/sources.py``.
+
+        Each channel/space is isolated: one failing source must not starve
+        the others, same posture as ``poll_once``'s per-source isolation.
+        """
+        summary: dict[str, str] = {}
+        if (
+            self.settings.slack_source_channels
+            and self.slack_client is not None
+            and self.source_poll_state is not None
+        ):
+            total = 0
+            errors: list[str] = []
+            for channel_id in sorted(self.settings.slack_source_channels):
+                try:
+                    total += poll_slack_source(
+                        self.slack_client, channel_id, self.source_poll_state,
+                        dispatch=self._dispatch_source_message,
+                        retry_queue=self.retry_queue,
+                        principal_member_ids=self.settings.slack_allowed_users,
+                    )
+                except Exception as exc:  # noqa: BLE001 — per-channel isolation
+                    errors.append(type(exc).__name__)
+                    logger.warning(
+                        "poll slack source %s failed (%s)",
+                        channel_id, type(exc).__name__,
+                    )
+            status = f"{total} message(s)"
+            if errors:
+                status += f", {len(errors)} error(s)"
+            summary["slack_source"] = status
+
+        if (
+            self.settings.chat_source_spaces
+            and self.chat_service is not None
+            and self.source_poll_state is not None
+        ):
+            total = 0
+            errors = []
+            for space in sorted(self.settings.chat_source_spaces):
+                try:
+                    total += poll_chat_source(
+                        self.chat_service, space, self.source_poll_state,
+                        dispatch=self._dispatch_source_message,
+                        retry_queue=self.retry_queue,
+                        principal_member_ids=self.settings.chat_allowed_users,
+                    )
+                except Exception as exc:  # noqa: BLE001 — per-source isolation
+                    errors.append(type(exc).__name__)
+                    logger.warning(
+                        "poll chat source %s failed (%s)",
+                        space, type(exc).__name__,
+                    )
+            status = f"{total} message(s)"
+            if errors:
+                status += f", {len(errors)} error(s)"
+            summary["chat_source"] = status
+
+        return summary
+
     def _notify_all(self, text: str) -> None:
         """Plain-text heads-up to every configured channel (used for
         conflict notices and ACT_NOTIFY after-the-fact notifications)."""
@@ -424,6 +532,26 @@ class Runtime:
                         post_approval=self._post_calendar_approval,
                         pending=self.pending,
                     )
+                elif item.kind == "slack_source":
+                    message = slack_message_to_source(
+                        item.payload["raw"],
+                        channel_id=item.payload["channel_id"],
+                        channel_name=item.payload.get("channel_name"),
+                        principal_member_ids=frozenset(
+                            item.payload.get("principal_member_ids", [])
+                        ),
+                    )
+                    self._dispatch_source_message(message)
+                elif item.kind == "chat_source":
+                    message = chat_message_to_source(
+                        item.payload["message"],
+                        space=item.payload["space"],
+                        channel_name=item.payload.get("channel_name"),
+                        principal_member_ids=frozenset(
+                            item.payload.get("principal_member_ids", [])
+                        ),
+                    )
+                    self._dispatch_source_message(message)
                 else:
                     raise ValueError(f"unknown retry kind: {item.kind}")
             except Exception as exc:  # noqa: BLE001 — stays queued
@@ -437,7 +565,10 @@ class Runtime:
         """Assemble one morning brief and post it to every configured channel
         (the Phase-0 deliverable — until the scheduler, nothing ever called
         this). Returns the Brief for callers that want the text."""
-        brief = _assemble_runtime_brief(self.connector, self.app, self.settings)
+        brief = _assemble_runtime_brief(
+            self.connector, self.app, self.settings,
+            attention_store=self.attention_store,
+        )
         if "slack" in self.settings.brief_channels and self.slack is not None and self.slack_say is not None:
             self.slack.post_brief(self.slack_say, brief)
         if "google_chat" in self.settings.brief_channels and self.gchat is not None and self.settings.chat_default_space:
@@ -718,7 +849,11 @@ class Runtime:
                         post_approval=self._post_calendar_approval,
                         pending=self.pending,
                     )
-                return {"workspace": f"{len(threads)} thread(s), {len(events)} event(s)"}
+                workspace_summary = {
+                    "workspace": f"{len(threads)} thread(s), {len(events)} event(s)"
+                }
+                workspace_summary.update(self.poll_sources_once())
+                return workspace_summary
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "connector poll failed (%s at %s)",
@@ -795,6 +930,7 @@ class Runtime:
                     type(exc).__name__, _exception_location(exc),
                 )
 
+        summary.update(self.poll_sources_once())
         return summary
 
     # --- supervised pull-loop machinery (testable per-message core) ---------
@@ -992,6 +1128,43 @@ class Runtime:
                 logger.info(beat)
             time.sleep(self.settings.poll_seconds)
 
+    def run_source_poll_loop(self) -> None:  # pragma: no cover - thin timer shell
+        """Tick ``poll_sources_once`` on its own timer under PUSH ingestion.
+
+        Poll mode already covers sources for free through ``run_poll_loop``
+        (``poll_once`` calls ``poll_sources_once`` itself). Under
+        ``google_pubsub`` mode, Gmail/Calendar/interaction-Chat get their own
+        pull loops, but sources have no Pub/Sub feed to pull from (see
+        ``poll_sources_once``'s docstring) — this loop is what keeps them
+        attended even when the rest of the deployment is push-based, so
+        "polling-only for now" (``docs/future-state.md`` Phase 2 stage 1)
+        doesn't silently mean "off" outside poll mode."""
+        backoff = BACKOFF_INITIAL_SECONDS
+        stats = LoopStats("source_poll")
+        logger.info(
+            "source poll loop started (every %ss)", self.settings.poll_seconds
+        )
+        while True:
+            try:
+                summary = self.poll_sources_once()
+                activity = _meaningful_poll_activity(summary)
+                if activity:
+                    logger.info("source poll activity: %s", activity)
+                stats.record(ok=True)
+                backoff = BACKOFF_INITIAL_SECONDS
+            except Exception as exc:  # noqa: BLE001
+                stats.record(ok=False)
+                logger.warning(
+                    "source poll tick failed (%s); backing off %.0fs",
+                    type(exc).__name__, backoff,
+                )
+                time.sleep(backoff)
+                backoff = next_backoff(backoff)
+            beat = stats.maybe_beat()
+            if beat:
+                logger.info(beat)
+            time.sleep(self.settings.poll_seconds)
+
     def run(self) -> None:  # pragma: no cover
         """Start the always-on process.
 
@@ -1023,6 +1196,8 @@ class Runtime:
                 threading.Thread(target=self.run_chat_pubsub_loop, daemon=True).start()
             if self.settings.calendar_pubsub_subscription:
                 threading.Thread(target=self.run_calendar_pubsub_loop, daemon=True).start()
+            if self.settings.slack_source_channels or self.settings.chat_source_spaces:
+                threading.Thread(target=self.run_source_poll_loop, daemon=True).start()
 
         if self.settings.chat_interaction_pubsub_subscription and self.gchat is not None:
             threading.Thread(
@@ -1064,6 +1239,9 @@ def build_runtime(
     nudge_state: Any = None,
     retry_queue: Any = None,
     connector_poll_state: Any = None,
+    attention_store: Any = None,
+    source_poll_state: Any = None,
+    slack_client: Any = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -1181,7 +1359,8 @@ def build_runtime(
                 user_id=settings.user_id,
                 post_text=post_text,
                 brief_fn=lambda: _assemble_runtime_brief(
-                    resolved_connector, resolved_app, settings
+                    resolved_connector, resolved_app, settings,
+                    attention_store=resolved_attention_store,
                 ).summary,
                 conversation=resolved_conversation,
                 memory_ui=_memory_ui,
@@ -1242,8 +1421,13 @@ def build_runtime(
     if (
         resolved_chat_service is None
         and resolved_credentials is not None
-        and settings.ingestion_mode == IngestionMode.POLL
-        and settings.chat_default_space
+        and (
+            (settings.ingestion_mode == IngestionMode.POLL and settings.chat_default_space)
+            # Chat SOURCE spaces (Phase 2 stage 1, G1/G3) are polling-only
+            # regardless of ingestion mode (see Runtime.poll_sources_once),
+            # so this service is also needed under google_pubsub.
+            or settings.chat_source_spaces
+        )
     ):  # pragma: no cover - requires live creds
         from googleapiclient.discovery import build as _build
 
@@ -1257,6 +1441,21 @@ def build_runtime(
     resolved_connector_poll_state = connector_poll_state or JsonWorkspacePollState(
         settings.connector_poll_state_path
     )
+    resolved_attention_store = attention_store or JsonAttentionStore(
+        settings.attention_path
+    )
+    resolved_source_poll_state = source_poll_state or JsonChatPollState(
+        settings.source_poll_state_path
+    )
+    resolved_slack_client = slack_client
+    if (
+        resolved_slack_client is None
+        and settings.slack_source_channels
+        and settings.slack_bot_token
+    ):  # pragma: no cover - requires slack_sdk + a live token
+        from slack_sdk import WebClient
+
+        resolved_slack_client = WebClient(token=settings.slack_bot_token)
 
     return Runtime(
         app=resolved_app,
@@ -1280,4 +1479,7 @@ def build_runtime(
         nudge_state=resolved_nudge_state,
         retry_queue=resolved_retry_queue,
         connector_poll_state=resolved_connector_poll_state,
+        attention_store=resolved_attention_store,
+        source_poll_state=resolved_source_poll_state,
+        slack_client=resolved_slack_client,
     )

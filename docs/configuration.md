@@ -117,6 +117,22 @@ the [user journey](user-journey.md).
 | `ATTUNE_INTERACTION_CHANNELS` | inferred from configured destinations when absent | Surfaces that accept commands, messages, and approval actions. Enabling one also requires its allowlist and interaction transport. |
 | `ATTUNE_ACK_DESTINATION_VISIBILITY` | `0` | Safety acknowledgement for proactive messages to any Google Chat space or a non-DM Slack destination. Keep `0` for an owner Slack DM; set `1` only after checking destination membership and content exposure. |
 
+## Attended sources (Phase 2 stage 1)
+
+Opt-in per channel/space. A configured source is attended EXACTLY like a
+Gmail thread — polled, triaged, and (if not NOISE) recorded into the
+attention store — never a command surface and never a reply path, regardless
+of who sent the message. This is unrelated to `ATTUNE_SLACK_ALLOWED_USERS` /
+`ATTUNE_CHAT_ALLOWED_USERS`, which govern who may command Attune over a DM.
+`attune doctor` fails fast if either variable below is set without the
+matching read credential.
+
+| Variable | Default | Purpose and suggested value |
+|---|---|---|
+| `ATTUNE_SLACK_SOURCE_CHANNELS` | blank | Comma-separated Slack channel IDs (`C…`/`G…`) to attend as signal sources. Requires `SLACK_BOT_TOKEN`. Blank disables the feature. |
+| `ATTUNE_CHAT_SOURCE_SPACES` | blank | Comma-separated Google Chat space resource names (`spaces/AAAA`) to attend as signal sources. Requires `ATTUNE_CHAT_CREDENTIALS_FILE`. Blank disables the feature. |
+| `ATTUNE_ATTENTION_PATH` | `ATTUNE_DATA_DIR/attention.json` | Path to the bounded attention store (recent ROUTINE/URGENT source items; 200-item cap, 7-day retention) — the seam a future unified brief reads from. |
+
 ## Schedule, conversation, and logging
 
 Times use 24-hour `HH:MM` notation in `ATTUNE_TIMEZONE`.

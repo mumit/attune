@@ -24,6 +24,18 @@ no credential details — both are injected by the caller.
     ``SlackChannel``'s registered handler before this is ever called (there is
     no separate ingestion path for Slack the way Gmail/Chat need Pub/Sub).
 
+``handle_source_message``
+    Phase 2 stage 1 (``docs/future-state.md``, gaps G1/G3): triages one
+    :class:`~ingestion.sources.SourceMessage` from an opt-in ATTENDED Slack
+    channel or Chat space — exactly like a Gmail thread, never like a
+    ``handle_slack_message``/``handle_chat_message`` command. Every message
+    here is untrusted signal regardless of sender, including the principal's
+    own account; the interaction allowlists that gate DM commands are
+    unrelated to this path. NOISE is dropped; ROUTINE/URGENT are recorded
+    into the attention store, and URGENT additionally sends a notification-
+    route heads-up. There is no draft, no reply, no write of any kind here —
+    see the function's own docstring for the design-rule citation.
+
 ``handle_calendar_notification``
     Reconciles a decoded Calendar webhook notification, checks each changed
     event for a scheduling conflict, and calls ``notify`` with a plain-text
@@ -60,8 +72,10 @@ from .ingestion.chat_events import ChatMessage, process_chat_event
 from .ingestion.chat_interactions import decode_chat_interaction
 from .ingestion.gmail_history import process_notification
 from .ingestion.gmail_watch import WatchState
+from .ingestion.sources import SourceMessage
 from .interaction import InteractionIntent, InteractionPlan, plan_interaction
 from .llm import Task, create_chat_completion, model_for
+from .orchestrator.attention import AttentionItem
 from .orchestrator.draft_approve import apply_confirmation
 from .orchestrator.importance import ImportanceTier
 from .orchestrator.scheduling import ConflictResult, detect_conflict, propose_free_slots
@@ -397,6 +411,129 @@ def submit_gmail_thread(
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
         )
     return lg_tid
+
+
+def _source_incoming_summary(message: SourceMessage) -> str:
+    """Frame one source message for ``triage_thread``'s untrusted blob.
+
+    Everything here — including the Source/Channel/Sender header, whose
+    display values are provider data — lands inside ``triage_thread``'s
+    ``"[UNTRUSTED mail]\\n{incoming_summary}"`` wrapper. Provider facts that
+    trusted code computed from event metadata (``mentions_principal``) are
+    deliberately NOT rendered into this blob: a sender could forge such a
+    line by simply typing the same sentence into their message. They travel
+    via ``triage_thread``'s ``trusted_context`` parameter into the system
+    prompt instead, where message content cannot reach (see
+    ``handle_source_message``). The structural backstop is unchanged either
+    way: this path has no write or reply surface, so a successful prompt
+    injection can only ever skew a priority classification."""
+    lines = [
+        f"Source: {message.source}",
+        f"Channel: {message.channel_name}",
+        f"Sender: {message.sender_display}",
+        "",
+        message.text,
+    ]
+    return "\n".join(lines)
+
+
+def handle_source_message(
+    app_ctx: AppContext,
+    message: SourceMessage,
+    *,
+    attention_store: Any,
+    user_id: str,
+    audit_log: AuditLog | None = None,
+    triage_fn: Callable[[Any, str], TriageResult] | None = None,
+    notify: Callable[[str], None] | None = None,
+) -> TriageResult | None:
+    """Triage one Slack/Chat SOURCE message (Phase 2 stage 1, G1/G3).
+
+    This is the one place a message from an ATTENDED source (see
+    ``ingestion/sources.py``'s module docstring for the opt-in config and the
+    critical allowlist-vs-source distinction) touches the orchestrator. It
+    triages exactly like ``submit_gmail_thread`` — same ``triage_thread``
+    call, same deterministic importance-profile adjustment via
+    ``sender_ref``, same content-free audit fields
+    (``_triage_audit_fields``) — and then does ONE of two things:
+
+    - **NOISE**: audited as ``source_triaged_noise`` and dropped. Nothing is
+      stored, nothing is notified.
+    - **ROUTINE or URGENT**: audited as ``source_triaged`` and recorded into
+      ``attention_store`` (an ``orchestrator.attention.AttentionStore`` — the
+      seam Phase 2's later unified brief will read from). URGENT
+      additionally calls ``notify(...)`` with a plain-text heads-up, reusing
+      the same notification-route seam Phase 1 wired for URGENT Gmail
+      threads (``submit_gmail_thread``).
+
+    **There is no draft-approve workflow, no reply, and no write path of any
+    kind here** — design rule 3 (autonomy is earned, never inferred from
+    content) and rule 5 (a source message is a signal, not a command) both
+    apply: nothing in ``message.text`` can ever cause Attune to act or
+    respond, regardless of triage outcome, sender, or whether it mentions
+    the principal. Compare ``handle_slack_message``/``handle_chat_message``,
+    which DO respond — those paths only ever fire for the principal's own
+    allowlisted DM, never for a source channel/space.
+    """
+    triage_fn = triage_fn or _default_triage
+    incoming_summary = _source_incoming_summary(message)
+    trusted_context = (
+        "This message @mentions the principal directly (provider metadata)."
+        if message.mentions_principal
+        else None
+    )
+    if triage_fn is _default_triage:
+        triage = triage_thread(
+            app_ctx.client, incoming_summary,
+            store=app_ctx.store, sender=message.sender_ref, user_id=user_id,
+            importance_profile=app_ctx.importance_profile,
+            trusted_context=trusted_context,
+        )
+    else:
+        triage = triage_fn(app_ctx.client, incoming_summary)
+
+    ref = f"source:{message.source}:{message.channel_ref}:{message.ts.isoformat()}"
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=ref,
+            workflow="source_triage",
+            events=[{
+                "event": (
+                    "source_triaged_noise" if triage.priority == Priority.NOISE
+                    else "source_triaged"
+                ),
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "source": message.source,
+                "channel_ref": message.channel_ref,
+                **_triage_audit_fields(triage),
+            }],
+            domain=message.source,
+            user_id=user_id,
+        )
+
+    if triage.priority == Priority.NOISE:
+        return triage
+
+    attention_store.add(AttentionItem(
+        source=message.source,
+        channel_ref=message.channel_ref,
+        channel_name=message.channel_name,
+        sender_ref=message.sender_ref,
+        sender_display=message.sender_display,
+        summary=message.text,
+        ts=message.ts,
+        priority=triage.priority,
+        mentions_principal=message.mentions_principal,
+        thread_ref=message.thread_ref,
+    ))
+
+    if triage.priority == Priority.URGENT and notify is not None:
+        notify(
+            f"Urgent {message.source} message from {message.sender_display} "
+            f"in {message.channel_name}."
+        )
+
+    return triage
 
 
 def handle_calendar_notification(

@@ -98,3 +98,60 @@ def test_visibility_ack_allows_explicit_shared_destination():
 def test_destination_ids_reject_display_names(env, message):
     with pytest.raises(ValueError, match=message):
         Settings.from_env(env).validate_proactive_destinations()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 stage 1 — attended sources (docs/future-state.md, G1/G3)
+# ---------------------------------------------------------------------------
+
+
+def test_source_channels_and_spaces_default_off():
+    s = Settings.from_env({})
+    assert s.slack_source_channels == frozenset()
+    assert s.chat_source_spaces == frozenset()
+    assert s.attention_path == "./attention.json"
+
+
+def test_source_channels_and_spaces_parsed_from_csv():
+    s = Settings.from_env({
+        "ATTUNE_SLACK_SOURCE_CHANNELS": "C111,G222",
+        "ATTUNE_CHAT_SOURCE_SPACES": "spaces/AAAA,spaces/BBBB",
+    })
+    assert s.slack_source_channels == frozenset({"C111", "G222"})
+    assert s.chat_source_spaces == frozenset({"spaces/AAAA", "spaces/BBBB"})
+
+
+def test_attention_path_derives_from_data_dir():
+    s = Settings.from_env({"ATTUNE_DATA_DIR": "/var/lib/adc"})
+    assert s.attention_path == "/var/lib/adc/attention.json"
+    assert s.source_poll_state_path == "/var/lib/adc/source_poll_state.json"
+
+
+def test_attention_path_explicit_override():
+    s = Settings.from_env({
+        "ATTUNE_DATA_DIR": "/var/lib/adc",
+        "ATTUNE_ATTENTION_PATH": "/fast-disk/attention.json",
+    })
+    assert s.attention_path == "/fast-disk/attention.json"
+
+
+def test_validate_rejects_malformed_slack_source_channel():
+    s = Settings.from_env({"ATTUNE_SLACK_SOURCE_CHANNELS": "not-a-channel-id"})
+    with pytest.raises(ValueError, match="ATTUNE_SLACK_SOURCE_CHANNELS"):
+        s.validate()
+
+
+def test_validate_rejects_malformed_chat_source_space():
+    s = Settings.from_env({"ATTUNE_CHAT_SOURCE_SPACES": "AAAA"})
+    with pytest.raises(ValueError, match="ATTUNE_CHAT_SOURCE_SPACES"):
+        s.validate()
+
+
+def test_validate_accepts_well_formed_source_config():
+    s = Settings.from_env({
+        "ATTUNE_SLACK_SOURCE_CHANNELS": "C111,G222",
+        "ATTUNE_CHAT_SOURCE_SPACES": "spaces/AAAA",
+        "SLACK_BOT_TOKEN": "xoxb-...",
+        "ATTUNE_CHAT_CREDENTIALS_FILE": "/path/chat-creds.json",
+    })
+    s.validate()  # must not raise

@@ -16,6 +16,7 @@ from attune.cli.doctor import (
     _qdrant_ready_url,
     check_audit_chain,
     check_channel_routes,
+    check_source_channels,
     run_doctor,
 )
 from attune.cli.init_cmd import run_init
@@ -299,6 +300,79 @@ def test_channel_routes_accept_complete_google_chat_only_configuration():
     })
 
     assert check_channel_routes(settings)[0] == PASS
+
+
+# ---------------------------------------------------------------------------
+# source-channels (Phase 2 stage 1, docs/future-state.md; G1/G3)
+# ---------------------------------------------------------------------------
+
+
+def test_source_channels_skip_when_none_configured():
+    from attune.config import Settings
+
+    assert check_source_channels(Settings.from_env({}))[0] == SKIP
+
+
+def test_source_channels_fail_without_slack_bot_token():
+    from attune.config import Settings
+
+    settings = Settings.from_env({"ATTUNE_SLACK_SOURCE_CHANNELS": "C111"})
+    status, detail = check_source_channels(settings)
+    assert status == FAIL
+    assert "SLACK_BOT_TOKEN" in detail
+
+
+def test_source_channels_fail_without_chat_credentials():
+    from attune.config import Settings
+
+    settings = Settings.from_env({"ATTUNE_CHAT_SOURCE_SPACES": "spaces/AAAA"})
+    status, detail = check_source_channels(settings)
+    assert status == FAIL
+    assert "ATTUNE_CHAT_CREDENTIALS_FILE" in detail
+
+
+def test_source_channels_fail_reports_both_missing_credentials():
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_SLACK_SOURCE_CHANNELS": "C111",
+        "ATTUNE_CHAT_SOURCE_SPACES": "spaces/AAAA",
+    })
+    status, detail = check_source_channels(settings)
+    assert status == FAIL
+    assert "SLACK_BOT_TOKEN" in detail
+    assert "ATTUNE_CHAT_CREDENTIALS_FILE" in detail
+
+
+def test_source_channels_pass_with_full_configuration():
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_SLACK_SOURCE_CHANNELS": "C111",
+        "ATTUNE_CHAT_SOURCE_SPACES": "spaces/AAAA",
+        "SLACK_BOT_TOKEN": "xoxb-...",
+        "ATTUNE_CHAT_CREDENTIALS_FILE": "/secrets/chat.json",
+    })
+    assert check_source_channels(settings)[0] == PASS
+
+
+def test_source_channels_unrelated_to_interaction_allowlists():
+    """A source channel needs no interaction allowlist at all — the whole
+    point of the distinction (see ingestion/sources.py's module docstring)."""
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_SLACK_SOURCE_CHANNELS": "C111",
+        "SLACK_BOT_TOKEN": "xoxb-...",
+        # No ATTUNE_SLACK_ALLOWED_USERS, no interaction channels configured.
+    })
+    assert check_source_channels(settings)[0] == PASS
+
+
+def test_source_channels_is_a_fatal_check():
+    from attune.cli.doctor import FATAL_CHECKS
+
+    assert "source-channels" in FATAL_CHECKS
 
 
 # ---------------------------------------------------------------------------

@@ -10,12 +10,24 @@ graph, and it fails safe: without an explicit per-(action,domain) grant, the
 graph always routes through human approval.
 """
 
+from .attention import (
+    AttentionItem,
+    AttentionStore,
+    JsonAttentionStore,
+)
 from .autonomy import (
     Action,
     Domain,
     PermissionMatrix,
     Rung,
     default_matrix,
+)
+from .correlation import (
+    CorrelatableItem,
+    correlate,
+    from_attention_item,
+    from_calendar_event,
+    from_mail_thread,
 )
 from .state import DraftApproveState
 from .draft_approve import (
@@ -91,4 +103,12 @@ __all__ = [
     "triage_thread",
     "ConflictResult",
     "detect_conflict",
+    "AttentionItem",
+    "AttentionStore",
+    "JsonAttentionStore",
+    "CorrelatableItem",
+    "correlate",
+    "from_attention_item",
+    "from_calendar_event",
+    "from_mail_thread",
 ]

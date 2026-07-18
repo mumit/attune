@@ -50,9 +50,14 @@ def _render(brief: Any) -> str:
     lines = [
         f"Morning brief — {brief.unread_count} unread · "
         f"{brief.event_count} events (times in {brief.timezone})",
-        "",
-        brief.summary,
     ]
+    # Phase 2 stage 2 (docs/future-state.md, G11): the brief leads with the
+    # ranked cross-source spine; the model summary and per-source drill-downs
+    # (waiting-on here, the rest inside the summary/channel post) follow.
+    if brief.spine:
+        lines += ["", "What matters now:"]
+        lines += [f"  {line}" for line in brief.spine]
+    lines += ["", brief.summary]
     if brief.waiting_on:
         lines += ["", "Waiting on:"]
         lines += [f"  - {t.subject}" for t in brief.waiting_on]

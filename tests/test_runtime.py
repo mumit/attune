@@ -1574,3 +1574,277 @@ def test_process_chat_interaction_ignores_edit():
 
     assert graph.calls == []
     assert gchat.texts == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 stage 1 — attended Slack channels / Chat spaces (docs/future-state.md,
+# gaps G1/G3). All offline: fake Slack/Chat clients, in-memory state/stores.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAttentionStore:
+    def __init__(self):
+        self.items: list = []
+
+    def add(self, item) -> None:
+        self.items.append(item)
+
+    def recent(self, *, since=None, limit=None):
+        return list(self.items)
+
+
+class _DictSourcePollState:
+    def __init__(self, data=None):
+        self.data = data or {}
+
+    def get(self, key):
+        return self.data.get(key)
+
+    def put(self, key, *, last_seen):
+        self.data[key] = {"last_seen": last_seen}
+
+
+class _FakeSourceSlackClient:
+    def __init__(self, messages):
+        self._messages = messages
+
+    def conversations_history(self, **kwargs):
+        return {"messages": self._messages}
+
+
+class _FakeSourceChatService:
+    def __init__(self, messages):
+        self._messages = messages
+
+    def spaces(self):
+        outer = self
+
+        class _Messages:
+            def list(self, **kwargs):
+                class _Req:
+                    def execute(self_):
+                        return {"messages": outer._messages}
+                return _Req()
+
+        class _Spaces:
+            def messages(self):
+                return _Messages()
+
+        return _Spaces()
+
+
+def test_build_runtime_defaults_attention_and_source_poll_state(tmp_path):
+    settings = _settings(ATTUNE_DATA_DIR=str(tmp_path))
+    from attune.orchestrator.attention import JsonAttentionStore
+
+    # build_runtime itself resolves defaults from the settings it receives.
+    fresh = build_runtime(
+        settings, app=_app_ctx(), connector=_FakeConnector(),
+        gmail_service=_FakeGmailService(), watch_state=_FakeWatchState(),
+        chat_state=_FakeChatState(), chat_events_service=object(),
+        calendar_service=object(), pending=_FakePending(),
+        conversation=_FakeConversation(), retry_queue=_FakeRetryQueue(),
+    )
+    assert isinstance(fresh.attention_store, JsonAttentionStore)
+    assert fresh.attention_store._path == settings.attention_path
+    assert fresh.source_poll_state is not None
+
+
+def test_build_runtime_slack_client_none_without_source_channels():
+    runtime = _runtime()
+    assert runtime.slack_client is None
+
+
+def test_build_runtime_builds_slack_client_when_source_channels_configured():
+    """Exercised with a fake slack_sdk module (like the googleapiclient fakes
+    elsewhere in this file) so no real network/token is needed."""
+    fake_module = ModuleType("slack_sdk")
+    built = []
+
+    class _FakeWebClient:
+        def __init__(self, token):
+            built.append(token)
+
+    fake_module.WebClient = _FakeWebClient
+
+    settings = _settings(
+        ATTUNE_SLACK_SOURCE_CHANNELS="C111",
+        SLACK_BOT_TOKEN="xoxb-test",
+    )
+    with patch.dict(sys.modules, {"slack_sdk": fake_module}):
+        runtime = build_runtime(
+            settings, app=_app_ctx(), connector=_FakeConnector(),
+            gmail_service=_FakeGmailService(), watch_state=_FakeWatchState(),
+            chat_state=_FakeChatState(), chat_events_service=object(),
+            calendar_service=object(), pending=_FakePending(),
+            conversation=_FakeConversation(), retry_queue=_FakeRetryQueue(),
+        )
+
+    assert built == ["xoxb-test"]
+    assert isinstance(runtime.slack_client, _FakeWebClient)
+
+
+def test_build_runtime_broadens_chat_service_for_source_spaces_under_pubsub():
+    """Chat source spaces are polling-only regardless of ingestion mode
+    (Runtime.poll_sources_once's docstring) — the chat_service used to read
+    them must still get built even when ATTUNE_INGESTION_MODE=google_pubsub
+    and no interaction chat_default_space is configured."""
+    fake_discovery = ModuleType("googleapiclient.discovery")
+    built = []
+    fake_discovery.build = lambda *a, **kw: built.append(a) or object()
+    fake_googleapiclient = ModuleType("googleapiclient")
+    fake_googleapiclient.discovery = fake_discovery
+
+    settings = _settings(
+        ATTUNE_CHAT_SOURCE_SPACES="spaces/AAAA",
+        ATTUNE_INGESTION_MODE="google_pubsub",
+        ATTUNE_GMAIL_PUBSUB_TOPIC="projects/p/topics/gmail",
+        ATTUNE_GMAIL_PUBSUB_SUBSCRIPTION="projects/p/subscriptions/gmail",
+    )
+    with patch.dict(
+        sys.modules,
+        {"googleapiclient": fake_googleapiclient, "googleapiclient.discovery": fake_discovery},
+    ):
+        runtime = build_runtime(
+            settings, app=_app_ctx(), connector=_FakeConnector(),
+            gmail_service=_FakeGmailService(), watch_state=_FakeWatchState(),
+            chat_state=_FakeChatState(), chat_events_service=object(),
+            calendar_service=object(), pending=_FakePending(),
+            conversation=_FakeConversation(), retry_queue=_FakeRetryQueue(),
+            credentials=object(),
+        )
+
+    assert runtime.chat_service is not None
+    assert len(built) == 1
+    assert built[0] == ("chat", "v1")
+
+
+def test_poll_sources_once_dispatches_slack_source_messages():
+    slack = _FakeSlackChannel()
+    attention_store = _FakeAttentionStore()
+    poll_state = _DictSourcePollState({"slack:C1": {"last_seen": "100.0"}})
+    runtime = _runtime(
+        slack=slack, slack_say=lambda **kw: None,
+        attention_store=attention_store, source_poll_state=poll_state,
+        slack_client=_FakeSourceSlackClient(
+            [{"user": "U9", "text": "urgent: prod is down", "ts": "200.0"}]
+        ),
+    )
+    runtime.settings = _settings(
+        ATTUNE_SLACK_SOURCE_CHANNELS="C1", SLACK_BOT_TOKEN="xoxb-t",
+    )
+
+    summary = runtime.poll_sources_once()
+
+    assert summary["slack_source"] == "1 message(s)"
+    assert poll_state.get("slack:C1")["last_seen"] == "200.0"
+
+
+def test_poll_sources_once_dispatches_chat_source_messages():
+    gchat = _FakeGChatChannel()
+    attention_store = _FakeAttentionStore()
+    poll_state = _DictSourcePollState({"chat:spaces/SRC": {"last_seen": "2026-07-10T12:00:00Z"}})
+    runtime = _runtime(
+        gchat=gchat,
+        attention_store=attention_store, source_poll_state=poll_state,
+        chat_service=_FakeSourceChatService([
+            {
+                "sender": {"name": "users/9", "type": "HUMAN"},
+                "text": "can someone review this",
+                "createTime": "2026-07-10T12:00:01Z",
+            }
+        ]),
+    )
+    runtime.settings = _settings(
+        ATTUNE_CHAT_SOURCE_SPACES="spaces/SRC",
+        ATTUNE_CHAT_CREDENTIALS_FILE="/secrets/chat.json",
+    )
+
+    summary = runtime.poll_sources_once()
+
+    assert summary["chat_source"] == "1 message(s)"
+    assert poll_state.get("chat:spaces/SRC")["last_seen"] == "2026-07-10T12:00:01Z"
+
+
+def test_poll_sources_once_isolates_per_channel_failures():
+    class _BrokenSlackClient:
+        def conversations_history(self, **kwargs):
+            raise RuntimeError("network blip")
+
+    poll_state = _DictSourcePollState({
+        "slack:BAD": {"last_seen": "100.0"},
+        "slack:GOOD": {"last_seen": "100.0"},
+    })
+
+    class _MixedSlackClient:
+        def conversations_history(self, *, channel, **kwargs):
+            if channel == "BAD":
+                raise RuntimeError("network blip")
+            return {"messages": []}
+
+    runtime = _runtime(
+        source_poll_state=poll_state, slack_client=_MixedSlackClient(),
+    )
+    runtime.settings = _settings(
+        ATTUNE_SLACK_SOURCE_CHANNELS="BAD,GOOD", SLACK_BOT_TOKEN="xoxb-t",
+    )
+
+    summary = runtime.poll_sources_once()
+    assert "1 error(s)" in summary["slack_source"]
+
+
+def test_poll_once_includes_source_summary_when_configured():
+    poll_state = _DictSourcePollState({"chat:spaces/SRC": {"last_seen": "2026-07-10T12:00:00Z"}})
+    runtime = _runtime(
+        source_poll_state=poll_state,
+        chat_service=_FakeSourceChatService([]),
+    )
+    runtime.settings = _settings(ATTUNE_CHAT_SOURCE_SPACES="spaces/SRC")
+
+    summary = runtime.poll_once()
+
+    assert summary["chat_source"] == "0 message(s)"
+
+
+def test_drain_source_retries_replays_slack_source(tmp_path):
+    from attune.ingestion import SqliteRetryQueue
+
+    queue = SqliteRetryQueue(str(tmp_path / "retries.db"))
+    queue.enqueue(
+        "slack_source", "C1:100.0",
+        {
+            "channel_id": "C1", "channel_name": "C1",
+            "raw": {"user": "U9", "text": "urgent thing", "ts": "100.0"},
+            "principal_member_ids": [],
+        },
+        error="Timeout",
+    )
+    attention_store = _FakeAttentionStore()
+    runtime = _runtime(retry_queue=queue, attention_store=attention_store)
+
+    assert runtime.drain_source_retries() == 1
+    assert queue.pending() == []
+
+
+def test_drain_source_retries_replays_chat_source(tmp_path):
+    from attune.ingestion import SqliteRetryQueue
+
+    queue = SqliteRetryQueue(str(tmp_path / "retries.db"))
+    queue.enqueue(
+        "chat_source", "spaces/SRC:m1",
+        {
+            "space": "spaces/SRC", "channel_name": "spaces/SRC",
+            "message": {
+                "sender": {"name": "users/9", "type": "HUMAN"},
+                "text": "urgent thing",
+                "createTime": "2026-07-10T12:00:01Z",
+            },
+            "principal_member_ids": [],
+        },
+        error="Timeout",
+    )
+    attention_store = _FakeAttentionStore()
+    runtime = _runtime(retry_queue=queue, attention_store=attention_store)
+
+    assert runtime.drain_source_retries() == 1
+    assert queue.pending() == []
