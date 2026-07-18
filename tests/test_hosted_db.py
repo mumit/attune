@@ -130,7 +130,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0038_slack_channel_installation.sql"
+    assert migrations[-1].name == "0039_slack_reinstall_installation_reuse.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -236,6 +236,12 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in slack
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_message_executor" in slack
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_lifecycle_executor" in slack
+    reinstall = sql_by_name["0039_slack_reinstall_installation_reuse.sql"]
+    assert "CREATE OR REPLACE FUNCTION attune.consume_slack_install" in reinstall
+    assert "v_installation_id := v_existing.installation_id" in reinstall
+    assert "SET LOCAL ROLE attune_channel_link_executor" in reinstall
+    assert "RESET ROLE" in reinstall
+    assert "TO attune_channel_broker" in reinstall
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -372,7 +378,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 38
+    assert apply_migrations(admin) == 39
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -3888,14 +3894,18 @@ def test_slack_install_delivery_conversation_and_lifecycle_are_function_only(
         candidate_id=UUID("30000000-0000-4000-8000-000000000202"),
     )
     assert resolved == installed.destination_id
+    # A real Slack reinstall reconnects the same workspace via the same DM,
+    # so the installation/actor/destination reference hashes are identical to
+    # the first install. That is what previously collided with the unique
+    # tenant/provider/reference constraint on attune.installations.
     reinstalled = broker.consume(
         state_hash=hashlib.sha256(reinstall_secret).digest(),
         claim_hash=reinstall_claim,
         owner_tenant_id=CHANNEL_TENANT,
         owner_principal_id=CHANNEL_PRINCIPAL,
-        installation_ref_hash=hashlib.sha256(b"slack-team-two").digest(),
+        installation_ref_hash=installation_hash,
         actor_ref_hash=actor_hash,
-        destination_ref_hash=hashlib.sha256(b"slack-owner-dm-two").digest(),
+        destination_ref_hash=destination_hash,
         destination_id=resolved,
         encrypted_route=envelope(b"R"),
         encrypted_token=envelope(b"T"),
