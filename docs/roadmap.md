@@ -1,5 +1,11 @@
 # Roadmap
 
+A full 2026-07-18 review of the implementation is recorded in
+[`current-state.md`](current-state.md); its
+[gap analysis](gap-analysis.md) and the phased
+[future-state plan](future-state.md) add the product-intelligence dimension
+to the hosted assurance sequence below.
+
 ## Current foundation
 
 - Attune package and CLI naming
