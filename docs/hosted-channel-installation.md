@@ -575,3 +575,48 @@ Remaining before this channel's gate is called complete: the live disconnect
 / fail-closed refusal / reinstall / delivery-test / conversation-recovery
 regression (implemented and exercised for Google Chat, not yet exercised live
 for Slack), and the mutation-refusal probe.
+
+The live Slack lifecycle regression completed on 2026-07-17/18 UTC. Owner
+disconnect first correctly refused twice with `409 recent_authentication_required`
+until fresh web authentication, a state the setup page's shared status line
+now surfaces; disconnect then succeeded. A subsequent owner DM was refused
+fail-closed before dispatch with the content-free "Slack owner destination is
+unavailable" response. Reinstall then exposed a real defect: `consume_slack_install`
+unconditionally inserted a new `installations` row and collided with the
+tenant/provider/reference unique constraint, where the Google Chat relink path
+instead reuses and reactivates the revoked installation row. Migration 0039
+(commit `c0d99bb`) corrected the reuse branch to match, and the real-PostgreSQL
+journey now reinstalls with identical provider references, reproducing the
+collision test-first before the fix. Execution
+`attune-development-database-migrate-8t5jp` applied it from immutable migrator
+digest
+`sha256:389c6afcc38e4340006a7f87b8138f27ad89c124a0b7b379e6b0e747cfea716a`. A
+fresh install, the fixed delivery test, and a live conversation then completed,
+closing the regression.
+
+The same window shipped two responsiveness changes. Measured end-to-end reply
+latency had been roughly 15 seconds -- ingress acceptance and reply delivery
+were each sub-second, with the remainder spent in the scale-to-zero worker
+path and two sequential model calls. Commit `af9037c` and migration 0040 added
+the private broker's audited, idempotent "Working on it." acknowledgment
+described above; execution `attune-development-database-migrate-cj9qg` applied
+0040 from immutable migrator digest
+`sha256:1effc96e9e021a7fa6c6f196da9ba08fd4c6631f73a07bad281ab247632850c7`.
+Separately, commit `e850857` runs the deterministic keyword router before the
+classify model task, calling it only for ambiguous requests and removing one
+model round-trip from typical Gmail, Calendar, brief, and mutation-refusal
+turns on both channels.
+
+Deployed digests and revisions after this work: channel-broker
+`sha256:59f1572962eca471aeb83479f306ee3600e87298dc6a2728b13a10c993afbb6b`
+(revision `00012-b2k`), slack-ingress
+`sha256:1eeb53c0376bdbabb5b9c71e63038b30588324442b45cedbfaecf2910dbf795c`
+(`00003-bk9`), and worker
+`sha256:0fb3ac70a2e7f138ca6678fe8083c29ac516ccc4cd2b5c25de9d00d004eb7223`
+(`00015-h8n`). All Terraform plans converged empty. Warm minimum instances for
+the worker and model gateway remain a deliberate development cost decision, so
+scale-to-zero cold starts remain the dominant residual latency.
+
+Still outstanding for this channel: the explicit mutation-refusal probe over
+Slack. The refusal path is covered by tests and was exercised live over Google
+Chat, but not yet live over Slack.

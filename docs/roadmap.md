@@ -138,7 +138,17 @@ per producer kind; and internet egress exists only on a dedicated,
 subnet-scoped Cloud NAT for Slack's ordinary internet API, while every other
 workload keeps the no-NAT fail-closed posture. The live disconnect /
 fail-closed refusal / reinstall / delivery-test / conversation-recovery
-regression, exercised for Google Chat, remains outstanding for Slack.
+regression, exercised for Google Chat, has now also been exercised live for
+Slack (2026-07-17/18), including a reinstall defect it found and fixed:
+`consume_slack_install` collided with the tenant/provider/reference unique
+constraint instead of reusing the revoked installation row, corrected by
+migration 0039. The same window shipped the audited, idempotent "Working on
+it." acknowledgment for Slack (migration 0040) and a deterministic-first
+conversation routing change that skips the classify model call for
+unambiguous requests on both channels, together cutting measured end-to-end
+reply latency from roughly 15 seconds. The explicit mutation-refusal probe
+over Slack remains outstanding; that path is covered by tests and was
+exercised live over Google Chat.
 
 The first customer-export authority slice is implemented and deployed:
 four server-defined scopes, recent-session binding, idempotent request,

@@ -114,7 +114,10 @@ The initial read limits are:
   characters; message bodies are not returned in the initial hosted release;
 - a Calendar window no longer than 31 days and at most 25 events;
 - at most six recent conversation turns, each truncated before model use;
-- one classifier call and one answer call per accepted message; and
+- a deterministic keyword router resolves brief, Gmail, Calendar, and write
+  requests without a model call; only an ambiguous request falls through to
+  one classifier call, and every accepted message gets exactly one answer
+  call; and
 - one outbound Chat response no longer than the provider limit configured in
   code.
 
