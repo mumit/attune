@@ -14,9 +14,14 @@ After guided setup starts, the owner sees two bounded checkbox groups:
 - **Morning briefs:** Google Chat and/or Slack.
 
 At least one purpose must have a channel. The choices may differ—for example,
-conversation in Google Chat and briefs in Slack. A browser-only option is not
-offered because the hosted product does not yet have a conversational web
-surface; presenting one would promise a route that does not exist.
+conversation in Google Chat and briefs in Slack. This ceremony offers no
+browser option because the browser is not one of these optional peer
+channels: it is the product's own front door. A signed-in owner with an
+active policy and an active Google connector can already converse directly
+on the setup page, with no installation, preference, or destination step of
+its own (see [`hosted-conversation.md`](hosted-conversation.md#the-browser-surface)).
+Slack and Google Chat remain the two channels this preference chooses
+between for interaction and brief delivery away from the browser.
 
 Saving changes marks the channel step `authorized`, not `validated`. The page
 states that app installation, owner/destination binding, verified ingress, and

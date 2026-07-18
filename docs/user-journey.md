@@ -147,6 +147,16 @@ connector is verified instead of silently starting a replacement. A temporary
 verification failure does not discard or replace the connector; a later
 signed-in visit safely retries the fixed check.
 
+Once Workspace is connected and the read-only policy is active, the setup
+page itself shows a bounded conversation panel: a signed-in owner can type a
+message and converse with Attune right there, with no channel to install and
+no destination to verify first. There is no push delivery -- the browser
+polls for the stored assistant turn every two seconds, with a working
+indicator and a note if a reply is taking a while. This is the same durable
+acceptance, dispatch, and bounded read-only execution that Slack and Google
+Chat use, just without a channel broker in between; see
+[`hosted-conversation.md`](hosted-conversation.md#the-browser-surface).
+
 ## 1. Start the day
 
 At `ATTUNE_BRIEF_TIME`, Attune reads recent unread Gmail, today's Calendar,

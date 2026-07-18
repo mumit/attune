@@ -2,6 +2,41 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-18 — The authenticated session is the web conversation route
+
+- The browser conversation surface has no installation, preference, or
+  destination ceremony, and no channel-broker involvement. An ordinary
+  signed-in owner session with an active policy and an active Google
+  connector is the whole authority; migration 0041's
+  `attune.accept_web_owner_message` re-checks exactly that at acceptance
+  time, and the shared bounded read-only conversation executor re-checks it
+  again at execution time.
+- The stored assistant turn is the delivery. There is no destination row, no
+  reply broker, and no push: the browser polls `GET /v1/conversation/turns`
+  for canonical turns. This was selected over inventing a destination/route
+  concept for a channel that already has a trusted, authenticated transport.
+- This was selected over folding the browser into the Slack/Google Chat
+  channel-preference ceremony, which would have implied an installation and
+  destination step the browser does not need and cannot outgrow.
+
+## 2026-07-18 — Web conversation acceptance uses ordinary proofs, not recency
+
+- `POST /v1/conversation/messages` requires ordinary session, same-origin,
+  and CSRF proofs, the same bar as any authenticated read. It deliberately
+  does not require the ten-minute recent-authentication window reserved for
+  destructive or authority-changing ceremonies (policy confirmation, channel
+  disconnection, export authorization): sending a bounded, read-only-executed
+  conversation message is not one of those.
+- Edge throttling is sized accordingly: Cloud Armor priority `893` allows 60
+  requests per 60 seconds per IP over the exact message and turn-poll paths,
+  versus the 10-per-60-second rules on the onboarding ceremonies, because a
+  browser tab polling turns every two seconds must not trip the same limit
+  built for an infrequent, deliberate action.
+- This was selected over reusing the recent-authentication gate outright,
+  which would have forced a re-authentication prompt into an ordinary
+  conversation loop for no additional protection, since the executor itself
+  is bounded and read-only regardless of session age.
+
 ## 2026-07 — Hosted channel choice is not channel authority
 
 - Owners choose Google Chat, Slack, or both independently for interaction and

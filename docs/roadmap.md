@@ -150,6 +150,33 @@ reply latency from roughly 15 seconds. The explicit mutation-refusal probe
 over Slack remains outstanding; that path is covered by tests and was
 exercised live over Google Chat.
 
+The browser is now live in development as the product's own conversation
+front door, distinct from the optional Slack/Google Chat peer channels: a
+signed-in owner with an active policy and an active Google connector
+converses directly from the setup page, with no installation, preference, or
+destination ceremony and no channel-broker involvement. Migration 0041 added
+the tenant-scoped `attune.accept_web_owner_message` acceptance function,
+owned by the memberless `attune_web_message_executor`, with per-turn
+idempotency and a new `channel_message` audit producer kind; the control
+plane's `POST /v1/conversation/messages` and `GET /v1/conversation/turns`
+routes require ordinary session, same-origin, and CSRF proofs rather than the
+ten-minute recency reserved for destructive ceremonies. The worker executes
+`channel.web.converse` on the shared bounded read-only conversation executor
+with no reply broker; the stored assistant turn is the delivery, and the
+setup-page panel polls for it every two seconds. Both the edge gate
+(`enable_hosted_web_conversation`, Cloud Armor priority `893`, 60 requests per
+60 seconds) and the runtime gate (`enable_web_conversation`) were exercised
+in development: migration 0041 applied and verified 41 migrations, the
+control plane and worker deployed at fixed digests, both conversation paths
+returned an application-level 401 unauthenticated, a near-miss path stayed
+edge-denied 403, all Terraform plans converged empty, and the owner exercised
+a live browser conversation end to end. With this, Google Chat, Slack, and
+the browser -- all three planned front doors -- now share the same durable
+acceptance, dispatch, bounded read-only execution, and audit spine. Full
+route shapes, the acceptance ceremony, and rollout evidence are in
+[`hosted-conversation.md`](hosted-conversation.md#the-browser-surface); the
+two rollout decisions are recorded in [`decisions.md`](decisions.md).
+
 The first customer-export authority slice is implemented and deployed:
 four server-defined scopes, recent-session binding, idempotent request,
 one-use executor claim, atomic audit evidence, and function-only mutation. It

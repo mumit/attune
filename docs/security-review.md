@@ -39,7 +39,7 @@ accepts only Google-signed ID tokens from the exact listed caller identities.
 
 | Service | Entry module | Exposure | Holds | Callers |
 |---|---|---|---|---|
-| Control plane | `control_plane_app` | Public (session UI/API) | Session/CSRF secrets handling, no provider tokens | Browsers |
+| Control plane | `control_plane_app` | Public (session UI/API) | Session/CSRF secrets handling, no provider tokens; behind `hosted_web_conversation_enabled`, accepts owner conversation messages and serves canonical turn polls | Browsers |
 | Identity sign-in page | `web/hosted-identity` | Public | Nothing persistent (provider credential kept in browser memory only) | Browsers |
 | Google Chat ingress | `google_chat_ingress_app` | Public (exact path, Cloud Armor) | Nothing; verifies Google bearer + audience | Google Chat |
 | Slack ingress | `slack_ingress_app` | Public (exact path) | Slack signing secret only | Slack |
@@ -157,6 +157,31 @@ bounded Gmail/Calendar reads under per-attempt credential intents,
 authoritative server time injected outside untrusted content, and reply
 delivery only by canonical destination and job references.
 
+## 5a. Browser conversation surface (web)
+
+The browser is a third front door with no installation, preference, or
+destination ceremony and no channel-broker involvement at all -- the
+authenticated session is the whole route. Migration 0041's
+`attune.accept_web_owner_message` (owned by the memberless
+`attune_web_message_executor`, `EXECUTE`-only to the control plane) re-checks
+session, principal, active policy, and active Google connector in one
+transaction, deduplicates per turn, and creates the fixed
+`channel.web.converse` job. Audit attribution runs through a new
+`channel_message` producer kind checked against `session_user` membership;
+dispatch intents stay attributed `ingress`, widened to accept the control
+plane calling through the executor.
+
+`POST /v1/conversation/messages` and `GET /v1/conversation/turns` require
+ordinary session, same-origin, and CSRF proofs -- not the ten-minute recency
+reserved for destructive ceremonies -- and sit behind Cloud Armor priority
+`893`, rate-limited for a browser tab polling every two seconds rather than
+an infrequent ceremony. The worker executes `channel.web.converse` on the
+same shared bounded read-only conversation executor Google Chat and Slack
+use, but calls no reply broker: the stored assistant turn is itself the
+delivery, and the browser polls for it. See
+[`hosted-conversation.md`](hosted-conversation.md#the-browser-surface) and
+[`decisions.md`](decisions.md) for the full contract and rollout evidence.
+
 ## 6. Identity, sessions, and onboarding
 
 - Sign-in uses Google Identity Platform for identity only; Workspace consent
@@ -201,7 +226,9 @@ Reviewers must distinguish three states, tracked in
 - **Deployed in development with live evidence:** identity, Workspace
   connect/verify/disconnect, onboarding and R0 policy ceremonies, the full
   Google Chat journey (link, delivery test, replay-safe conversation,
-  disconnect/relink), protocol retention, customer export end-to-end. The
+  disconnect/relink), protocol retention, customer export end-to-end, and the
+  browser conversation surface (session-authenticated acceptance, dispatch,
+  bounded read-only execution, and polling delivery). The
   rollout notes in the `hosted-*` documents record immutable image digests,
   migration executions, negative probes, and empty Terraform plans for each
   activation.
