@@ -38,13 +38,24 @@ const policyConfirm = document.querySelector("#policy-confirm");
 const customerExports = document.querySelector("#customer-exports");
 const customerExportCreate = document.querySelector("#customer-export-create");
 const customerExportList = document.querySelector("#customer-export-list");
+const conversationPanel = document.querySelector("#conversation-panel");
+const conversationMessages = document.querySelector("#conversation-messages");
+const conversationIndicator = document.querySelector("#conversation-indicator");
+const conversationInput = document.querySelector("#conversation-input");
+const conversationSend = document.querySelector("#conversation-send");
 const sessionSignOut = document.querySelector("#session-sign-out");
 const status = document.querySelector("#status");
 let hostedPolicyAvailable = false;
 let hostedChannelsAvailable = false;
 let hostedChannelSetupAvailable = false;
 let hostedChannelLifecycleAvailable = false;
+let hostedWebConversationAvailable = false;
 let customerExportsAvailable = false;
+let conversationHighestSequence = 0;
+let conversationPollTimer = null;
+let conversationPendingSince = null;
+let conversationSending = false;
+let conversationPollFailures = 0;
 
 function show(message, kind = "info") {
   status.textContent = message;
@@ -276,6 +287,7 @@ async function showOnboarding(session) {
   hostedChannelsAvailable = session.hosted_channels === "available";
   hostedChannelSetupAvailable = session.hosted_channel_setup === "available";
   hostedChannelLifecycleAvailable = session.hosted_channel_lifecycle === "available";
+  hostedWebConversationAvailable = session.hosted_web_conversation === "available";
   customerExportsAvailable = session.customer_exports === "available";
   const state = await json(
     await fetch("/v1/onboarding", {
@@ -292,6 +304,13 @@ async function showOnboarding(session) {
   }
   if (hostedChannelSetupAvailable && state.status !== "not_started") {
     await showChannelInstallations();
+  }
+  if (
+    hostedWebConversationAvailable &&
+    session.google_workspace_oauth === "connected" &&
+    state.steps?.policy === "validated"
+  ) {
+    await startConversation();
   }
   if (customerExportsAvailable) await showCustomerExports();
 }
@@ -426,6 +445,137 @@ async function downloadCustomerExport(exportId, button) {
     );
   }
 }
+
+function appendConversationTurns(turns) {
+  for (const turn of turns) {
+    const element = document.createElement("p");
+    element.className = "conversation-turn";
+    element.dataset.actor = turn.actor;
+    element.textContent = turn.text;
+    conversationMessages.appendChild(element);
+    if (turn.sequence > conversationHighestSequence) {
+      conversationHighestSequence = turn.sequence;
+    }
+  }
+  if (turns.length) {
+    conversationMessages.scrollTop = conversationMessages.scrollHeight;
+  }
+}
+
+function setConversationPending(pending) {
+  if (pending) {
+    if (!conversationPendingSince) conversationPendingSince = Date.now();
+    const stalled = Date.now() - conversationPendingSince > 60_000;
+    conversationIndicator.hidden = false;
+    conversationIndicator.textContent = stalled
+      ? "Attune is still working on this…"
+      : "Attune is working…";
+  } else {
+    conversationPendingSince = null;
+    conversationIndicator.hidden = true;
+    conversationIndicator.textContent = "";
+  }
+}
+
+function stopConversationPolling() {
+  if (conversationPollTimer) {
+    window.clearTimeout(conversationPollTimer);
+    conversationPollTimer = null;
+  }
+}
+
+async function pollConversationTurns() {
+  stopConversationPolling();
+  let pending = false;
+  try {
+    const payload = await json(
+      await fetch(
+        `/v1/conversation/turns?after=${encodeURIComponent(conversationHighestSequence)}`,
+        {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        },
+      ),
+    );
+    appendConversationTurns(payload.turns || []);
+    pending = Boolean(payload.pending);
+    conversationPollFailures = 0;
+  } catch (error) {
+    if (error.status === 401) {
+      show("Sign out and sign in again to keep conversing with Attune.", "pending");
+      return;
+    }
+    conversationPollFailures += 1;
+    if (conversationPollFailures >= 5) {
+      setConversationPending(false);
+      show("Attune's replies could not be checked. Please try again shortly.", "error");
+      return;
+    }
+    pending = true;
+  }
+  setConversationPending(pending);
+  if (pending) {
+    conversationPollTimer = window.setTimeout(pollConversationTurns, 2000);
+  }
+}
+
+async function startConversation() {
+  conversationPanel.hidden = false;
+  conversationHighestSequence = 0;
+  conversationMessages.replaceChildren();
+  await pollConversationTurns();
+}
+
+async function sendConversationMessage() {
+  const text = conversationInput.value;
+  if (!text.trim() || text.length > 8_000) {
+    show("Type a message between 1 and 8000 characters.", "pending");
+    return;
+  }
+  if (conversationSending) return;
+  conversationSending = true;
+  conversationSend.disabled = true;
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    const accepted = await json(
+      await fetch("/v1/conversation/messages", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({ schema_version: 1, text }),
+      }),
+    );
+    appendConversationTurns([
+      { sequence: accepted.user_sequence, actor: "user", text },
+    ]);
+    conversationInput.value = "";
+    setConversationPending(true);
+    stopConversationPolling();
+    await pollConversationTurns();
+  } catch (error) {
+    if (error.status === 401) {
+      show("Sign out and sign in again to keep conversing with Attune.", "pending");
+    } else {
+      show("The message could not be sent. Please try again.", "error");
+    }
+  } finally {
+    conversationSending = false;
+    conversationSend.disabled = false;
+  }
+}
+
+conversationSend.addEventListener("click", sendConversationMessage);
+conversationInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendConversationMessage();
+  }
+});
 
 function selectedChannels(purpose) {
   return [...channelPreferences.querySelectorAll(`[data-purpose="${purpose}"]:checked`)]

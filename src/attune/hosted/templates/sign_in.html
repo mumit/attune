@@ -114,6 +114,23 @@
           Enable read-only policy
         </button>
       </section>
+      <section id="conversation-panel" hidden>
+        <h2>Converse with Attune</h2>
+        <p>
+          Send Attune a message and it will reply here. Conversations are
+          read-only until write capabilities are enabled.
+        </p>
+        <div id="conversation-messages" role="log" aria-live="polite"></div>
+        <p id="conversation-indicator" aria-live="polite" hidden></p>
+        <label for="conversation-input">Message Attune</label>
+        <textarea
+          id="conversation-input"
+          rows="3"
+          maxlength="8000"
+          placeholder="Type a message. Press Enter to send, Shift+Enter for a new line."
+        ></textarea>
+        <button id="conversation-send" type="button">Send</button>
+      </section>
       <section id="customer-exports" hidden>
         <h2>Export your Attune data</h2>
         <p>

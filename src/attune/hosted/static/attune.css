@@ -226,3 +226,73 @@ button.danger {
   color: #526058;
   line-height: 1.55;
 }
+
+#conversation-panel {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgb(23 33 28 / 10%);
+}
+
+#conversation-panel p {
+  color: #526058;
+  line-height: 1.55;
+}
+
+#conversation-panel label {
+  display: block;
+  margin: 1rem 0 0.4rem;
+  color: #244c35;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+#conversation-messages {
+  max-height: 18rem;
+  overflow-y: auto;
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid rgb(23 33 28 / 14%);
+  border-radius: 0.75rem;
+  background: rgb(255 255 252 / 60%);
+}
+
+.conversation-turn {
+  margin: 0.4rem 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.conversation-turn[data-actor="user"] {
+  text-align: right;
+  color: #17211c;
+}
+
+.conversation-turn[data-actor="assistant"] {
+  text-align: left;
+  color: #244c35;
+}
+
+#conversation-indicator {
+  margin: 0.5rem 0 0;
+  color: #735918;
+  font-size: 0.85rem;
+}
+
+#conversation-input {
+  width: 100%;
+  border: 1px solid rgb(23 33 28 / 22%);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  font: inherit;
+  resize: vertical;
+}
+
+#conversation-input:focus-visible {
+  outline: 3px solid #9bc7a8;
+  outline-offset: 2px;
+}
+
+#conversation-send {
+  margin-top: 0.75rem;
+}
