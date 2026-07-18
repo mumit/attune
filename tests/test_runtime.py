@@ -1650,6 +1650,84 @@ def test_build_runtime_defaults_attention_and_source_poll_state(tmp_path):
     assert fresh.source_poll_state is not None
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 stage 3 (docs/future-state.md, G11) — the "since yesterday" brief
+# snapshot: constructed like every other JSON state store, but threaded ONLY
+# on the daily posted-brief path.
+# ---------------------------------------------------------------------------
+
+
+def test_build_runtime_defaults_brief_snapshot(tmp_path):
+    settings = _settings(ATTUNE_DATA_DIR=str(tmp_path))
+    from attune.brief import JsonBriefSnapshot
+
+    fresh = build_runtime(
+        settings, app=_app_ctx(), connector=_FakeConnector(),
+        gmail_service=_FakeGmailService(), watch_state=_FakeWatchState(),
+        chat_state=_FakeChatState(), chat_events_service=object(),
+        calendar_service=object(), pending=_FakePending(),
+        conversation=_FakeConversation(), retry_queue=_FakeRetryQueue(),
+    )
+    assert isinstance(fresh.brief_snapshot, JsonBriefSnapshot)
+    assert fresh.brief_snapshot._path == settings.brief_snapshot_path
+
+
+def test_post_brief_threads_pending_and_snapshot_store():
+    """Only ``post_brief`` (the daily posted brief) may write the "since
+    yesterday" snapshot — an on-demand Slack/Chat brief request must not
+    keep resetting "yesterday" to "an hour ago" (docs/decisions.md)."""
+    from attune.brief import BriefSnapshot
+
+    class _RecordingSnapshotStore:
+        def __init__(self):
+            self.saved = []
+
+        def load(self):
+            return None
+
+        def save(self, snapshot):
+            self.saved.append(snapshot)
+
+    snapshot_store = _RecordingSnapshotStore()
+    pending = _FakePending()
+    runtime = _runtime(
+        slack=_FakeSlackChannel(), slack_say=lambda **kw: None,
+        pending=pending, brief_snapshot=snapshot_store,
+    )
+
+    runtime.post_brief()
+
+    assert len(snapshot_store.saved) == 1
+    assert isinstance(snapshot_store.saved[0], BriefSnapshot)
+
+
+def test_chat_brief_request_never_touches_the_snapshot_store():
+    class _RecordingSnapshotStore:
+        def __init__(self):
+            self.saved = []
+
+        def load(self):
+            return None
+
+        def save(self, snapshot):
+            self.saved.append(snapshot)
+
+    snapshot_store = _RecordingSnapshotStore()
+    gchat = _FakeGChatChannel()
+    connector = _FakeConnector(threads={"t1": _FakeThread()}, events=[])
+    client = _FakeClient(reply="Two unread, one meeting.")
+    runtime = _runtime(
+        gchat=gchat, connector=connector, app=_app_ctx(client=client),
+        brief_snapshot=snapshot_store,
+    )
+    runtime.settings = _settings(ATTUNE_CHAT_SPACE="spaces/ABC")
+
+    runtime.process_chat_event(_chat_event("give me the morning brief"))
+
+    assert gchat.texts  # the on-demand brief still worked
+    assert snapshot_store.saved == []
+
+
 def test_build_runtime_slack_client_none_without_source_channels():
     runtime = _runtime()
     assert runtime.slack_client is None

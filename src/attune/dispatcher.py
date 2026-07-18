@@ -65,7 +65,7 @@ from typing import Any, Callable
 
 from .app import AppContext
 from .audit.log import AuditLog
-from .connectors.base import WorkspaceConnector
+from .connectors.base import DEFAULT_NOISE_LABEL, WorkspaceConnector
 from .ingestion.calendar_sync import SyncExpired, SyncState, full_calendar_sync
 from .ingestion.calendar_sync import process_calendar_notification as _reconcile_calendar
 from .ingestion.chat_events import ChatMessage, process_chat_event
@@ -76,6 +76,7 @@ from .ingestion.sources import SourceMessage
 from .interaction import InteractionIntent, InteractionPlan, plan_interaction
 from .llm import Task, create_chat_completion, model_for
 from .orchestrator.attention import AttentionItem
+from .orchestrator.autonomy import Action, Domain, Rung
 from .orchestrator.draft_approve import apply_confirmation
 from .orchestrator.importance import ImportanceTier
 from .orchestrator.scheduling import ConflictResult, detect_conflict, propose_free_slots
@@ -90,9 +91,30 @@ _default_triage = triage_thread
 
 
 FETCH_RETRIES = 2
-# Hold offers per calendar notification — a conflict-heavy day still gets
-# every notification, but never a wall of cards (mirrors the nudge cap).
+# Hold OR reschedule offers per calendar notification — a conflict-heavy day
+# still gets every notification, but never a wall of cards (mirrors the
+# nudge cap). Phase 3 stage 2 folds RESCHEDULE proposals into this SAME cap
+# (a combined calendar-card cap, documented here rather than adding a
+# second constant): each conflict yields at most one offer, whichever kind
+# _offer_conflict_resolution chose, and it's this cap that binds either way.
 MAX_HOLD_OFFERS_PER_RUN = 3
+# Decline-invite proposals per calendar notification (Phase 3 stage 2,
+# Deliverable B) — its own, smaller cap: declining an invite is a more
+# consequential card than a hold offer, so a notification with several
+# pending invites still only surfaces the two most deterministic ones.
+MAX_DECLINE_PROPOSALS_PER_RUN = 2
+# Archive proposals per Gmail notification (Phase 3 stage 1, G9/G10) — same
+# hard-cap posture as MAX_HOLD_OFFERS_PER_RUN/MAX_NUDGES_PER_RUN: a
+# NOISE-heavy inbox still gets every thread triaged, but never floods the
+# approval channel with archive cards.
+MAX_LABEL_PROPOSALS_PER_RUN = 3
+# Rank key for "most confidently noise" (Phase 3 stage 1, G10): LOW-tier
+# senders first, then NORMAL, then HIGH last — the mirror image of
+# brief.py's/_rank_conflicts_by_importance's "most important first" ranking,
+# because what's being ranked here is confidence that ARCHIVING is correct,
+# and a demoted sender is the strongest evidence of that. Reused from
+# _TIER_RANK below (shared with the calendar-conflict ranking already in
+# this module) — ascending order puts LOW (0) first.
 
 
 def _accepts_keyword(fn: Callable[..., Any], name: str) -> bool:
@@ -190,6 +212,7 @@ def handle_gmail_notification(
     pending: Any = None,
     notify: Callable[[str], None] | None = None,
     retry_queue: Any = None,
+    mail_labels_enabled: bool = False,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -207,9 +230,18 @@ def handle_gmail_notification(
 
     ``triage_fn`` defaults to :func:`orchestrator.triage.triage_thread`
     (Task.CLASSIFY). Threads classified NOISE never reach the draft-approve
-    graph — this is purely a go/no-go gate; it does not label, archive, or
-    otherwise act on the thread (that would be a new autonomous write path
-    outside the existing per-(action,domain) autonomy gate, rule 3).
+    graph on their own — that's purely a go/no-go gate. But (Phase 3 stage 1,
+    G9) a NOISE thread MAY additionally become an archive PROPOSAL — a
+    perfectly normal approval card, never a silent write — when all three of
+    these hold: the permission matrix grants (Action.LABEL, Domain.MAIL) at
+    PROPOSE or above, ``connector.supports_labeling()`` is true, and
+    ``mail_labels_enabled`` is true (the deployment's own
+    ``ATTUNE_MAIL_LABELS_ENABLED`` opt-in). Absent any one of the three, NOISE
+    behaves exactly as before Phase 3: triaged, audited, dropped. When several
+    NOISE threads clear the gates in one notification, proposals are ranked
+    most-confidently-noise first (LOW-tier sender, then NORMAL, then HIGH) and
+    capped at :data:`MAX_LABEL_PROPOSALS_PER_RUN` — see
+    ``_rank_label_offers_by_noise_confidence``.
 
     ``pending`` is an optional
     :class:`~orchestrator.pending.PendingApprovals` registry. When supplied,
@@ -217,10 +249,12 @@ def handle_gmail_notification(
     skipped entirely — no second card for the same thread — with a
     ``superseded_notification`` audit event so "why didn't I get another
     card" stays answerable; and each newly posted card is registered so the
-    ignore-sweep and dedupe can see it.
+    ignore-sweep and dedupe can see it. The same registry also dedupes
+    archive proposals.
 
     Returns the list of LangGraph thread_ids that were submitted (one per
-    changed Gmail thread that wasn't triaged as noise).  Raises
+    changed Gmail thread that wasn't triaged as noise, plus any archive
+    proposals offered for threads that were).  Raises
     :class:`~ingestion.HistoryExpired` when the stored historyId has expired;
     the caller must re-baseline the watch.
     """
@@ -228,6 +262,11 @@ def handle_gmail_notification(
     changes = process_notification(gmail_service, watch_state, notification)
 
     submitted: list[str] = []
+    # NOISE threads that cleared all three label gates, collected across the
+    # whole notification so ranking-before-the-cap (G10) can see every
+    # candidate before MAX_LABEL_PROPOSALS_PER_RUN binds — same two-phase
+    # shape as the calendar conflict offers below.
+    label_offerable: list[tuple[Any, TriageResult]] = []
     for gmail_tid in changes.thread_ids:
         if pending is not None:
             existing = pending.get_pending_for_source(gmail_tid)
@@ -282,6 +321,8 @@ def handle_gmail_notification(
                 post_approval=post_approval, user_id=user_id,
                 thread_id_prefix=thread_id_prefix, audit_log=audit_log,
                 triage_fn=triage_fn, pending=pending, notify=notify,
+                connector=connector, mail_labels_enabled=mail_labels_enabled,
+                label_offerable=label_offerable,
             )
         except Exception as exc:  # noqa: BLE001 — cursor already advanced
             if retry_queue is None:
@@ -294,6 +335,23 @@ def handle_gmail_notification(
             continue
         if lg_tid is not None:
             submitted.append(lg_tid)
+
+    if label_offerable:
+        ranked = _rank_label_offers_by_noise_confidence(
+            label_offerable, importance_profile=app_ctx.importance_profile
+        )
+        offers_made = 0
+        for thread, triage in ranked:
+            if offers_made >= MAX_LABEL_PROPOSALS_PER_RUN:
+                break
+            offered = _offer_archive_proposal(
+                app_ctx, thread, triage, user_id=user_id,
+                post_approval=post_approval, pending=pending,
+                audit_log=audit_log, notify=notify,
+            )
+            if offered is not None:
+                offers_made += 1
+                submitted.append(offered)
 
     return submitted
 
@@ -322,8 +380,21 @@ def submit_gmail_thread(
     triage_fn: Callable[[Any, str], TriageResult] | None = None,
     pending: Any = None,
     notify: Callable[[str], None] | None = None,
+    connector: Any = None,
+    mail_labels_enabled: bool = False,
+    label_offerable: list | None = None,
 ) -> str | None:
-    """Process one already-fetched thread, including durable retry replays."""
+    """Process one already-fetched thread, including durable retry replays.
+
+    ``connector``/``mail_labels_enabled`` are only consulted for a NOISE
+    result (Phase 3 stage 1, G9) — every other outcome is unchanged.
+    ``label_offerable``, when supplied, collects ``(thread, triage)`` pairs
+    for the CALLER to rank and cap across a whole notification instead of
+    offering immediately (see ``handle_gmail_notification``); absent (the
+    single-item retry-drain/poll-mode call sites in ``runtime.py``, which
+    have nothing to rank against), a cleared NOISE thread is offered right
+    away, mirroring ``submit_calendar_event``'s single-item behavior.
+    """
     triage_fn = triage_fn or _default_triage
     lg_tid = f"{thread_id_prefix}:{gmail_tid}:{history_id}"
     incoming_summary = (
@@ -347,6 +418,17 @@ def submit_gmail_thread(
                          **_triage_audit_fields(triage)}],
                 domain="mail", user_id=user_id,
             )
+        if connector is not None and _label_gates_pass(
+            app_ctx, connector, mail_labels_enabled=mail_labels_enabled
+        ):
+            if label_offerable is not None:
+                label_offerable.append((thread, triage))
+            else:
+                return _offer_archive_proposal(
+                    app_ctx, thread, triage, user_id=user_id,
+                    post_approval=post_approval, pending=pending,
+                    audit_log=audit_log, notify=notify,
+                )
         return None
 
     state: dict[str, Any] = {
@@ -408,6 +490,116 @@ def submit_gmail_thread(
     if pending is not None:
         pending.register(
             lg_tid=lg_tid, source_ref=gmail_tid, domain="mail",
+            posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
+        )
+    return lg_tid
+
+
+def _label_gates_pass(
+    app_ctx: AppContext, connector: Any, *, mail_labels_enabled: bool
+) -> bool:
+    """The three-gate structure for the archive-proposal write path (Phase 3
+    stage 1, G9): an explicit matrix grant (still PROPOSE, not autonomous —
+    a human approves every card), a connector that structurally supports
+    labeling, and the deployment's own opt-in flag. All three are
+    independent and all three must hold; any one absent means NOISE behaves
+    exactly as it did before this feature existed — audited, then dropped,
+    never a silent write."""
+    if not mail_labels_enabled:
+        return False
+    if not getattr(connector, "supports_labeling", lambda: False)():
+        return False
+    matrix = app_ctx.current_matrix()
+    return matrix.allows(Action.LABEL, Domain.MAIL, Rung.PROPOSE)
+
+
+def _archive_proposal_text(thread: Any, triage: TriageResult) -> str:
+    """The archive proposal's deterministic text (Phase 3 stage 1, G9) — no
+    model call, because the thread was already classified by triage; this is
+    the whole proposal, carried verbatim through graph state and echoed back
+    unchanged by ``orchestrator.draft_approve.archive_draft_fn``."""
+    return (
+        f"Archive '{thread.subject}' from {thread.from_addr} — "
+        f"triaged noise: {triage.reason}"
+    )
+
+
+def _offer_archive_proposal(
+    app_ctx: AppContext,
+    thread: Any,
+    triage: TriageResult,
+    *,
+    user_id: str,
+    post_approval: Callable[..., None],
+    pending: Any,
+    audit_log: AuditLog | None,
+    notify: Callable[[str], None] | None = None,
+) -> str | None:
+    """Offer ONE archive proposal for a NOISE thread that cleared all three
+    label gates (Phase 3 stage 1, G9). Rides the SAME draft-approve
+    machinery as every other proposal — a dedicated compiled graph instance
+    (``app_ctx.label_graph``, built with a deterministic draft_fn and a
+    label-specific apply_fn; see ``orchestrator.draft_approve``) — so
+    freshness checks, the approval card, pending-registry dedupe, and audit
+    all come for free instead of being reimplemented here.
+
+    Deduped through the SAME pending registry as reply drafts: a thread that
+    already has a pending card (reply or archive) is skipped, one card per
+    source thread at a time. Returns the LangGraph thread_id offered, or
+    None when nothing was offered (already pending).
+    """
+    if pending is not None:
+        existing = pending.get_pending_for_source(thread.thread_id)
+        if existing is not None:
+            return None
+
+    snapshot = (
+        thread.last_message_at.isoformat()
+        if getattr(thread, "last_message_at", None) is not None else None
+    )
+    lg_tid = f"archive:{thread.thread_id}:{snapshot or 'nosnap'}"
+    state: dict[str, Any] = {
+        "incoming_summary": _archive_proposal_text(thread, triage),
+        "incoming_ref": thread.thread_id,
+        "sender": thread.from_addr,
+        "label_name": DEFAULT_NOISE_LABEL,
+        "source_snapshot": snapshot,
+        "user_id": user_id, "action": Action.LABEL.value, "domain": Domain.MAIL.value,
+        "iteration_count": 0, "audit_events": [],
+    }
+    result = app_ctx.label_graph.invoke(
+        state, {"configurable": {"thread_id": lg_tid}}
+    )
+
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=lg_tid, workflow="draft_approve",
+            events=[{
+                "event": "archive_proposed",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "gmail_thread_id": thread.thread_id,
+                "reason": triage.reason,
+            }] + list(result.get("audit_events", [])),
+            domain="mail", user_id=user_id,
+        )
+
+    rung = _auto_rung(result)
+    if rung is not None:
+        _handle_auto_applied(
+            result, rung, action="label", domain="mail",
+            describe=f'archived "{thread.subject}" (triaged noise)',
+            lg_tid=lg_tid, user_id=user_id, notify=notify, audit_log=audit_log,
+        )
+        return lg_tid
+
+    post_approval(
+        lg_tid, result.get("proposed_draft") or "",
+        result.get("retrieved_memories") or None,
+        title=f"Archive proposal — triaged noise: {thread.subject}",
+    )
+    if pending is not None:
+        pending.register(
+            lg_tid=lg_tid, source_ref=thread.thread_id, domain="mail",
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
         )
     return lg_tid
@@ -551,6 +743,7 @@ def handle_calendar_notification(
     pending: Any = None,
     retry_queue: Any = None,
     on_reconciled: Callable[[int, bool], None] | None = None,
+    calendar_writes_enabled: bool = False,
 ) -> list[ConflictResult]:
     """Process a decoded Calendar webhook notification (design 1.2, 1.4, 4.2).
 
@@ -565,11 +758,27 @@ def handle_calendar_notification(
 
     Detection itself stays read-only: ``notify`` fires for every conflict
     and nothing is written. When ``post_approval`` is supplied (the runtime
-    supplies it), each conflict additionally OFFERS a resolution hold — a
-    standard CREATE_HOLD draft-approve workflow whose card proposes the
-    first same-day free slot; only human approval materializes the tentative
-    hold via the apply node (see docs/decisions.md, "Calendar write
-    actions"). No slot free -> notify-only fallback, no card.
+    supplies it), each conflict additionally OFFERS ONE resolution — a
+    RESCHEDULE proposal for the principal's own event when they organize one
+    of the two conflicting events and all three RESCHEDULE gates hold (Phase
+    3 stage 2, Deliverable C: matrix rung, ``connector.supports_calendar_writes()``,
+    ``calendar_writes_enabled``), falling back to the existing CREATE_HOLD
+    offer otherwise — including when the principal organizes neither event.
+    Only human approval materializes either write (see docs/decisions.md,
+    "Calendar write actions"). No slot free -> notify-only fallback, no card.
+
+    Independently of conflicts, a changed event that is a pending invite
+    awaiting the principal's response (``response_status == "needsAction"``)
+    may ALSO surface a DECLINE_INVITE proposal (Deliverable B) when at least
+    one deterministic reason holds — it conflicts with an existing event, or
+    its organizer's importance tier is LOW — and all three DECLINE_INVITE
+    gates hold. Capped at :data:`MAX_DECLINE_PROPOSALS_PER_RUN`,
+    conflict-reason proposals ranked above tier-reason ones.
+
+    ``calendar_writes_enabled`` is the deployment's own
+    ``ATTUNE_CALENDAR_WRITES_ENABLED`` opt-in — one of the three independent
+    gates for BOTH DECLINE_INVITE and RESCHEDULE; see ``_decline_gates_pass``/
+    ``_reschedule_gates_pass``.
 
     ``on_reconciled(changed_count, rebaselined)`` is an optional operational
     observer. It receives counts only, never event content, so callers can
@@ -610,9 +819,20 @@ def handle_calendar_notification(
         on_reconciled(len(changes.event_ids), False)
 
     conflicts: list[ConflictResult] = []
-    # (event, conflict) pairs still eligible for a hold offer, in arrival
-    # order — ranked below, before the per-run cap is applied (G2/G10).
+    # (event, conflict) pairs still eligible for a hold-or-reschedule offer,
+    # in arrival order — ranked below, before the per-run cap is applied
+    # (G2/G10).
     offerable: list[tuple[Any, ConflictResult]] = []
+    # (event, reason_kind, reason_text) triples still eligible for a
+    # DECLINE_INVITE proposal (Phase 3 stage 2, Deliverable B), collected the
+    # same two-phase way — rank before MAX_DECLINE_PROPOSALS_PER_RUN binds.
+    decline_offerable: list[tuple[Any, str, str]] = []
+    decline_gates_ok = _decline_gates_pass(
+        app_ctx, connector, calendar_writes_enabled=calendar_writes_enabled
+    )
+    reschedule_gates_ok = _reschedule_gates_pass(
+        app_ctx, connector, calendar_writes_enabled=calendar_writes_enabled
+    )
     for event_id in changes.event_ids:
         try:
             event = _fetch_with_retry(lambda: connector.get_event(event_id))
@@ -655,6 +875,23 @@ def handle_calendar_notification(
                 error=type(exc).__name__,
             )
             continue
+
+        # Decline-invite candidacy (Deliverable B) is independent of
+        # whether THIS event conflicts with anything — a LOW-tier organizer
+        # is a deterministic reason all on its own — so it's checked before
+        # the conflict-only `continue` below, using the conflict (if any)
+        # already computed above rather than calling detect_conflict twice.
+        if (
+            post_approval is not None
+            and decline_gates_ok
+            and _is_pending_invite(event)
+        ):
+            reason = _decline_reason(
+                event, conflict, importance_profile=app_ctx.importance_profile
+            )
+            if reason is not None:
+                decline_offerable.append((event, reason[0], reason[1]))
+
         if conflict is None:
             continue
         conflicts.append(conflict)
@@ -670,10 +907,10 @@ def handle_calendar_notification(
             if offers_made >= MAX_HOLD_OFFERS_PER_RUN:
                 break
             try:
-                offered = _offer_resolution_hold(
+                offered = _offer_conflict_resolution(
                     app_ctx, connector, conflict, post_approval=post_approval,
                     pending=pending, audit_log=audit_log, user_id=user_id,
-                    notify=notify,
+                    reschedule_gates_ok=reschedule_gates_ok, notify=notify,
                 )
             except Exception as exc:  # noqa: BLE001 — sync token already advanced
                 if retry_queue is None:
@@ -685,6 +922,29 @@ def handle_calendar_notification(
                 continue
             if offered is not None:
                 offers_made += 1
+
+    if decline_offerable:
+        ranked_declines = _rank_decline_offers(decline_offerable)
+        declines_made = 0
+        for event, reason_kind, reason_text in ranked_declines:
+            if declines_made >= MAX_DECLINE_PROPOSALS_PER_RUN:
+                break
+            try:
+                offered = _offer_decline_proposal(
+                    app_ctx, event, reason_kind, reason_text,
+                    user_id=user_id, post_approval=post_approval,
+                    pending=pending, audit_log=audit_log, notify=notify,
+                )
+            except Exception as exc:  # noqa: BLE001 — sync token already advanced
+                if retry_queue is None:
+                    raise
+                retry_queue.enqueue(
+                    "calendar_event", event.event_id, {"calendar_id": calendar_id},
+                    error=type(exc).__name__,
+                )
+                continue
+            if offered is not None:
+                declines_made += 1
 
     return conflicts
 
@@ -729,6 +989,374 @@ def _rank_conflicts_by_importance(
         offerable,
         key=lambda pair: _conflict_importance_rank(pair[1], importance_profile),
         reverse=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DECLINE_INVITE proposals (Phase 3 stage 2, Deliverable B)
+# ---------------------------------------------------------------------------
+
+
+def _is_pending_invite(event: Any) -> bool:
+    """Whether ``event`` is an invite still awaiting the principal's
+    response — ``response_status == "needsAction"``. Back-compat: a
+    connector/fake that doesn't populate ``response_status`` defaults to
+    ``""``, which never matches, so no invite is ever mistakenly proposed
+    for decline on old data."""
+    return getattr(event, "response_status", "") == "needsAction"
+
+
+# Rank key for decline-proposal reasons (Deliverable B: "conflict-reason
+# proposals rank above tier-reason ones"). Higher = offered first.
+_DECLINE_REASON_RANK = {"conflict": 1, "tier": 0}
+
+
+def _decline_reason(
+    event: Any, conflict: ConflictResult | None, *, importance_profile: Any
+) -> tuple[str, str] | None:
+    """The deterministic reason to propose declining ``event``, or ``None``
+    if neither holds (Deliverable B):
+
+    (a) it conflicts with an existing event (the SAME conflict already
+        detected for this event by ``_detect_and_notify_conflict`` — no
+        second ``detect_conflict`` call here), as long as the other side of
+        that conflict isn't itself another still-pending invite (that would
+        just be two undecided invites colliding, not "an existing accepted
+        event"); or
+    (b) the organizer's importance tier is LOW.
+
+    Returns ``(reason_kind, reason_text)``; ``reason_kind`` only matters for
+    ranking before :data:`MAX_DECLINE_PROPOSALS_PER_RUN` binds.
+    """
+    if conflict is not None:
+        other = conflict.conflicting_with
+        if getattr(other, "response_status", "") != "needsAction":
+            return "conflict", (
+                f"Decline '{event.summary}' — conflicts with '{other.summary}'"
+            )
+
+    organizer = getattr(event, "organizer", "") or ""
+    if organizer and importance_profile is not None:
+        try:
+            assessment = importance_profile.assess(organizer)
+        except Exception:  # noqa: BLE001 — ranking/offer must never break scheduling
+            return None
+        if assessment.tier == ImportanceTier.LOW:
+            # assessment.reason is grounded in the sender-signal language
+            # ("sender ignored N of last N proposals") — swap in "organizer"
+            # for a calendar-appropriate reason, same underlying count.
+            reason_text = assessment.reason.replace("sender", "organizer", 1)
+            return "tier", f"Decline '{event.summary}' — {reason_text}"
+    return None
+
+
+def _rank_decline_offers(
+    offerable: list[tuple[Any, str, str]]
+) -> list[tuple[Any, str, str]]:
+    """Conflict-reason proposals rank above tier-reason ones (Deliverable
+    B); stable, so equal-ranked candidates keep arrival order."""
+    return sorted(
+        offerable,
+        key=lambda item: _DECLINE_REASON_RANK.get(item[1], 0),
+        reverse=True,
+    )
+
+
+def _decline_gates_pass(
+    app_ctx: AppContext, connector: Any, *, calendar_writes_enabled: bool
+) -> bool:
+    """The three-gate structure for DECLINE_INVITE (Phase 3 stage 2),
+    mirroring ``_label_gates_pass`` exactly: an explicit matrix grant (still
+    PROPOSE — a human approves every card), a connector that structurally
+    supports calendar writes, and the deployment's own opt-in flag. All
+    three are independent and all three must hold."""
+    if not calendar_writes_enabled:
+        return False
+    if not getattr(connector, "supports_calendar_writes", lambda: False)():
+        return False
+    matrix = app_ctx.current_matrix()
+    return matrix.allows(Action.DECLINE_INVITE, Domain.CALENDAR, Rung.PROPOSE)
+
+
+def _offer_decline_proposal(
+    app_ctx: AppContext,
+    event: Any,
+    reason_kind: str,
+    reason_text: str,
+    *,
+    user_id: str,
+    post_approval: Callable[..., None],
+    pending: Any,
+    audit_log: AuditLog | None,
+    notify: Callable[[str], None] | None = None,
+) -> str | None:
+    """Offer ONE decline proposal for an invite that cleared all three
+    DECLINE_INVITE gates and has a deterministic reason (Phase 3 stage 2,
+    Deliverable B). Rides the SAME draft-approve machinery as every other
+    proposal — a dedicated compiled graph instance
+    (``app_ctx.calendar_action_graph``, deterministic draft_fn, a
+    calendar-action-specific apply_fn; see ``orchestrator.draft_approve``)
+    — so freshness checks, the approval card, pending-registry dedupe, and
+    audit all come for free.
+
+    Deduped through the SAME pending registry as hold/reschedule offers:
+    an event that already has a pending card is skipped. ``sender`` is
+    deliberately left ``None`` throughout (mirrors CREATE_HOLD) — a hygiene
+    action never feeds the organizer's importance profile, whether through
+    this approval or through the ignore-sweep. Returns the LangGraph
+    thread_id offered, or ``None`` when nothing was offered (already
+    pending).
+    """
+    if pending is not None:
+        existing = pending.get_pending_for_source(event.event_id)
+        if existing is not None:
+            return None
+
+    snapshot = event.start.isoformat()
+    lg_tid = f"decline:{event.event_id}:{snapshot}"
+    state: dict[str, Any] = {
+        "incoming_summary": reason_text,
+        "incoming_ref": event.event_id,
+        "sender": None,
+        "source_snapshot": snapshot,
+        "user_id": user_id,
+        "action": Action.DECLINE_INVITE.value,
+        "domain": Domain.CALENDAR.value,
+        "iteration_count": 0,
+        "audit_events": [],
+    }
+    result = app_ctx.calendar_action_graph.invoke(
+        state, {"configurable": {"thread_id": lg_tid}}
+    )
+
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=lg_tid, workflow="draft_approve",
+            events=[{
+                "event": "decline_proposed",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event_id": event.event_id,
+                "reason_kind": reason_kind,
+            }] + list(result.get("audit_events", [])),
+            domain="calendar", user_id=user_id,
+        )
+
+    rung = _auto_rung(result)
+    if rung is not None:
+        _handle_auto_applied(
+            result, rung, action="decline_invite", domain="calendar",
+            describe=f'declined "{event.summary}"',
+            lg_tid=lg_tid, user_id=user_id, notify=notify, audit_log=audit_log,
+        )
+        return lg_tid
+
+    post_approval(
+        lg_tid, result.get("proposed_draft") or "",
+        result.get("retrieved_memories") or None,
+        title=f"Decline invite proposal: {event.summary}",
+    )
+    if pending is not None:
+        pending.register(
+            lg_tid=lg_tid, source_ref=event.event_id, domain="calendar",
+            posted_at=datetime.now(timezone.utc), sender=None,
+        )
+    return lg_tid
+
+
+# ---------------------------------------------------------------------------
+# RESCHEDULE proposals (Phase 3 stage 2, Deliverable C)
+# ---------------------------------------------------------------------------
+
+
+def _reschedule_gates_pass(
+    app_ctx: AppContext, connector: Any, *, calendar_writes_enabled: bool
+) -> bool:
+    """The three-gate structure for RESCHEDULE (Phase 3 stage 2), mirroring
+    ``_decline_gates_pass``/``_label_gates_pass``."""
+    if not calendar_writes_enabled:
+        return False
+    if not getattr(connector, "supports_calendar_writes", lambda: False)():
+        return False
+    matrix = app_ctx.current_matrix()
+    return matrix.allows(Action.RESCHEDULE, Domain.CALENDAR, Rung.PROPOSE)
+
+
+def _organized_event_for_reschedule(conflict: ConflictResult) -> Any | None:
+    """Which of the two conflicting events (if either) the principal
+    organizes (Deliverable C) — read from ``organizer_is_self`` on the
+    already-fresh ``CalendarEvent`` objects this notification fetched
+    (never cached workflow state). Returns the event to reschedule (the
+    principal's own), or ``None`` when the principal organizes neither —
+    the caller's cue to fall back to the existing hold-offer path."""
+    if getattr(conflict.event, "organizer_is_self", False):
+        return conflict.event
+    if getattr(conflict.conflicting_with, "organizer_is_self", False):
+        return conflict.conflicting_with
+    return None
+
+
+def _offer_reschedule_proposal(
+    app_ctx: AppContext,
+    connector: WorkspaceConnector,
+    conflict: ConflictResult,
+    own_event: Any,
+    *,
+    post_approval: Callable[..., None],
+    pending: Any,
+    audit_log: AuditLog | None,
+    user_id: str,
+    notify: Callable[[str], None] | None = None,
+) -> str | None:
+    """Offer a RESCHEDULE proposal moving ``own_event`` (the principal's own
+    event) to a free slot (Deliverable C, Phase 3 item 3). Rides the
+    dedicated ``calendar_action_graph`` — same machinery as the decline
+    proposal (deterministic draft_fn, dedicated apply_fn, freshness,
+    pending-registry dedupe, audit) — never the shared reply/hold graph.
+
+    Free-slot math is entirely ``orchestrator.scheduling.propose_free_slots``
+    — reused unchanged, same same-day-first/bounded-search behavior the hold
+    offer already relies on. Returns the workflow id offered, or ``None``
+    (already pending, or no free slot — the caller falls back to the
+    hold-offer path).
+    """
+    other_event = (
+        conflict.conflicting_with if own_event is conflict.event else conflict.event
+    )
+    if pending is not None and hasattr(pending, "get_pending_for_source"):
+        # Symmetric-pair dedupe, same as the hold offer: A-overlaps-B and
+        # B-overlaps-A are one collision, one card.
+        if (
+            pending.get_pending_for_source(own_event.event_id) is not None
+            or pending.get_pending_for_source(other_event.event_id) is not None
+        ):
+            return None
+
+    slots = propose_free_slots(connector, own_event)
+    if not slots:
+        return None
+    start, end = slots[0]
+
+    lg_tid = f"calendar:reschedule:{own_event.event_id}:{start:%Y%m%d%H%M}"
+    duration_minutes = int((own_event.end - own_event.start).total_seconds() // 60)
+    incoming_summary = (
+        f"Move '{own_event.summary}' ({duration_minutes} min) to "
+        f"{start:%a %H:%M}–{end:%H:%M} — conflicts with '{other_event.summary}'"
+    )
+    state: dict[str, Any] = {
+        "incoming_summary": incoming_summary,
+        "incoming_ref": own_event.event_id,
+        "sender": None,
+        "reschedule_start": start.isoformat(),
+        "reschedule_end": end.isoformat(),
+        "source_snapshot": own_event.start.isoformat(),
+        "user_id": user_id,
+        "action": Action.RESCHEDULE.value,
+        "domain": Domain.CALENDAR.value,
+        "iteration_count": 0,
+        "audit_events": [],
+    }
+    result = app_ctx.calendar_action_graph.invoke(
+        state, {"configurable": {"thread_id": lg_tid}}
+    )
+
+    if audit_log is not None:
+        audit_log.record(
+            thread_id=lg_tid, workflow="draft_approve",
+            events=[{
+                "event": "reschedule_proposed",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event_id": own_event.event_id,
+                "slot": f"{start.isoformat()}/{end.isoformat()}",
+            }] + list(result.get("audit_events", [])),
+            domain="calendar", user_id=user_id,
+        )
+
+    rung = _auto_rung(result)
+    if rung is not None:
+        _handle_auto_applied(
+            result, rung, action="reschedule", domain="calendar",
+            describe=f'moved "{own_event.summary}" to {start:%H:%M}-{end:%H:%M}',
+            lg_tid=lg_tid, user_id=user_id, notify=notify, audit_log=audit_log,
+        )
+        return lg_tid
+
+    post_approval(
+        lg_tid, result.get("proposed_draft") or "",
+        result.get("retrieved_memories") or None,
+        title=f"Scheduling conflict — proposed reschedule: {own_event.summary}",
+    )
+    if pending is not None:
+        pending.register(
+            lg_tid=lg_tid, source_ref=own_event.event_id, domain="calendar",
+            posted_at=datetime.now(timezone.utc), sender=None,
+        )
+    return lg_tid
+
+
+def _offer_conflict_resolution(
+    app_ctx: AppContext,
+    connector: WorkspaceConnector,
+    conflict: ConflictResult,
+    *,
+    post_approval: Callable[..., None],
+    pending: Any,
+    audit_log: AuditLog | None,
+    user_id: str,
+    reschedule_gates_ok: bool,
+    notify: Callable[[str], None] | None = None,
+) -> str | None:
+    """One combined offer per conflict (Deliverable C): a RESCHEDULE
+    proposal for the principal's OWN event when they organize one of the
+    two conflicting events and all three RESCHEDULE gates hold; the
+    existing hold-offer path (unchanged) is the fallback otherwise —
+    including when the principal organizes neither event, no free slot
+    exists for their event, or a gate is missing. Counts once toward
+    ``MAX_HOLD_OFFERS_PER_RUN`` either way (the combined calendar-card cap;
+    see that constant's docstring)."""
+    if reschedule_gates_ok:
+        own_event = _organized_event_for_reschedule(conflict)
+        if own_event is not None:
+            offered = _offer_reschedule_proposal(
+                app_ctx, connector, conflict, own_event,
+                post_approval=post_approval, pending=pending,
+                audit_log=audit_log, user_id=user_id, notify=notify,
+            )
+            if offered is not None:
+                return offered
+    return _offer_resolution_hold(
+        app_ctx, connector, conflict, post_approval=post_approval,
+        pending=pending, audit_log=audit_log, user_id=user_id, notify=notify,
+    )
+
+
+def _label_confidence_rank(thread: Any, importance_profile: Any) -> int:
+    """Sort key (LOWER = offered first) for archive proposals (Phase 3
+    stage 1, G10): the sender's importance tier, via the same ``_TIER_RANK``
+    used for calendar conflicts. No profile, or an assessment failure, ranks
+    as NORMAL — every gate-cleared NOISE thread is still offered a proposal
+    regardless of this; it only orders who gets a card first once the
+    per-run cap is in play."""
+    if importance_profile is None:
+        return _TIER_RANK[ImportanceTier.NORMAL]
+    try:
+        tier = importance_profile.assess(thread.from_addr).tier
+    except Exception:  # noqa: BLE001 — ranking must never break triage
+        return _TIER_RANK[ImportanceTier.NORMAL]
+    return _TIER_RANK.get(tier, _TIER_RANK[ImportanceTier.NORMAL])
+
+
+def _rank_label_offers_by_noise_confidence(
+    offerable: list[tuple[Any, TriageResult]], *, importance_profile: Any
+) -> list[tuple[Any, TriageResult]]:
+    """Most-confidently-noise first: LOW-tier sender, then NORMAL, then HIGH
+    (Phase 3 stage 1, G10) — ascending ``_TIER_RANK`` order, the mirror image
+    of :func:`_rank_conflicts_by_importance`'s descending "most important
+    first". A demoted (LOW) sender is the strongest evidence that archiving
+    is the right call, so it's offered first when the per-run cap binds.
+    Stable within tier, same as the calendar/nudge rankings."""
+    return sorted(
+        offerable,
+        key=lambda pair: _label_confidence_rank(pair[0], importance_profile),
     )
 
 

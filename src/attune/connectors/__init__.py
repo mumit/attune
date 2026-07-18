@@ -13,9 +13,12 @@ direct-OAuth path (the MCP path can't send at all).
 
 from .base import (
     CalendarEvent,
+    CalendarWriteNotPermitted,
     ConnectorError,
+    DEFAULT_NOISE_LABEL,
     DraftRef,
     EmailThread,
+    LabelNotPermitted,
     Provenance,
     SendNotPermitted,
     WorkspaceConnector,
@@ -28,7 +31,11 @@ def make_connector(settings, **kwargs) -> WorkspaceConnector:
     """Select the connector implementation from a config.Settings.
 
     MCP mode builds a Streamable HTTP caller unless ``mcp_call`` is injected;
-    google_oauth mode accepts ``credentials`` and ``send_enabled``.
+    google_oauth mode accepts ``credentials``, ``send_enabled``,
+    ``labels_enabled`` (Phase 3 stage 1, G9 — mirrors ``send_enabled``'s
+    double-gate: set only alongside the gmail.modify scope), and
+    ``calendar_writes_enabled`` (Phase 3 stage 2 — same discipline, set only
+    alongside the calendar.events scope).
     """
     from ..config import WorkspaceBackend
 
@@ -47,6 +54,8 @@ def make_connector(settings, **kwargs) -> WorkspaceConnector:
         gmail_service=kwargs.get("gmail_service"),
         calendar_service=kwargs.get("calendar_service"),
         send_enabled=kwargs.get("send_enabled", False),
+        labels_enabled=kwargs.get("labels_enabled", False),
+        calendar_writes_enabled=kwargs.get("calendar_writes_enabled", False),
         owner_email=user if "@" in user else None,
         internal_domains=settings.internal_domains,
     )
@@ -60,6 +69,9 @@ __all__ = [
     "Provenance",
     "ConnectorError",
     "SendNotPermitted",
+    "LabelNotPermitted",
+    "CalendarWriteNotPermitted",
+    "DEFAULT_NOISE_LABEL",
     "McpWorkspaceConnector",
     "DirectOAuthConnector",
     "make_connector",

@@ -43,6 +43,17 @@ from .state import DraftApproveState
 # Cap to prevent runaway conditional loops (a real production failure mode).
 MAX_ITERATIONS = 10
 
+# Hygiene/logistics actions (Phase 3 stage 1's LABEL; stage 2's
+# DECLINE_INVITE/RESCHEDULE) -- see the `capture` node's docstring for the
+# full rule this set backs. Kept as a set, not stacked booleans, so a
+# future hygiene action is one line added here rather than a growing `or`
+# chain wherever this distinction matters.
+HYGIENE_ACTIONS = frozenset({
+    Action.LABEL.value,
+    Action.DECLINE_INVITE.value,
+    Action.RESCHEDULE.value,
+})
+
 
 class SourceChangedError(Exception):
     """The source (thread/event) changed after the card was posted; a stale
@@ -236,7 +247,17 @@ def build_draft_approve_graph(
         return {"applied_ref": ref, "audit_events": [_audit("applied", ref=ref)]}
 
     def capture(state: DraftApproveState) -> dict[str, Any]:
-        """Write the learning signal from what the human did (design 2.2)."""
+        """Write the learning signal from what the human did (design 2.2).
+
+        Approval-signal rule (Phase 3 stages 1-2; the ONE place this rule is
+        stated): only DRAFT_REPLY and FOLLOW_UP approvals feed the sender's
+        importance profile as positive engagement. Every action in
+        ``HYGIENE_ACTIONS`` (LABEL, DECLINE_INVITE, RESCHEDULE) is a
+        hygiene/logistics judgment, never counterpart engagement -- see the
+        block below for why. CREATE_HOLD isn't in that set (it carries no
+        ``sender`` at all today), but reaches the same outcome because
+        ``capture_action_signal`` is a no-op without one.
+        """
         decision = state.get("decision")
         domain = state["domain"]
         uid = state["user_id"]
@@ -253,14 +274,33 @@ def build_draft_approve_graph(
             sig = ActionSignal.APPROVED
         else:
             sig = ActionSignal.REJECTED
+
+        # Hygiene-action asymmetry (Phase 3 stage 1, G9; generalized in
+        # stage 2 -- see docs/decisions.md): everywhere else in this graph,
+        # "approved" means the assistant's judgment was right, so the
+        # dual-write feeds that back into the sender's importance profile as
+        # positive engagement (Phase 1). A hygiene-action capture means the
+        # OPPOSITE for the sender/organizer: approving an archive proposal
+        # says "yes, this sender is noise"; approving a decline/reschedule
+        # says "yes, deprioritize this organizer's meeting," not "engage
+        # with them more." Feeding either through as APPROVED would push
+        # that party's tier toward HIGH -- exactly backwards. So hygiene
+        # captures still write the raw signal to memory (ground truth for
+        # nightly consolidation, with the same metadata every capture gets)
+        # but never touch the importance profile; the profile only learns
+        # about a sender through the mechanism that actually observed them
+        # (NOISE triage for LABEL; ordinary DRAFT_REPLY/FOLLOW_UP approvals
+        # otherwise), not through a hygiene approval.
+        is_hygiene_action = state.get("action") in HYGIENE_ACTIONS
         capture_action_signal(
             store,
             user_id=uid,
             domain=domain,
             signal=sig,
             summary=f"{state['action']} on {domain}",
-            importance_profile=importance_profile,
-            sender=state.get("sender"),
+            metadata={"hygiene_action": True} if is_hygiene_action else None,
+            importance_profile=None if is_hygiene_action else importance_profile,
+            sender=None if is_hygiene_action else state.get("sender"),
         )
         return {"audit_events": [_audit("signal_captured", signal=sig.value)]}
 
@@ -422,6 +462,156 @@ def make_connector_apply_fn(
         return getattr(ref, "draft_id", None)
 
     return apply
+
+
+def archive_draft_fn(
+    client: Any, incoming_summary: str, memories: list[str], domain: str
+) -> str:
+    """The archive proposal's fixed, deterministic ``draft_fn`` (Phase 3
+    stage 1, G9): the thread was already classified NOISE by triage, so
+    there is nothing left for a model to draft — ``incoming_summary`` IS the
+    final proposal text (built once, in ``dispatcher._archive_proposal_text``,
+    and carried verbatim through graph state). This function's only job is
+    to hand it back unchanged: ``build_draft_approve_graph``'s ``draft`` node
+    still runs (it's the state transition that produces ``proposed_draft``,
+    and the shape every downstream node/audit event expects), but it never
+    calls the model, exactly as the design calls for ("no model call — the
+    thread was already classified"). ``client``/``memories``/``domain`` are
+    accepted for signature-compatibility with every other ``draft_fn`` and
+    are intentionally unused.
+
+    Compiled into its OWN graph instance (``AppContext.label_graph``), never
+    into the shared draft-reply/follow-up/hold graph: ``domain`` alone can't
+    tell this function apart from a real DRAFT_REPLY on ``domain="mail"``,
+    so a fixed draft_fn has to live on a separate compiled graph rather than
+    branch inside the shared one."""
+    return incoming_summary
+
+
+def make_label_apply_fn(connector: Any) -> Callable[[dict[str, Any]], str | None]:
+    """Build the production ``apply_fn`` for archive proposals (Phase 3
+    stage 1, G9): materialize an approved decision via
+    ``connector.label_thread`` — never ``create_draft``. Compiled into the
+    dedicated label graph instance (see :func:`archive_draft_fn`), alongside
+    ``make_connector_apply_fn`` for the shared draft/hold graph.
+
+    Mirrors ``make_connector_apply_fn``'s freshness discipline (a thread that
+    gained messages since the card was posted is stale — see
+    ``_check_freshness_mail``) but the whole effect IS the label/archive;
+    there is no draft artifact to point at, so ``applied_ref`` is the
+    thread id itself (enough for ``apply_confirmation``/audit to report
+    something concrete happened).
+    """
+
+    def apply(state: dict[str, Any]) -> str | None:
+        if state.get("action") != Action.LABEL.value:
+            return None
+        thread_ref = state.get("incoming_ref")
+        label_name = state.get("label_name")
+        if not thread_ref or not label_name:
+            return None
+        thread = connector.get_thread(thread_ref)
+        _check_freshness_mail(thread, state.get("source_snapshot"))
+        connector.label_thread(thread_ref, label=label_name, archive=True)
+        return thread_ref
+
+    return apply
+
+
+def calendar_action_draft_fn(
+    client: Any, incoming_summary: str, memories: list[str], domain: str
+) -> str:
+    """The DECLINE_INVITE/RESCHEDULE proposal's fixed, deterministic
+    ``draft_fn`` (Phase 3 stage 2): identical shape to
+    :func:`archive_draft_fn` and for the same reason -- the dispatcher
+    already computed the deterministic reason/slot before ever invoking this
+    graph, so there is nothing left for a model to draft.
+    ``incoming_summary`` IS the final proposal text (built once, in
+    ``dispatcher._offer_decline_proposal``/``_offer_reschedule_proposal``,
+    and carried verbatim through graph state). Kept as its own function
+    (not an alias of ``archive_draft_fn``) so the two proposal families'
+    docstrings can diverge independently later; ``client``/``memories``/
+    ``domain`` are accepted for signature-compatibility and unused.
+
+    Compiled into its OWN graph instance (``AppContext.calendar_action_graph``),
+    for the same reason ``archive_draft_fn`` needed one: ``domain="calendar"``
+    alone can't tell a DECLINE_INVITE/RESCHEDULE proposal apart from a real
+    CREATE_HOLD proposal (which DOES call a model to draft the reschedule-
+    request message -- see ``_default_draft_fn`` on the shared graph)."""
+    return incoming_summary
+
+
+def make_calendar_action_apply_fn(
+    connector: Any,
+) -> Callable[[dict[str, Any]], str | None]:
+    """Build the production ``apply_fn`` for DECLINE_INVITE/RESCHEDULE
+    proposals (Phase 3 stage 2): materializes via ``connector.decline_invite``
+    or ``connector.reschedule_event`` -- never ``create_draft``. Compiled
+    into the dedicated calendar-action graph instance (see
+    :func:`calendar_action_draft_fn`), branching on ``state["action"]`` the
+    same way ``make_connector_apply_fn`` branches on ``state["domain"]`` for
+    CREATE_HOLD.
+
+    Freshness discipline (mirrors ``_check_freshness_mail``/
+    ``_apply_calendar_hold``): a FRESH ``connector.get_event`` fetch backs
+    every check here -- the event's start time is unchanged since the card
+    was posted, and (decline only) it's still ``needsAction``. For
+    RESCHEDULE, the organizer re-verification happens a second time, inside
+    ``connector.reschedule_event`` itself, from ITS OWN fresh fetch -- this
+    function never trusts anything about organizer identity from state.
+    """
+
+    def apply(state: dict[str, Any]) -> str | None:
+        from datetime import datetime
+
+        action = state.get("action")
+        event_ref = state.get("incoming_ref")
+        if not event_ref:
+            return None
+
+        if action == Action.DECLINE_INVITE.value:
+            current = connector.get_event(event_ref)
+            _check_freshness_calendar_event(current, state.get("source_snapshot"))
+            if current.response_status != "needsAction":
+                raise SourceChangedError(
+                    f"event {event_ref} is no longer needsAction "
+                    f"(now {current.response_status!r})"
+                )
+            connector.decline_invite(event_ref)
+            return event_ref
+
+        if action == Action.RESCHEDULE.value:
+            start_raw = state.get("reschedule_start")
+            end_raw = state.get("reschedule_end")
+            if not start_raw or not end_raw:
+                return None
+            current = connector.get_event(event_ref)
+            _check_freshness_calendar_event(current, state.get("source_snapshot"))
+            connector.reschedule_event(
+                event_ref,
+                new_start=datetime.fromisoformat(start_raw),
+                new_end=datetime.fromisoformat(end_raw),
+            )
+            return event_ref
+
+        return None
+
+    return apply
+
+
+def _check_freshness_calendar_event(event: Any, snapshot: str | None) -> None:
+    """Shared freshness precondition for DECLINE_INVITE/RESCHEDULE apply: the
+    event's start time must be unchanged since the card was posted (mirrors
+    ``_apply_calendar_hold``'s snapshot check). Older cards carry no
+    snapshot; proceed (back-compat), same posture as
+    ``_check_freshness_mail``."""
+    if not snapshot:
+        return
+    if event.start.isoformat() != snapshot:
+        raise SourceChangedError(
+            f"event {event.event_id} start changed from {snapshot} to "
+            f"{event.start.isoformat()} since the card was posted"
+        )
 
 
 def _apply_calendar_hold(connector: Any, state: dict[str, Any]) -> str | None:

@@ -71,6 +71,13 @@ class DraftApproveState(TypedDict, total=False):
     hold_start: Optional[str]
     hold_end: Optional[str]
     hold_summary: Optional[str]
+    # RESCHEDULE proposals only (Phase 3 stage 2, Deliverable C): the exact
+    # free slot the human is approving, same discipline as hold_start/
+    # hold_end above -- carried as ISO strings, never re-derived from the
+    # proposal prose, so apply moves the event to precisely what the card
+    # showed.
+    reschedule_start: Optional[str]
+    reschedule_end: Optional[str]
     # Freshness precondition (prompt 21): what the source looked like when
     # this was proposed — mail: the thread's last_message_at ISO; calendar:
     # the conflicted event's start ISO. Apply refuses when it changed.

@@ -2,6 +2,76 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-18 — Brief evolution ships: since-yesterday, waiting-on ages, inline pointers (Phase 3 stage 3, G11)
+
+- **The "since yesterday" snapshot is small, bounded, and write-once-per-day
+  on purpose.** `brief.BriefSnapshot` stores exactly four things: unread
+  thread ids + truncated subjects, today's event ids + truncated titles,
+  quiet-thread ("waiting on") ids, and a UTC timestamp — nothing beyond what
+  `assemble_brief` already read for the current run, and nothing that could
+  grow unboundedly (subjects/titles are truncated the same way spine lines
+  already are). `brief.JsonBriefSnapshot` persists it as one atomically
+  replaced JSON file (`ATTUNE_BRIEF_SNAPSHOT_PATH`, default
+  `brief_snapshot.json`), mirroring `orchestrator/attention.py`'s write
+  discipline plus `cli/setup_state.py`'s explicit `os.chmod(0o600)` before
+  `os.replace` — this file names real subjects/titles, so it gets the same
+  owner-only-from-the-moment-it-exists treatment as other named local state.
+- **A snapshot older than 48h is ignored outright, not compared against.**
+  `_load_fresh_snapshot` treats `now - prior.ts >= 48h` (and any read
+  failure, and a first run with no snapshot at all) identically: no "since
+  yesterday" section, never an error. The alternative — diffing against a
+  multi-day-old baseline — would produce a misleading "new since yesterday"
+  list on the first brief after a gap (a missed day, a paused deployment),
+  so staleness is defined generously (48h, not exactly 24h) but is a hard
+  cutoff past which the comparison is simply skipped.
+- **The write happens ONLY on `Runtime.post_brief` (the daily posted
+  brief), never on an on-demand Slack/Chat "give me the brief" request or
+  the CLI's plain preview.** `assemble_brief` takes `snapshot_store` as an
+  optional argument exactly like `attention_store`/`importance_profile`
+  before it, but `runtime.py`'s `_assemble_runtime_brief` — the one helper
+  every brief-producing surface calls — only receives a real
+  `snapshot_store` at the `post_brief` call site; the Slack/Chat "give me
+  the brief" lambdas pass `pending` (read-only) but not `snapshot_store`.
+  The reason `snapshot_store` gets a NARROWER threading rule than
+  `attention_store`/`pending` (which every runtime path receives): writing
+  on every on-demand request would keep resetting "yesterday" to "an hour
+  ago," making the section useless the same day someone asks twice. The
+  CLI's plain preview path never constructs one at all, for the same
+  "no state file as a side effect of a read-only preview" reason Phase 1/2
+  gave for `importance_profile`/`attention_store`.
+- **Waiting-on is now ordered by counterpart importance tier, then by age,
+  longest-waiting first within a tier** (`brief._order_waiting_on`) —
+  presentation only, exactly like the unread-mail section's existing
+  HIGH/NORMAL/LOW ordering; nothing is dropped, and a missing profile or an
+  assessment failure falls back to "everyone NORMAL, longest-waiting first"
+  rather than breaking the section.
+- **Inline pending-approval pointers are read-only pointers to an existing
+  card, never a new action surface.** When `assemble_brief` receives a
+  `pending` registry, any line — a spine entry, an unread-mail line, a
+  today's-event line, a waiting-on line — whose underlying Gmail thread id
+  or Calendar event id already has a PENDING card gets a trailing
+  `" → approval card pending"` (`brief.PENDING_POINTER`), matched by the
+  EXACT `source_ref` format `dispatcher.py` already registers under (a mail
+  thread id for drafts/archives/follow-ups, a Calendar event id for
+  decline/reschedule/hold proposals — see the Phase 3 stage 1/2 entries
+  below). A one-line tally — `"N proposals awaiting your decision in
+  ..."` — is appended at the bottom of the spine block whenever any card is
+  pending; the destination name is used only when it already reads as a
+  human name rather than an opaque provider id (Slack/Chat destination ids
+  are validated elsewhere to always begin with a provider ID prefix, never
+  `#`), so most deployments honestly render the generic "your approval
+  channel" — this deliberately avoids a live directory-lookup read the
+  brief has never needed before. Unlike `snapshot_store`, `pending` IS
+  threaded through every runtime brief render (not just the daily post):
+  pointers/tally are read-only, so there's no "resets the baseline" hazard
+  the snapshot write has.
+- **Chosen over:** a live Slack/Chat API call to resolve a friendly channel
+  name (would add a read the brief has never needed and could fail/slow
+  down a read-only preview); writing the snapshot on every brief render
+  (rejected — see above); folding the pointer/tally into `Brief.summary`'s
+  model-generated prose (rejected — the pointer must be exact and
+  deterministic, not a paraphrase the model might drop or reword).
+
 ## 2026-07-18 — Phase 2, chat/Slack as sources: ingestion (stage 1) and the unified brief spine (stage 2)
 
 - **Sources are polled, opt-in signals with no write or reply surface.**
@@ -821,3 +891,196 @@ Newest first. This log records decisions that constrain current implementation.
 - `attune doctor` gained a `source-channels` fatal check, sibling to
   `check_channel_routes`: a configured source channel/space without the
   credential needed to read it fails fast rather than silently no-op'ing.
+
+## 2026-07-18 — LABEL ships: the first hygiene write (Phase 3 stage 1, G9/G10)
+
+- `Action.LABEL` moves from an aspirational enum member to a real write
+  capability: `WorkspaceConnector.label_thread(thread_id, *, label, archive)`,
+  gated by a `LabelNotPermitted` structural refusal and a `supports_labeling()`
+  capability probe, mirroring `send_reply`/`SendNotPermitted` exactly. The
+  direct-OAuth implementation calls `users.threads.modify` (add the label;
+  `archive=True` additionally removes INBOX — Gmail's own definition of
+  archiving), gated by a `labels_enabled` constructor flag a caller sets ONLY
+  alongside the new `gmail.modify` scope (`SCOPE_MODIFY`/`SCOPES_LABEL` in
+  `connectors/google_oauth.py`) — the same double-gate discipline as
+  `send_enabled`. The Gmail label id is resolved (list-then-create-if-absent)
+  and cached per connector instance, bounded to the distinct label names
+  actually used.
+- **google_oauth-only, pending an MCP contract v2.** Contract v1's
+  `modify_labels` tool is add-only — it cannot remove INBOX, so it cannot
+  archive. `McpWorkspaceConnector` never overrides `supports_labeling()`
+  (stays the base class's `False`) or `label_thread` (stays refused). New
+  write actions land on the direct-OAuth backend first; MCP catches up only
+  when a versioned contract change adds a label-removal-capable tool.
+  `docs/mcp-contract.md`'s required tools are untouched by this stage.
+- **Three independent gates, not one.** The dispatcher only builds an archive
+  proposal when ALL of: (1) the permission matrix grants `(LABEL, MAIL)` at
+  PROPOSE or above (granted by default in `default_matrix()` — proposing is
+  safe, since the effect still needs a human's approval); (2)
+  `connector.supports_labeling()` is true (the structural capability check,
+  false for MCP); (3) `ATTUNE_MAIL_LABELS_ENABLED` is true (the deployment's
+  own opt-in, default off, checked by `attune doctor`'s new `mail-labels`
+  fatal check — FAIL if enabled on a backend that can't support it, SKIP if
+  disabled). Any one gate absent, and a NOISE thread behaves exactly as it
+  did before this stage: triaged, audited, dropped. No gate is a substitute
+  for another; the human's approval on the card itself is a fourth,
+  always-present gate none of the above can skip.
+- **Deterministic proposal, no model call.** The archive proposal's text
+  ("Archive '<subject>' from <sender> — triaged noise: <reason>") is built
+  once from the triage result already computed — there is nothing left to
+  draft with a model, since the thread was already classified. The proposal
+  rides the EXISTING draft-and-approve graph machinery (same
+  retrieve→draft→gate→approve→apply→capture shape, same approval card, same
+  pending-registry dedupe, same freshness check at apply time), but through a
+  SECOND compiled graph instance (`AppContext.label_graph`), not a
+  parameterized branch of the shared one: `draft_fn` only receives
+  `(client, incoming_summary, memories, domain)`, and `domain="mail"` can't
+  distinguish a label proposal from a DRAFT_REPLY, so the deterministic
+  echo (`orchestrator.draft_approve.archive_draft_fn`) and the
+  label-specific apply (`make_label_apply_fn`, calling `label_thread` instead
+  of `create_draft`) need their own compiled graph. Both graphs share every
+  other collaborator (client, store, matrix, checkpointer, importance
+  profile) and a disjoint thread-id namespace (`archive:...` vs
+  `gmail:...`/`followup:...`), so nothing about them can collide.
+- **The approval-signal asymmetry for hygiene actions.** Everywhere else,
+  approving a proposal is positive engagement with the sender, and Phase 1's
+  capture node dual-writes that into the sender's importance profile. A
+  LABEL capture means the opposite: approving an archive proposal says "this
+  sender is noise," and feeding that through as an `APPROVED` importance
+  signal would push a noisy sender's tier toward HIGH — backwards. The
+  capture node (parameterized, not a new node: it checks
+  `state["action"] == Action.LABEL.value`) still writes the raw signal to
+  memory for nightly consolidation, tagged `hygiene_action`, but never calls
+  `importance_profile.record_signal` for a LABEL capture. A pinned regression
+  test asserts a sender's profile signals are unchanged after their archive
+  proposal is approved.
+- **Ranking before the cap (G10).** When several NOISE threads clear all
+  three gates in one Gmail notification, they're collected (not offered
+  immediately) and ranked most-confidently-noise first — LOW-tier sender,
+  then NORMAL, then HIGH — before `MAX_LABEL_PROPOSALS_PER_RUN` (3) binds,
+  mirroring the calendar-conflict and follow-up-nudge caps already in place.
+  The same stage also threads the importance profile into
+  `orchestrator.followup.find_nudge_candidates`: HIGH-tier counterparts win
+  the nudge cap now, ranked before it binds, with arrival-order kept as the
+  exact behavior when no profile is supplied.
+
+## 2026-07-18 — Calendar writes ship: DECLINE_INVITE/RESCHEDULE (Phase 3 stage 2)
+
+- `Action.DECLINE_INVITE` and `Action.RESCHEDULE` move from aspirational
+  enum members to real write capabilities:
+  `WorkspaceConnector.decline_invite(event_id)` and
+  `WorkspaceConnector.reschedule_event(event_id, *, new_start, new_end)`,
+  gated by a `CalendarWriteNotPermitted` structural refusal and a
+  `supports_calendar_writes()` capability probe — the exact same shape as
+  `label_thread`/`supports_labeling()` in stage 1. The direct-OAuth
+  implementation calls `events.patch`: `decline_invite` fetches the current
+  attendees array, flips only the entry matching the principal (Google's
+  `self: true` flag, falling back to an `owner_email` match) to
+  `responseStatus: "declined"`, and sends the whole array back (Calendar's
+  PATCH replaces array fields rather than merging them).
+  `reschedule_event` **refuses unless the principal is the event's
+  organizer, verified from a FRESH `events.get` fetch performed inside the
+  method itself** — never from a cached `CalendarEvent`, never from
+  anything a caller passes in, and never from checkpointed workflow state.
+  Both are gated by a `calendar_writes_enabled` constructor flag, set only
+  alongside a real calendar write scope — mirroring `send_enabled`/
+  `labels_enabled` exactly.
+- **Unlike `gmail.modify`, no new scope is actually needed.** The scope
+  both new methods use, `https://www.googleapis.com/auth/calendar.events`,
+  was already part of `credentials.py`'s `SCOPES_DEFAULT` — added for
+  Phase 2's tentative-hold creation (`create_hold`, which has no equivalent
+  double gate). `google_oauth.py` still names an escalating
+  `SCOPES_CALENDAR_WRITE` tuple for documentation parity with
+  `SCOPES_LABEL`, but a standard Attune install already carries this scope;
+  `ATTUNE_CALENDAR_WRITES_ENABLED`'s real job is the deployment's own
+  opt-in, not scope escalation.
+- **google_oauth-only, pending an MCP contract v2.** Contract v1 has no
+  decline or reschedule tool. `McpWorkspaceConnector` never overrides
+  `supports_calendar_writes()` (stays the base class's `False`) or either
+  method (stays refused). The contract gains three OPTIONAL, backward-
+  compatible event fields this stage (`organizer`, `organizer_is_self`,
+  `response_status`) that a server may simply omit — this does not bump
+  the contract version, and doesn't change what MCP can write.
+- **Three independent gates per action, not one.** The dispatcher only
+  builds a DECLINE_INVITE or RESCHEDULE proposal when ALL of: (1) the
+  permission matrix grants `(DECLINE_INVITE, CALENDAR)` /
+  `(RESCHEDULE, CALENDAR)` at PROPOSE or above (both granted by default in
+  `default_matrix()` — proposing is safe); (2)
+  `connector.supports_calendar_writes()` is true (false for MCP); (3)
+  `ATTUNE_CALENDAR_WRITES_ENABLED` is true (the deployment's own opt-in,
+  default off, checked by `attune doctor`'s new `calendar-writes` fatal
+  check — FAIL if enabled on a backend that can't support it, SKIP if
+  disabled). A single flag and doctor check cover BOTH actions, since both
+  need the same scope and the same opt-in decision. The human's approval on
+  the card is a fourth, always-present gate neither above can skip.
+- **Deterministic proposal text, no model call.** Both proposals ride a
+  dedicated compiled graph (`AppContext.calendar_action_graph`), sibling to
+  stage 1's `label_graph`: a fixed `draft_fn`
+  (`orchestrator.draft_approve.calendar_action_draft_fn`) that echoes back
+  the reason/slot text the dispatcher already computed, and a dedicated
+  `apply_fn` (`make_calendar_action_apply_fn`) that branches on
+  `state["action"]` to call `decline_invite` or `reschedule_event` — never
+  `create_draft`. A third compiled graph instance is necessary for the same
+  reason `label_graph` needed a second one: `domain="calendar"` alone can't
+  distinguish these from a real CREATE_HOLD proposal, which DOES call a
+  model to draft its reschedule-request message.
+- **DECLINE_INVITE detection and reasons (Deliverable B).** `CalendarEvent`
+  gained `organizer` (email), `organizer_is_self` (bool, from the
+  provider's own `organizer.self` flag — more reliable than an email-string
+  comparison and fail-closed by default), and `response_status` (the
+  PRINCIPAL's own attendee responseStatus). All three default to their
+  safe/empty value, so a connector that predates this stage — or an MCP
+  server that never populates them — simply never triggers either new
+  proposal path; this is a backward-compatible extension of the ingestion
+  mapping, not a breaking one. A changed event with `response_status ==
+  "needsAction"` is proposed for decline ONLY when at least one
+  deterministic reason holds: it conflicts with an existing event (reusing
+  `detect_conflict`'s own result for that event — no second detection call
+  — and excluding the case where the "conflict" is just two undecided
+  invites colliding), or its organizer's importance tier is LOW (the reason
+  text reuses `TierAssessment.reason` verbatim, swapping in "organizer" for
+  "sender": "Decline 'X' — organizer ignored 3 of last 3 proposals").
+  Capped at `MAX_DECLINE_PROPOSALS_PER_RUN` (2, deliberately smaller than
+  the hold/reschedule cap — declining is more consequential than a hold
+  offer); conflict-reason candidates rank above tier-reason ones before the
+  cap binds, same two-phase collect-then-rank shape as every other capped
+  offer in this codebase.
+- **RESCHEDULE eligibility and the combined calendar-card cap
+  (Deliverable C).** When a conflict is detected and the principal
+  organizes one of the two events (`organizer_is_self` on either
+  already-fresh `CalendarEvent`) and all three RESCHEDULE gates hold, the
+  dispatcher proposes moving the principal's OWN event to a free slot from
+  `orchestrator.scheduling.propose_free_slots` — reused unchanged, same
+  same-day-first/bounded-search math the hold offer already used. When the
+  principal organizes neither event, or a gate is missing, or no free slot
+  exists for their event, the existing CREATE_HOLD offer path is the
+  fallback, completely unchanged. Both offer kinds share ONE combined cap,
+  `MAX_HOLD_OFFERS_PER_RUN` (3) — a conflict yields at most one card
+  (reschedule or hold), and that single combined cap is what bounds the
+  calendar approval channel per run, documented at the constant rather than
+  introducing a second one.
+- **The hygiene-actions capture rule is now a set, not stacked booleans.**
+  `orchestrator.draft_approve.HYGIENE_ACTIONS` generalizes stage 1's
+  `is_label_action` check to `{LABEL, DECLINE_INVITE, RESCHEDULE}`; the
+  capture node's docstring is now the one place that states the full rule:
+  only DRAFT_REPLY and FOLLOW_UP approvals feed the sender's importance
+  profile as positive engagement. Every hygiene action still writes its
+  raw signal to memory (tagged `hygiene_action`) for nightly consolidation,
+  but never calls `importance_profile.record_signal` — approving a decline
+  or reschedule says "deprioritize this organizer's meeting," not "engage
+  with them more," and feeding that through as APPROVED would push the
+  organizer's tier the wrong way, same backwards-signal problem stage 1
+  identified for LABEL. `sender` is left `None` throughout both new
+  proposal builders (matching CREATE_HOLD's existing precedent) rather than
+  carrying the organizer through state, so the ignore-sweep's IGNORED
+  capture can't accidentally feed the profile either — the asymmetry holds
+  regardless of which path captures the signal. Pinned with regression
+  tests: approving a decline/reschedule leaves the organizer's profile
+  unchanged.
+- **Scope note: the push-notification path only.** Decline/reschedule
+  proposals are wired into `dispatcher.handle_calendar_notification` (the
+  ranked, multi-event Calendar webhook path) only. `submit_calendar_event`
+  (poll-mode and the retry-drain, which handle one already-fetched event at
+  a time with no ranking) continue to offer holds exactly as before this
+  stage; extending them for poll-mode parity is a follow-up, not part of
+  this stage.
