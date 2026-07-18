@@ -2,6 +2,32 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-18 — The local audit log is hash-chained; local state takes file locks
+
+- Every line the local `JsonlAuditLog` appends now carries `prev_hash` and
+  `entry_hash` (SHA-256 over the previous hash plus the entry's canonical
+  JSON, genesis all-zeros), mirroring the hosted hash-chained audit in a
+  lightweight file form. `verify()` walks the chain and Doctor runs it as a
+  non-fatal `audit-chain` check, because `grants.py` folds this file into
+  autonomy-graduation suggestions and a silently edited or deleted line
+  would skew them.
+- Lines written before hashing are tolerated only as a prefix; an unhashed
+  line after the chain begins is treated as tampering. Pure tail truncation
+  is honestly documented as undetectable from the file alone — an external
+  anchored head (the hosted outbox's role) is the future answer, not a
+  heavier local database.
+- `JsonPendingApprovals` and `JsonlAuditLog` read-modify-write sections now
+  also hold an OS-level advisory `flock` on a dedicated `.lock` file
+  (`fslock.locked`), closing the cross-process double-claim race that an
+  in-process `threading.RLock` alone cannot. The lock is advisory by scope
+  (one principal, cooperating processes); platforms without `fcntl` degrade
+  to the in-process lock with one logged warning.
+- This was selected over adopting SQLite for these stores (heavier swap,
+  same trust boundary), OS append-only file attributes (root-owned, not
+  portable), and signing entries with a key (a local attacker who can edit
+  the file can read a local key; the chain targets accidental and
+  unprivileged tampering, not a root adversary).
+
 ## 2026-07-18 — The authenticated session is the web conversation route
 
 - The browser conversation surface has no installation, preference, or

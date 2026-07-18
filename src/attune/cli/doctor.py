@@ -114,6 +114,31 @@ def check_channel_routes(settings) -> tuple[str, str]:
     return PASS, "configured routes have credentials, destinations, and allowlists"
 
 
+def check_audit_chain(settings) -> tuple[str, str]:
+    """Verify the local JSONL audit log's hash chain (security finding F1).
+
+    ``grants.py``'s ``track_records``/``suggest_graduations`` fold this file
+    into autonomy-graduation decisions, so a silently edited or deleted line
+    would skew them without anyone noticing. This walks the chain the same
+    way :meth:`JsonlAuditLog.verify` does and reports the first place it
+    breaks, rather than letting Doctor's battery pass over a tampered file.
+    """
+    import os
+
+    from ..audit.log import JsonlAuditLog
+
+    path = settings.audit_log_path
+    if not os.path.exists(path):
+        return SKIP, f"{path} does not exist yet"
+
+    result = JsonlAuditLog(path).verify()
+    if not result.ok:
+        return FAIL, f"line {result.first_bad_line}: {result.reason}"
+    return PASS, (
+        f"{result.checked} hashed, {result.legacy} legacy line(s), chain intact"
+    )
+
+
 def run_doctor(
     checks: list[Check] | None = None,
     *,
@@ -339,6 +364,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("llm", check_llm),
         Check("workspace", check_workspace),
         Check("channels", lambda: check_channel_routes(settings)),
+        Check("audit-chain", lambda: check_audit_chain(settings)),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),
         Check("qdrant", check_qdrant),

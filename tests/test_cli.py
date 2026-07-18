@@ -14,6 +14,7 @@ from attune.cli.doctor import (
     WARN,
     Check,
     _qdrant_ready_url,
+    check_audit_chain,
     check_channel_routes,
     run_doctor,
 )
@@ -293,6 +294,61 @@ def test_channel_routes_accept_complete_google_chat_only_configuration():
     })
 
     assert check_channel_routes(settings)[0] == PASS
+
+
+# ---------------------------------------------------------------------------
+# audit-chain (security finding F1)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_chain_skips_when_file_absent(tmp_path):
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_AUDIT_LOG_PATH": str(tmp_path / "audit.log.jsonl"),
+    })
+    status, detail = check_audit_chain(settings)
+    assert status == SKIP
+    assert "audit.log.jsonl" in detail
+
+
+def test_audit_chain_passes_on_clean_chained_file(tmp_path):
+    from attune.audit.log import JsonlAuditLog
+    from attune.config import Settings
+
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    log.record(thread_id="t1", workflow="w", events=[
+        {"event": "a", "ts": "2026-07-10T00:00:00+00:00"},
+        {"event": "b", "ts": "2026-07-10T00:00:01+00:00"},
+    ])
+
+    settings = Settings.from_env({"ATTUNE_AUDIT_LOG_PATH": str(path)})
+    status, detail = check_audit_chain(settings)
+    assert status == PASS
+    assert "2 hashed" in detail
+
+
+def test_audit_chain_fails_with_line_number_on_tamper(tmp_path):
+    import json
+
+    from attune.audit.log import JsonlAuditLog
+    from attune.config import Settings
+
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    log.record(thread_id="t1", workflow="w", events=[
+        {"event": "a", "ts": "2026-07-10T00:00:00+00:00"},
+        {"event": "b", "ts": "2026-07-10T00:00:01+00:00"},
+    ])
+    lines = [json.loads(line) for line in path.read_text().strip().split("\n")]
+    lines[1]["event"] = "tampered"
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+    settings = Settings.from_env({"ATTUNE_AUDIT_LOG_PATH": str(path)})
+    status, detail = check_audit_chain(settings)
+    assert status == FAIL
+    assert "line 2" in detail
 
 
 # ---------------------------------------------------------------------------
