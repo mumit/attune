@@ -135,6 +135,16 @@ class Settings:
     destination_visibility_acknowledged: bool = False
     slack_default_channel: str | None = None
     chat_default_space: str | None = None
+
+    # Phase 2 stage 1 (docs/future-state.md, gaps G1/G3): opt-in Slack
+    # channels / Chat spaces ATTENDED AS SOURCES — every message in them is
+    # untrusted signal for triage, never a command, regardless of sender.
+    # Empty/absent = feature off (default). See ingestion/sources.py.
+    slack_source_channels: frozenset[str] = frozenset()
+    chat_source_spaces: frozenset[str] = frozenset()
+    attention_path: str = "./attention.json"
+    source_poll_state_path: str = "./source_poll_state.json"
+
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -266,6 +276,12 @@ class Settings:
             destination_visibility_acknowledged=_is_true(e.get("ATTUNE_ACK_DESTINATION_VISIBILITY")),
             slack_default_channel=e.get("ATTUNE_SLACK_CHANNEL"),
             chat_default_space=e.get("ATTUNE_CHAT_SPACE"),
+            slack_source_channels=_csv_set(e.get("ATTUNE_SLACK_SOURCE_CHANNELS")),
+            chat_source_spaces=_csv_set(e.get("ATTUNE_CHAT_SOURCE_SPACES")),
+            attention_path=_path("ATTUNE_ATTENTION_PATH", "attention.json"),
+            source_poll_state_path=_path(
+                "ATTUNE_SOURCE_POLL_STATE_PATH", "source_poll_state.json"
+            ),
         )
 
     def validate(self) -> None:
@@ -279,6 +295,18 @@ class Settings:
                 raise ValueError(f"unknown channel {name!r}; expected slack or google_chat")
         if self.approval_channel and self.approval_channel not in CHANNEL_NAMES:
             raise ValueError("ATTUNE_APPROVAL_CHANNEL must be slack or google_chat")
+        for channel_id in self.slack_source_channels:
+            if not channel_id.startswith(("C", "G")):
+                raise ValueError(
+                    "ATTUNE_SLACK_SOURCE_CHANNELS entries must be Slack channel "
+                    "IDs beginning C or G"
+                )
+        for space in self.chat_source_spaces:
+            if not space.startswith("spaces/"):
+                raise ValueError(
+                    "ATTUNE_CHAT_SOURCE_SPACES entries must be resource names "
+                    "such as spaces/AAAA"
+                )
         self.validate_proactive_destinations()
 
     def validate_proactive_destinations(self) -> None:

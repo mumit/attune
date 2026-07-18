@@ -58,6 +58,14 @@ from .state import (
 )
 from .retry_queue import RetryItem, SqliteRetryQueue
 from .workspace_polling import JsonWorkspacePollState, poll_workspace_connector
+from .sources import (
+    SOURCE_POLL_MAX_MESSAGES,
+    SourceMessage,
+    chat_message_to_source,
+    poll_chat_source,
+    poll_slack_source,
+    slack_message_to_source,
+)
 
 __all__ = [
     "ensure_watch",
@@ -96,4 +104,10 @@ __all__ = [
     "JsonCalendarSyncState",
     "ChatInteraction",
     "decode_chat_interaction",
+    "SourceMessage",
+    "SOURCE_POLL_MAX_MESSAGES",
+    "poll_slack_source",
+    "poll_chat_source",
+    "slack_message_to_source",
+    "chat_message_to_source",
 ]

@@ -115,6 +115,7 @@ def triage_thread(
     sender: str | None = None,
     user_id: str = "me",
     importance_profile: Any = None,
+    trusted_context: str | None = None,
 ) -> TriageResult:
     """Classify one incoming thread as URGENT, ROUTINE, or NOISE.
 
@@ -135,6 +136,15 @@ def triage_thread(
     of the parse-failure default, unlike the soft memory garnish above.
     Profile failures fall back to the unadjusted result; a broken profile
     read must never break triage.
+
+    ``trusted_context``, when given, is appended to the SYSTEM prompt —
+    the same placement as the past-reactions garnish — never to the
+    untrusted user blob. It exists for provider facts trusted code computed
+    from event metadata (e.g. "this message @mentions the principal"): a
+    fact riding inside the untrusted blob could be forged by a sender
+    simply typing the same sentence, whereas nothing a sender writes can
+    reach the system prompt. Callers must pass only text they constructed
+    themselves, never content from the message.
     """
     system = (
         "Classify the incoming message as exactly one of: URGENT, ROUTINE, NOISE.\n"
@@ -156,6 +166,12 @@ def triage_thread(
         system += (
             "\n\nPAST REACTIONS (the user's own captured behavior toward this "
             "sender — trusted context, weigh it):\n" + reactions
+        )
+    if trusted_context:
+        system += (
+            "\n\nPROVIDER FACTS (computed by trusted code from event "
+            "metadata, not from the message content — weigh them):\n"
+            + trusted_context
         )
     resp = create_chat_completion(
         client,

@@ -1064,6 +1064,236 @@ def test_multiple_threads_mixed_triage_only_drafts_non_noise():
 
 
 # ---------------------------------------------------------------------------
+# handle_source_message (Phase 2 stage 1, docs/future-state.md; G1/G3)
+# ---------------------------------------------------------------------------
+
+from attune.dispatcher import handle_source_message
+from attune.ingestion.sources import SourceMessage
+from attune.orchestrator.attention import AttentionItem
+
+
+class _FakeAttentionStore:
+    def __init__(self):
+        self.items: list[AttentionItem] = []
+
+    def add(self, item: AttentionItem) -> None:
+        self.items.append(item)
+
+    def recent(self, *, since=None, limit=None):
+        return list(self.items)
+
+
+def _source_msg(
+    *,
+    source="slack",
+    channel_ref="C1",
+    channel_name="general",
+    sender_ref="U2",
+    sender_display="alice",
+    text="are we still on for 3pm",
+    thread_ref=None,
+    mentions_principal=False,
+):
+    return SourceMessage(
+        source=source, channel_ref=channel_ref, channel_name=channel_name,
+        sender_ref=sender_ref, sender_display=sender_display, text=text,
+        ts=datetime(2026, 7, 18, 15, 0, tzinfo=timezone.utc),
+        thread_ref=thread_ref, mentions_principal=mentions_principal,
+    )
+
+
+def test_source_message_noise_is_dropped_not_stored():
+    app = _fake_app_ctx(graph=_FakeGraph())
+    store = _FakeAttentionStore()
+
+    result = handle_source_message(
+        app, _source_msg(), attention_store=store, user_id="me",
+        triage_fn=lambda client, summary: TriageResult(Priority.NOISE, "faq bot"),
+    )
+
+    assert result.priority == Priority.NOISE
+    assert store.items == []
+
+
+def test_source_message_routine_is_stored_without_notification():
+    app = _fake_app_ctx(graph=_FakeGraph())
+    store = _FakeAttentionStore()
+    notified = []
+
+    result = handle_source_message(
+        app, _source_msg(sender_display="alice", channel_name="eng"),
+        attention_store=store, user_id="me",
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fyi"),
+        notify=notified.append,
+    )
+
+    assert result.priority == Priority.ROUTINE
+    assert len(store.items) == 1
+    item = store.items[0]
+    assert item.source == "slack"
+    assert item.channel_ref == "C1"
+    assert item.sender_display == "alice"
+    assert item.priority == Priority.ROUTINE
+    assert notified == []
+
+
+def test_source_message_urgent_is_stored_and_notifies():
+    app = _fake_app_ctx(graph=_FakeGraph())
+    store = _FakeAttentionStore()
+    notified = []
+
+    result = handle_source_message(
+        app, _source_msg(sender_display="bob", channel_name="incidents"),
+        attention_store=store, user_id="me",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "escalation"),
+        notify=notified.append,
+    )
+
+    assert result.priority == Priority.URGENT
+    assert len(store.items) == 1
+    assert len(notified) == 1
+    assert "bob" in notified[0]
+    assert "incidents" in notified[0]
+
+
+def test_source_message_no_notify_when_route_absent():
+    app = _fake_app_ctx(graph=_FakeGraph())
+    store = _FakeAttentionStore()
+
+    # notify=None (no configured notification route) must not raise.
+    result = handle_source_message(
+        app, _source_msg(), attention_store=store, user_id="me",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "escalation"),
+    )
+    assert result.priority == Priority.URGENT
+    assert len(store.items) == 1
+
+
+def test_source_message_never_touches_graph_or_pending():
+    """The dispatcher-level guarantee this deliverable is built around: no
+    draft-approve workflow, no write, no reply — handle_source_message takes
+    no graph/post_approval/pending argument at all, so there is no write
+    surface for triage to reach regardless of outcome."""
+    graph = _FakeGraph()
+    app = _fake_app_ctx(graph=graph)
+    store = _FakeAttentionStore()
+
+    handle_source_message(
+        app, _source_msg(), attention_store=store, user_id="me",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "x"),
+    )
+
+    assert graph.calls == []
+
+
+def test_source_message_mentions_principal_recorded_on_item():
+    app = _fake_app_ctx(graph=_FakeGraph())
+    store = _FakeAttentionStore()
+
+    handle_source_message(
+        app, _source_msg(mentions_principal=True), attention_store=store,
+        user_id="me",
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fyi"),
+    )
+
+    assert store.items[0].mentions_principal is True
+
+
+def test_source_summary_never_carries_the_mention_fact_inline():
+    """The @mention provider fact must NOT be rendered into the untrusted
+    summary blob — a sender could forge the same sentence in their message
+    text. It travels via ``triage_thread``'s ``trusted_context`` parameter
+    into the system prompt instead (see tests/test_triage.py for the
+    placement tests)."""
+    captured = {}
+
+    def _capturing_triage(client, summary):
+        captured["summary"] = summary
+        return TriageResult(Priority.ROUTINE, "fyi")
+
+    app = _fake_app_ctx(graph=_FakeGraph())
+    store = _FakeAttentionStore()
+    handle_source_message(
+        app, _source_msg(mentions_principal=True), attention_store=store,
+        user_id="me", triage_fn=_capturing_triage,
+    )
+
+    assert "TRUSTED" not in captured["summary"]
+    assert "@mentions the principal" not in captured["summary"]
+    # The fact still reaches the attention item for the brief's use.
+    assert store.items[0].mentions_principal is True
+
+
+def test_source_message_audit_event_is_content_free():
+    audit_log = _FakeAuditLog()
+    app = _fake_app_ctx(graph=_FakeGraph(), audit_log=audit_log)
+    store = _FakeAttentionStore()
+
+    handle_source_message(
+        app, _source_msg(text="the secret plan is X"), attention_store=store,
+        user_id="me", audit_log=audit_log,
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fyi"),
+    )
+
+    assert len(audit_log.records) == 1
+    record = audit_log.records[0]
+    event = record["events"][0]
+    assert event["event"] == "source_triaged"
+    assert event["source"] == "slack"
+    assert event["channel_ref"] == "C1"
+    assert event["priority"] == "routine"
+    assert event["base_priority"] == "routine"
+    assert event["adjusted"] is False
+    # No message text anywhere in the audited event.
+    assert "secret plan" not in str(event)
+
+
+def test_source_message_noise_audit_event_recorded_distinctly():
+    audit_log = _FakeAuditLog()
+    app = _fake_app_ctx(graph=_FakeGraph(), audit_log=audit_log)
+    store = _FakeAttentionStore()
+
+    handle_source_message(
+        app, _source_msg(), attention_store=store, user_id="me",
+        audit_log=audit_log,
+        triage_fn=lambda client, summary: TriageResult(Priority.NOISE, "spam"),
+    )
+
+    assert audit_log.records[0]["events"][0]["event"] == "source_triaged_noise"
+
+
+def test_source_message_low_tier_sender_demotes_routine_to_noise():
+    """Phase 1 regression pattern applied to a chat source (deliverable 7):
+    a LOW-pinned chat sender's ROUTINE message demotes to NOISE via the same
+    deterministic importance-profile adjustment Gmail threads get."""
+
+    class _AlwaysLowProfile:
+        def __init__(self):
+            self.assessed: list[str] = []
+
+        def assess(self, sender, *, now=None):
+            from attune.orchestrator.importance import ImportanceTier, TierAssessment
+
+            self.assessed.append(sender)
+            return TierAssessment(ImportanceTier.LOW, "pinned low", True)
+
+    profile = _AlwaysLowProfile()
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: standard update.")
+    app = _fake_app_ctx(graph=_FakeGraph(), client=client, importance_profile=profile)
+    store = _FakeAttentionStore()
+
+    result = handle_source_message(
+        app, _source_msg(sender_ref="noisy-bot-channel-user"),
+        attention_store=store, user_id="me",
+    )
+
+    assert profile.assessed == ["noisy-bot-channel-user"]
+    assert result.priority == Priority.NOISE
+    assert result.adjusted is True
+    assert store.items == []  # demoted to NOISE -> dropped, never stored
+
+
+# ---------------------------------------------------------------------------
 # handle_calendar_notification
 # ---------------------------------------------------------------------------
 

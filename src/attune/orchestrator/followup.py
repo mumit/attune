@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
-from ..brief import find_quiet_threads
 from ..connectors.base import EmailThread, WorkspaceConnector
 
 MAX_NUDGES_PER_RUN = 3
@@ -86,6 +85,15 @@ def find_nudge_candidates(
 ) -> list[EmailThread]:
     """Quiet threads worth nudging about: reuses the brief's quiet-thread
     truth, then drops anything nudged within the cooldown, capped hard."""
+    # Imported here, not at module top: brief.py imports the orchestrator
+    # package (importance tiers, attention, correlation), and the package
+    # __init__ imports this module — a top-level import of brief from here
+    # closes that cycle and breaks `import attune.brief` in isolation
+    # (pre-existing; became easier to trip once Phase 1/2 grew brief's
+    # orchestrator imports). The function-level import keeps brief the
+    # single source of quiet-thread truth without the cycle.
+    from ..brief import find_quiet_threads
+
     now = now or datetime.now(timezone.utc)
     cooldown = timedelta(days=cooldown_days)
     candidates: list[EmailThread] = []

@@ -2,6 +2,78 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-18 — Phase 2, chat/Slack as sources: ingestion (stage 1) and the unified brief spine (stage 2)
+
+- **Sources are polled, opt-in signals with no write or reply surface.**
+  Attended Slack channels/Chat spaces (`ATTUNE_SLACK_SOURCE_CHANNELS` /
+  `ATTUNE_CHAT_SOURCE_SPACES`) flow cursor → `dispatcher.handle_source_message`
+  → triage → the attention store, exactly like a Gmail thread, and only
+  ROUTINE/URGENT survive (NOISE is dropped, content-free, before it ever
+  reaches storage). This is deliberately unrelated to the interaction
+  allowlists (`ATTUNE_SLACK_ALLOWED_USERS` / `ATTUNE_CHAT_ALLOWED_USERS`),
+  which gate who may *command* Attune over a DM: every source message is
+  untrusted signal regardless of sender, including the principal's own
+  account, and there is no draft, reply, or write path anywhere on this
+  path — a successful prompt injection inside a source message can only
+  ever skew a priority classification, never cause an effect.
+- **Provider facts travel via `trusted_context`, never inside the untrusted
+  blob.** Deterministic, provider-computed facts about a source message
+  (currently: `mentions_principal`) are passed to `triage_thread` as a
+  separate `trusted_context` string that lands in the system prompt, not
+  folded into the `"[UNTRUSTED mail]"`-wrapped message body. The reason is
+  the forged-marker rationale: if a fact like "this message mentions the
+  principal" were rendered as a line inside the untrusted content block, any
+  sender could forge that exact line by typing it into their own message
+  text, making the signal worthless. Keeping it out-of-band, computed only
+  from provider event metadata (Slack's literal `<@MEMBER_ID>`, Chat's
+  structured `USER_MENTION` annotation) and placed where message content
+  cannot reach, is what makes it trustworthy.
+- **Deterministic cross-source correlation (G3), conservative on purpose.**
+  `orchestrator/correlation.py` links two items — mail thread, attended
+  source message, or calendar event, normalized to `CorrelatableItem` — when
+  they share an exact participant token (a lowercased email, or a lowercased
+  2+-word display name; a bare single-word name, e.g. a common first name,
+  is dropped by the normalizer and can never link two items on its own) OR
+  when their significant-token (≥4 chars, stopword-filtered) title/summary
+  text overlaps by at least 2 shared tokens, or by at least half of the
+  smaller side's token count when that side has 2+ tokens. Grouping is a
+  plain union-find over all pairs (transitive merges), pure and
+  deterministic — no model call, per the plan's explicit deferral of
+  embedding similarity to a later phase. False merges are worse than missed
+  links, so every threshold is chosen to keep merges rare, not to maximize
+  recall.
+- **The unified "what matters now" spine (G11) leads the brief; existing
+  per-source sections stay as drill-downs, not a replacement.**
+  `assemble_brief` correlates unread mail, today's events, and (when an
+  `attention_store` is supplied) attended-source items from the last 24
+  hours, ranks the resulting groups, and renders up to 10 as one line each
+  ahead of the unread-mail/calendar/meeting-prep/waiting-on sections, which
+  are unchanged in content. The sort key, in order: (1) any URGENT attention
+  item or any `mentions_principal=True` item anywhere in the group; (2) the
+  best counterpart importance tier in the group (HIGH > NORMAL > LOW) via
+  the same importance profile already threaded through the brief; (3)
+  multi-source groups (2+ distinct correlated kinds) above single-source
+  groups; (4) recency. A LOW-tier or uncorrelated item still appears in its
+  own per-source section even when it doesn't make the spine's cap — the
+  spine is a lead, never a filter (mirrors Phase 1's "LOW is reordered, never
+  dropped" decision for the unread-mail section).
+- **`attention_store` is optional and threaded the same way
+  `importance_profile` was in Phase 1.** `runtime.py`'s shared
+  `_assemble_runtime_brief` helper (used by the daily posted brief and every
+  Slack/Chat "give me the brief" request) passes `app`'s/`Runtime`'s real
+  attention store; the CLI's plain, `--post`-less preview path does not
+  construct one by default, for the same reason Phase 1 gave for
+  `importance_profile` — it would create a local JSON state file (and its
+  lock file) as a side effect of a read-only preview command. Absent a
+  store, the spine is simply built from mail and calendar alone.
+- **Chosen over:** embedding similarity for correlation (explicitly deferred
+  by the plan to a later phase — participants + topic-token matching is the
+  deterministic, model-free first cut); replacing the per-source sections
+  with the spine outright (rejected — the spine is a ranked lead over
+  everything, but a topic that doesn't correlate or doesn't make the top 10
+  must still be fully visible somewhere, which the existing sections already
+  guarantee).
+
 ## 2026-07-18 — Phase 1 learned importance, stage 2: deterministic triage adjustment
 
 - `triage_thread` applies the per-sender importance profile as a
@@ -714,3 +786,38 @@ Newest first. This log records decisions that constrain current implementation.
 - The broker-egress subnet was widened from `/28` to `/24` after Cloud Run
   direct-VPC health checks refused the `/28` for insufficient free
   addresses; the NAT scope itself (that one subnet) is unchanged.
+
+## 2026-07-18 — Slack/Chat as attended sources (Phase 2 stage 1)
+
+- Opt-in Slack channels (`ATTUNE_SLACK_SOURCE_CHANNELS`) and Chat spaces
+  (`ATTUNE_CHAT_SOURCE_SPACES`) are attended exactly like Gmail threads:
+  cursor -> triage -> attention store. This is a strictly separate concept
+  from the interaction allowlists (`ATTUNE_SLACK_ALLOWED_USERS` /
+  `ATTUNE_CHAT_ALLOWED_USERS`), which gate who may COMMAND Attune over a DM.
+  Source ingestion treats every message as untrusted signal regardless of
+  sender — including the principal's own account — and has no reply or
+  write path at all, so a successful prompt injection inside a source
+  message can only skew a priority classification, never cause an effect.
+- Cursor discipline reuses the existing per-channel high-water-mark store
+  (`ingestion.state.JsonChatPollState`, despite its Chat-specific name — it
+  was already a generic `{key: {last_seen}}` store) and the existing
+  `SqliteRetryQueue`, with new `"slack_source"`/`"chat_source"` kinds. The
+  cursor advances immediately once a bounded page is listed, decoupled from
+  per-message dispatch success, mirroring `gmail_history
+  .process_notification`'s baseline-then-dispatch split; a dispatch failure
+  is captured as a durable retry rather than blocking the cursor or being
+  silently dropped.
+- Mention detection is deterministic from provider event data only, never a
+  model call: Slack keys on literal `<@MEMBER_ID>` text against
+  `ATTUNE_SLACK_ALLOWED_USERS`; Chat keys on structured `USER_MENTION`
+  annotations against `ATTUNE_CHAT_ALLOWED_USERS` — both allowlists reused as
+  "the principal's own identifiers" rather than introducing a second config
+  surface for identity.
+- Source ingestion is polling-only regardless of `ATTUNE_INGESTION_MODE`:
+  Pub/Sub has no feed for arbitrary Slack channel history or Chat spaces
+  outside an interaction subscription. `Runtime.poll_sources_once` runs
+  inside the existing poll loop in poll mode, and on its own dedicated timer
+  thread under `google_pubsub` mode, so sources stay attended either way.
+- `attune doctor` gained a `source-channels` fatal check, sibling to
+  `check_channel_routes`: a configured source channel/space without the
+  credential needed to read it fails fast rather than silently no-op'ing.

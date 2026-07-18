@@ -173,6 +173,28 @@ Google Chat space:
 These requests produce a fresh brief. They are not answered merely from
 memory or the last polling cursor.
 
+### Attended channels and spaces
+
+Beyond the principal's own DMs, the owner can opt specific Slack channels
+(`ATTUNE_SLACK_SOURCE_CHANNELS`) or Google Chat spaces
+(`ATTUNE_CHAT_SOURCE_SPACES`) in as attended sources — a project channel or a
+team space Attune should treat as workload signal, not just a place it
+answers commands. Every message in an attended channel/space is triaged
+exactly like a Gmail thread (NOISE is dropped; ROUTINE/URGENT are recorded)
+and is never a command surface: nothing posted there can make Attune draft,
+reply, or act, regardless of who sent it or whether it mentions the
+principal. This is a separate opt-in from the interaction allowlist that
+governs who may message Attune directly.
+
+The morning brief now leads with one ranked list across all attended
+sources — "what matters now" — before the familiar unread-mail, calendar,
+meeting-prep, and waiting-on sections. A Slack message about a topic that
+also has an unread, related email shows up as one entry, not two, and names
+both places; entries with an urgent or @-mention signal, or from a
+consistently important sender, surface first. Every item still appears in
+its own section below regardless of whether it made the ranked list, so
+nothing attended is ever silently dropped from the brief.
+
 ## 2. Ask a live Workspace question
 
 The same conversation can narrow into Gmail or Calendar:
