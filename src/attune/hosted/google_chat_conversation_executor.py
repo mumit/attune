@@ -290,19 +290,21 @@ class GoogleChatConversationExecutor:
         if not turns or turns[-1].sequence != authority.user_sequence or turns[-1].actor_type != "user":
             raise RuntimeError("canonical user turn is unavailable")
         user_text = turns[-1].content
-        classified = self._models.complete(
-            task="classify",
-            messages=[
-                {"role": "system", "content": (
-                    "Classify the request as exactly one lowercase word: brief, gmail, "
-                    "calendar, write, or general. Any requested mutation is write."
-                )},
-                {"role": "user", "content": user_text[:8_000]},
-            ],
-        ).strip().lower()
-        if classified not in ROUTES:
-            raise RuntimeError("conversation classification is invalid")
-        route = _deterministic_route(user_text, classified)
+        route = _deterministic_route(user_text)
+        if route is None:
+            classified = self._models.complete(
+                task="classify",
+                messages=[
+                    {"role": "system", "content": (
+                        "Classify the request as exactly one lowercase word: brief, gmail, "
+                        "calendar, write, or general. Any requested mutation is write."
+                    )},
+                    {"role": "user", "content": user_text[:8_000]},
+                ],
+            ).strip().lower()
+            if classified not in ROUTES:
+                raise RuntimeError("conversation classification is invalid")
+            route = classified
         current = self._now()
         if current.tzinfo is None:
             raise RuntimeError("worker clock must be timezone-aware")
@@ -414,7 +416,8 @@ def _payload(job: HostedJob, *, purpose: str = PURPOSE) -> dict[str, object]:
     return parsed
 
 
-def _deterministic_route(text: str, classified: str) -> str:
+def _deterministic_route(text: str) -> str | None:
+    """Keyword-routed decision, or None when the model must classify instead."""
     if _WRITE.search(text):
         return "write"
     gmail = _GMAIL.search(text) is not None
@@ -425,4 +428,4 @@ def _deterministic_route(text: str, classified: str) -> str:
         return "gmail"
     if calendar:
         return "calendar"
-    return classified
+    return None

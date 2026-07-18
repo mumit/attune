@@ -53,8 +53,10 @@ class Models:
     def __init__(self, classified="general", answer="Hello from Attune."):
         self.classified = classified
         self.answer = answer
+        self.calls = []
 
     def complete(self, *, task, messages):
+        self.calls.append(task)
         return self.classified if task == "classify" else self.answer
 
 
@@ -74,13 +76,16 @@ class Replies:
 
 
 def test_slack_conversation_delivers_through_the_slack_reply_route_only():
-    work, replies = Work("hi there"), Replies()
+    work, replies, models = Work("hi there"), Replies(), Models()
     SlackConversationExecutor(
-        work, None, None, Models(), replies, now=lambda: NOW
+        work, None, None, models, replies, now=lambda: NOW
     )(TenantContext(TENANT), job())
     assert replies.slack_calls == [{"destination_id": DESTINATION, "job_id": JOB}]
     assert replies.google_calls == []
     assert work.appended[0]["content"] == "Hello from Attune."
+    # "hi there" is ambiguous for the deterministic keyword router, so the
+    # model classify call still runs before the converse call.
+    assert models.calls == ["classify", "converse"]
 
 
 def test_slack_conversation_refuses_google_chat_job_kind():
@@ -110,9 +115,14 @@ def test_slack_conversation_undelivered_reply_fails_the_job():
 
 
 def test_slack_mutation_request_is_refused_without_answer_model():
-    work, replies = Work("please send an email to the team"), Replies()
+    work, replies, models = Work("please send an email to the team"), Replies(), Models(
+        classified="general"
+    )
     SlackConversationExecutor(
-        work, None, None, Models(classified="general"), replies, now=lambda: NOW
+        work, None, None, models, replies, now=lambda: NOW
     )(TenantContext(TENANT), job())
     assert "does not perform email or calendar changes" in work.appended[0]["content"]
     assert replies.slack_calls
+    # The write keyword is a clearly-deterministic route, so the model is
+    # never invoked at all -- not even to classify.
+    assert models.calls == []

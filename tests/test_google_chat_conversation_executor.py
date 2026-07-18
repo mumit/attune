@@ -120,7 +120,26 @@ def test_obvious_gmail_and_calendar_requests_override_model_under_fixed_limits()
     ]
     assert workspace.calls[0][2] == {"query": "is:unread newer_than:14d", "limit": 10}
     assert workspace.calls[1][2]["limit"] == 25
-    assert models.calls[-1]["task"] == "converse"
+    assert [call["task"] for call in models.calls] == ["converse"]
+
+
+def test_deterministic_gmail_calendar_and_write_routes_skip_the_classify_call():
+    _, _, _, models, _ = execute("What emails do I have?", classification="general")
+    assert [call["task"] for call in models.calls] == ["converse"]
+
+    _, _, _, models, _ = execute("What is on my calendar?", classification="general")
+    assert [call["task"] for call in models.calls] == ["converse"]
+
+    _, _, _, models, _ = execute("Give me my brief for today", classification="general")
+    assert [call["task"] for call in models.calls] == ["converse"]
+
+    _, _, _, models, _ = execute("Please send an email to the team", classification="general")
+    assert models.calls == []
+
+
+def test_ambiguous_request_still_calls_the_classify_model():
+    _, _, _, models, _ = execute("Hello Attune", classification="general")
+    assert [call["task"] for call in models.calls] == ["classify", "converse"]
 
 
 def test_relative_dates_use_authoritative_local_time_and_label_live_calendar():
@@ -142,7 +161,7 @@ def test_mutation_request_is_refused_without_workspace_or_answer_model():
         "Delete that email and reschedule tomorrow's meeting", classification="gmail"
     )
     assert intents.calls == [] and workspace.calls == []
-    assert [call["task"] for call in models.calls] == ["classify"]
+    assert models.calls == []
     assert "does not perform" in work.appended[0]["content"]
     assert replies.calls
 
