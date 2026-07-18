@@ -136,6 +136,12 @@ variable "enable_slack_conversation" {
   default     = false
 }
 
+variable "enable_web_conversation" {
+  description = "Register the bounded hosted web conversation worker route and its model-gateway edge after security review; this route never touches the channel broker."
+  type        = bool
+  default     = false
+}
+
 variable "slack_channel_enabled" {
   description = "Configure the private broker's Slack installation routes after the platform Slack app, its secret versions, and their security gates exist."
   type        = bool

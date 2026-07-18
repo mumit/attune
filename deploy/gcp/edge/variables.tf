@@ -264,3 +264,9 @@ variable "slack_client_id" {
     error_message = "slack_client_id must be empty or a syntactically valid Slack app client ID."
   }
 }
+
+variable "enable_hosted_web_conversation" {
+  description = "Expose the identity-authenticated hosted web conversation message and turn-poll routes."
+  type        = bool
+  default     = false
+}

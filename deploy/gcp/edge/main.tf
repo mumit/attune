@@ -166,6 +166,10 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "ATTUNE_HOSTED_SLACK_INSTALL_ENABLED"
         value = tostring(var.enable_hosted_slack_install)
       }
+      env {
+        name  = "ATTUNE_HOSTED_WEB_CONVERSATION_ENABLED"
+        value = tostring(var.enable_hosted_web_conversation)
+      }
       dynamic "env" {
         for_each = var.enable_hosted_slack_install ? [1] : []
         content {
@@ -188,21 +192,21 @@ resource "google_cloud_run_v2_service" "control_plane" {
         }
       }
       dynamic "env" {
-        for_each = var.enable_hosted_policy || var.enable_hosted_channels || var.enable_hosted_channel_setup ? [1] : []
+        for_each = var.enable_hosted_policy || var.enable_hosted_channels || var.enable_hosted_channel_setup || var.enable_hosted_web_conversation ? [1] : []
         content {
           name  = "ATTUNE_AUDIT_WRITER_URL"
           value = local.runtime.audit_writer.uri
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports || var.enable_hosted_web_conversation ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_URL"
           value = local.runtime.dispatch_broker.uri
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports || var.enable_hosted_web_conversation ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_AUDIENCE"
           value = local.runtime.dispatch_broker.audience
@@ -1100,6 +1104,31 @@ resource "google_compute_security_policy" "edge" {
         enforce_on_key = "IP"
         rate_limit_threshold {
           count        = 5
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_web_conversation ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 893
+      description = "Permit only authenticated hosted web conversation message and turn-poll paths"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && (request.path == '/v1/conversation/messages' || request.path == '/v1/conversation/turns')"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        # 60/60s (vs. the 10/60s onboarding-ceremony rules) tolerates a
+        # browser tab polling turns every 2 seconds.
+        rate_limit_threshold {
+          count        = 60
           interval_sec = 60
         }
       }

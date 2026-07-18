@@ -218,6 +218,10 @@ resource "google_cloud_run_v2_service" "worker" {
         value = tostring(var.enable_slack_conversation)
       }
       env {
+        name  = "ATTUNE_ENABLE_WEB_CONVERSATION"
+        value = tostring(var.enable_web_conversation)
+      }
+      env {
         name  = "ATTUNE_HOSTED_TIMEZONE"
         value = var.hosted_timezone
       }
@@ -230,19 +234,21 @@ resource "google_cloud_run_v2_service" "worker" {
         value = local.secret_broker_audience
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation || var.enable_web_conversation ? [1] : []
         content {
           name  = "ATTUNE_MODEL_GATEWAY_URL"
           value = google_cloud_run_v2_service.model_gateway[0].uri
         }
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation || var.enable_web_conversation ? [1] : []
         content {
           name  = "ATTUNE_MODEL_GATEWAY_AUDIENCE"
           value = local.model_gateway_audience
         }
       }
+      # The web conversation route never touches the channel broker: it is
+      # excluded from this gate on purpose.
       dynamic "env" {
         for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
         content {
@@ -320,6 +326,15 @@ resource "google_cloud_run_v2_service" "worker" {
         length(var.alert_notification_channels) > 0
       )
       error_message = "Google Chat conversation activation requires dispatch, channel, model, and paging boundaries."
+    }
+
+    precondition {
+      condition = !var.enable_web_conversation || (
+        var.enable_dispatch_broker &&
+        var.enable_model_gateway &&
+        length(var.alert_notification_channels) > 0
+      )
+      error_message = "Web conversation activation requires the dispatch and model boundaries and paging; it never touches the channel broker."
     }
   }
 }
@@ -557,6 +572,14 @@ resource "google_cloud_run_v2_service" "dispatch_broker" {
           var.enable_slack_conversation ? [
             {
               purpose    = "channel.slack.converse"
+              queue      = local.foundation.jobs_queue
+              target_url = "${google_cloud_run_v2_service.worker.uri}/v1/tasks/dispatch"
+              audience   = local.worker_audience
+            }
+          ] : [],
+          var.enable_web_conversation ? [
+            {
+              purpose    = "channel.web.converse"
               queue      = local.foundation.jobs_queue
               target_url = "${google_cloud_run_v2_service.worker.uri}/v1/tasks/dispatch"
               audience   = local.worker_audience
