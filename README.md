@@ -59,7 +59,10 @@ configuration-only.
 See [Getting started](docs/getting-started.md), the complete
 [configuration reference](docs/configuration.md), the
 [user journey](docs/user-journey.md), [Design](docs/design.md), and
-[Deployment](docs/deployment.md). Operators building the managed service should
+[Deployment](docs/deployment.md). A full point-in-time product review lives
+in [current state](docs/current-state.md), the
+[gap analysis](docs/gap-analysis.md) against the product goal, and the
+[future-state plan](docs/future-state.md). Operators building the managed service should
 start with the [GCP operated-service architecture](docs/hosted-gcp.md); the
 [hosted sign-in guide](docs/identity-platform.md) documents the separate Google
 Identity Platform and Workspace consent clients. External reviewers should
