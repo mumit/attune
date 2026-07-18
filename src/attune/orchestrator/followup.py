@@ -30,10 +30,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
 from ..connectors.base import EmailThread, WorkspaceConnector
+from .importance import ImportanceTier
 
 MAX_NUDGES_PER_RUN = 3
 DEFAULT_MIN_AGE_DAYS = 4
 DEFAULT_COOLDOWN_DAYS = 7
+
+# Rank key for follow-up candidates (Phase 3 stage 1, G10): HIGH-tier
+# counterpart first, then NORMAL, then LOW — mirrors brief.py's
+# _TIER_SORT_KEY (same tiers, same "HIGH first" intent: the people most
+# worth following up with surface first once the per-run cap binds).
+_TIER_SORT_KEY = {
+    ImportanceTier.HIGH: 0,
+    ImportanceTier.NORMAL: 1,
+    ImportanceTier.LOW: 2,
+}
 
 
 class NudgeState(Protocol):
@@ -73,6 +84,25 @@ class JsonNudgeState:
             json.dump(data, fh)
 
 
+def _rank_by_counterpart_tier(
+    candidates: list[EmailThread], importance_profile: Any
+) -> list[EmailThread]:
+    """HIGH-tier counterpart first, then NORMAL, then LOW — stable within
+    tier (Phase 3 stage 1, G10): the people most worth following up with
+    should win the per-run cap, not whoever happened to arrive first. An
+    assessment failure for one candidate ranks it NORMAL rather than
+    breaking the whole ranking."""
+    def rank(thread: EmailThread) -> int:
+        counterpart = getattr(thread, "reply_to", "") or thread.from_addr
+        try:
+            tier = importance_profile.assess(counterpart).tier
+        except Exception:  # noqa: BLE001 — ranking must never break nudging
+            return _TIER_SORT_KEY[ImportanceTier.NORMAL]
+        return _TIER_SORT_KEY.get(tier, _TIER_SORT_KEY[ImportanceTier.NORMAL])
+
+    return sorted(candidates, key=rank)
+
+
 def find_nudge_candidates(
     connector: WorkspaceConnector,
     nudge_state: NudgeState,
@@ -82,9 +112,19 @@ def find_nudge_candidates(
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
     cooldown_days: int = DEFAULT_COOLDOWN_DAYS,
     max_candidates: int = MAX_NUDGES_PER_RUN,
+    importance_profile: Any = None,
 ) -> list[EmailThread]:
     """Quiet threads worth nudging about: reuses the brief's quiet-thread
-    truth, then drops anything nudged within the cooldown, capped hard."""
+    truth, then drops anything nudged within the cooldown, capped hard.
+
+    ``importance_profile`` (Phase 3 stage 1, G10), when supplied, ranks every
+    eligible candidate by the counterpart's importance tier (HIGH first,
+    stable within tier) BEFORE ``max_candidates`` binds — so on a busy day
+    the highest-tier counterparts win the cap rather than whoever's thread
+    happened to come back first. Without a profile, behavior is unchanged
+    from before Phase 3: the cap binds in arrival order as soon as it's
+    reached (back-compat, and cheaper — no need to keep scanning once the
+    cap is full)."""
     # Imported here, not at module top: brief.py imports the orchestrator
     # package (importance tiers, attention, correlation), and the package
     # __init__ imports this module — a top-level import of brief from here
@@ -109,9 +149,14 @@ def find_nudge_candidates(
         if last is not None and now - last < cooldown:
             continue
         candidates.append(thread)
-        if len(candidates) >= max_candidates:
+        # Arrival-order cap binds immediately ONLY without a profile
+        # (back-compat); with one, every eligible candidate must be
+        # collected first so ranking has the full field to work with.
+        if importance_profile is None and len(candidates) >= max_candidates:
             break
-    return candidates
+    if importance_profile is not None:
+        candidates = _rank_by_counterpart_tier(candidates, importance_profile)
+    return candidates[:max_candidates]
 
 
 @dataclass
@@ -134,16 +179,23 @@ def run_follow_up_nudges(
     min_age_days: int = DEFAULT_MIN_AGE_DAYS,
     cooldown_days: int = DEFAULT_COOLDOWN_DAYS,
     notify: Callable[[str], None] | None = None,
+    importance_profile: Any = None,
 ) -> list[NudgeResult]:
     """One nudge run: start a FOLLOW_UP draft-approve workflow per candidate
     and post its card (titled as a nudge). The cooldown is recorded after a
     successful post, so a failed run retries next time rather than silently
     consuming the thread's nudge budget.
+
+    ``importance_profile`` (Phase 3 stage 1, G10) is passed straight through
+    to :func:`find_nudge_candidates` so ranking happens before the cap, the
+    same way :func:`orchestrator.draft_approve.build_draft_approve_graph`
+    already threads it through for capture (Phase 1).
     """
     now = now or datetime.now(timezone.utc)
     candidates = find_nudge_candidates(
         connector, nudge_state, user_email=user_email, now=now,
         min_age_days=min_age_days, cooldown_days=cooldown_days,
+        importance_profile=importance_profile,
     )
 
     results: list[NudgeResult] = []

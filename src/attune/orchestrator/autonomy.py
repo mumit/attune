@@ -94,4 +94,23 @@ def default_matrix() -> PermissionMatrix:
     # to the matrix's action-type granularity: "may propose follow-ups" and
     # "may propose replies" are separately grantable/revocable.
     m = m.grant(Action.FOLLOW_UP, Domain.MAIL, Rung.PROPOSE)
+    # LABEL (Phase 3 stage 1, G9 — the first hygiene write: archiving mail
+    # already triaged NOISE) is granted PROPOSE by default for the same
+    # reason DRAFT_REPLY is: proposing is safe. The effect (archiving) still
+    # requires a human to approve the card; this grant only lets the
+    # proposal exist, and it's one of three independent gates the dispatcher
+    # checks before ever building one — a connector must also structurally
+    # support labeling (``supports_labeling()``) and the deployment must have
+    # opted in (``ATTUNE_MAIL_LABELS_ENABLED``). See docs/decisions.md.
+    m = m.grant(Action.LABEL, Domain.MAIL, Rung.PROPOSE)
+    # DECLINE_INVITE/RESCHEDULE (Phase 3 stage 2 -- hygiene/logistics writes
+    # on the calendar domain) get the same PROPOSE-by-default posture as
+    # LABEL, for the same reason: proposing is safe, since the effect still
+    # requires a human's approval. Each is one of three independent gates
+    # the dispatcher checks before ever building a proposal -- a connector
+    # must also structurally support calendar writes
+    # (``supports_calendar_writes()``) and the deployment must have opted in
+    # (``ATTUNE_CALENDAR_WRITES_ENABLED``). See docs/decisions.md.
+    m = m.grant(Action.DECLINE_INVITE, Domain.CALENDAR, Rung.PROPOSE)
+    m = m.grant(Action.RESCHEDULE, Domain.CALENDAR, Rung.PROPOSE)
     return m

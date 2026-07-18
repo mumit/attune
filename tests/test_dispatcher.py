@@ -157,7 +157,9 @@ class _FakeClient:
         return _Resp()
 
 
-def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None, importance_profile=None):
+def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None,
+                   importance_profile=None, label_graph=None,
+                   calendar_action_graph=None):
     from attune.app import AppContext
     from attune.config import Settings
     s = Settings.from_env({"ATTUNE_WORKSPACE_BACKEND": "mcp",
@@ -169,6 +171,8 @@ def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None, importanc
         settings=s,
         audit_log=audit_log or _FakeAuditLog(),
         importance_profile=importance_profile,
+        label_graph=label_graph,
+        calendar_action_graph=calendar_action_graph,
     )
 
 
@@ -1064,6 +1068,258 @@ def test_multiple_threads_mixed_triage_only_drafts_non_noise():
 
 
 # ---------------------------------------------------------------------------
+# NOISE -> archive proposals (Phase 3 stage 1, docs/future-state.md; G9/G10)
+# ---------------------------------------------------------------------------
+
+
+class _LabelCapableConnector(_FakeConnector):
+    """A _FakeConnector that also supports the gated label_thread write
+    path, for archive-proposal tests. Records every label_thread call."""
+
+    def __init__(self, threads=None, supports=True):
+        super().__init__(threads)
+        self._supports = supports
+        self.label_calls: list[dict] = []
+
+    def supports_labeling(self):
+        return self._supports
+
+    def label_thread(self, thread_id, *, label, archive):
+        self.label_calls.append(
+            {"thread_id": thread_id, "label": label, "archive": archive}
+        )
+
+
+class _FakeLabelGraph:
+    """Fake compiled label_graph: records invoke() calls and returns a
+    canned result (no autonomy-gate interrupt by default — a real card)."""
+
+    def __init__(self, proposed="archive it", audit_events=None):
+        self._proposed = proposed
+        self._audit_events = audit_events or []
+        self.calls: list[dict] = []
+
+    def invoke(self, state, config):
+        self.calls.append({"state": state, "config": config})
+        return {
+            "proposed_draft": self._proposed,
+            "retrieved_memories": [],
+            "audit_events": self._audit_events,
+        }
+
+
+class _FakePendingRegistry:
+    """Minimal PendingApprovals fake keyed by source_ref, shared by the
+    archive-proposal tests below."""
+
+    def __init__(self):
+        self.existing: dict[str, object] = {}
+        self.registered: list[dict] = []
+
+    def get_pending_for_source(self, source_ref):
+        return self.existing.get(source_ref)
+
+    def register(self, **kw):
+        self.registered.append(kw)
+
+    def resolve(self, lg_tid):
+        pass
+
+    def pending(self):
+        return []
+
+
+_NOISE_NOTIFICATION = {"emailAddress": "me@example.com", "historyId": "900"}
+
+
+def _noise_triage_fn(client, summary):
+    return TriageResult(Priority.NOISE, "newsletter")
+
+
+def test_noise_archive_proposal_needs_all_three_gates():
+    """Matrix of the three independent gates (Phase 3 stage 1, G9): only
+    when matrix rung + connector.supports_labeling() + mail_labels_enabled
+    ALL hold does a NOISE thread become an archive proposal."""
+    from attune.orchestrator import Action, Domain, default_matrix
+
+    granted_matrix = default_matrix()
+    revoked_matrix = default_matrix().revoke(Action.LABEL, Domain.MAIL)
+
+    cases = [
+        # (matrix, supports_labeling, mail_labels_enabled, expect_proposal)
+        (granted_matrix, True, True, True),
+        (revoked_matrix, True, True, False),
+        (granted_matrix, False, True, False),
+        (granted_matrix, True, False, False),
+        (revoked_matrix, False, False, False),
+    ]
+    for matrix, supports, enabled, expect in cases:
+        label_graph = _FakeLabelGraph()
+        app = _fake_app_ctx(graph=_FakeGraph(), label_graph=label_graph)
+        app.matrix = matrix
+        connector = _LabelCapableConnector(
+            {"t1": _FakeThread("t1", from_addr="newsletter@x.com")},
+            supports=supports,
+        )
+        gmail = _FakeGmail(["t1"])
+
+        handle_gmail_notification(
+            app, _NOISE_NOTIFICATION,
+            gmail_service=gmail, watch_state=_FakeWatchState(history_id="100"),
+            connector=connector,
+            post_approval=lambda *a, **kw: None,
+            user_id="me@example.com",
+            triage_fn=_noise_triage_fn,
+            mail_labels_enabled=enabled,
+        )
+
+        offered = len(label_graph.calls) == 1
+        assert offered == expect, (matrix is granted_matrix, supports, enabled)
+
+
+def test_noise_archive_proposal_posts_titled_card_and_registers_pending():
+    label_graph = _FakeLabelGraph(proposed="Archive 'Sale!' from deals@x.com — triaged noise: newsletter")
+    app = _fake_app_ctx(graph=_FakeGraph(), label_graph=label_graph)
+    connector = _LabelCapableConnector(
+        {"t1": _FakeThread("t1", subject="Sale!", from_addr="deals@x.com")}
+    )
+    gmail = _FakeGmail(["t1"])
+    pending = _FakePendingRegistry()
+    posted = []
+
+    result = handle_gmail_notification(
+        app, _NOISE_NOTIFICATION,
+        gmail_service=gmail, watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a, **kw: posted.append((a, kw)),
+        user_id="me@example.com",
+        triage_fn=_noise_triage_fn,
+        pending=pending, mail_labels_enabled=True,
+    )
+
+    assert len(result) == 1
+    assert len(label_graph.calls) == 1
+    state = label_graph.calls[0]["state"]
+    assert state["action"] == "label"
+    assert state["domain"] == "mail"
+    assert state["incoming_ref"] == "t1"
+    assert state["label_name"] == "Attune/Noise"
+    assert "Archive" in state["incoming_summary"]
+    assert len(posted) == 1
+    args, kwargs = posted[0]
+    assert "Archive proposal" in kwargs["title"]
+    assert pending.registered[0]["source_ref"] == "t1"
+
+
+def test_noise_archive_proposal_dedupes_via_pending_registry():
+    label_graph = _FakeLabelGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), label_graph=label_graph)
+    connector = _LabelCapableConnector({"t1": _FakeThread("t1")})
+    gmail = _FakeGmail(["t1"])
+    pending = _FakePendingRegistry()
+    pending.existing["t1"] = object()  # already has a pending card
+
+    handle_gmail_notification(
+        app, _NOISE_NOTIFICATION,
+        gmail_service=gmail, watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        triage_fn=_noise_triage_fn,
+        pending=pending, mail_labels_enabled=True,
+    )
+
+    assert label_graph.calls == []
+
+
+def test_noise_archive_proposals_capped_and_ranked_low_tier_first():
+    """4 NOISE candidates, cap 3 (MAX_LABEL_PROPOSALS_PER_RUN): LOW-tier
+    senders win the cap over the HIGH-tier one, ranked before it binds."""
+    from attune.orchestrator.importance import ImportanceTier, TierAssessment
+
+    class _Profile:
+        def __init__(self, tiers):
+            self._tiers = tiers
+
+        def assess(self, sender, *, now=None):
+            return TierAssessment(self._tiers.get(sender, ImportanceTier.NORMAL), "x", False)
+
+    profile = _Profile({
+        "low1@x.com": ImportanceTier.LOW,
+        "low2@x.com": ImportanceTier.LOW,
+        "normal1@x.com": ImportanceTier.NORMAL,
+        "high1@x.com": ImportanceTier.HIGH,
+    })
+    label_graph = _FakeLabelGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), label_graph=label_graph, importance_profile=profile)
+    connector = _LabelCapableConnector({
+        "t_high": _FakeThread("t_high", from_addr="high1@x.com"),
+        "t_low1": _FakeThread("t_low1", from_addr="low1@x.com"),
+        "t_norm": _FakeThread("t_norm", from_addr="normal1@x.com"),
+        "t_low2": _FakeThread("t_low2", from_addr="low2@x.com"),
+    })
+    gmail = _FakeGmail(["t_high", "t_low1", "t_norm", "t_low2"])
+
+    handle_gmail_notification(
+        app, _NOISE_NOTIFICATION,
+        gmail_service=gmail, watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        triage_fn=_noise_triage_fn,
+        mail_labels_enabled=True,
+    )
+
+    assert len(label_graph.calls) == 3  # capped
+    offered_refs = [c["state"]["incoming_ref"] for c in label_graph.calls]
+    assert "t_high" not in offered_refs  # HIGH tier loses the cap
+    assert set(offered_refs) == {"t_low1", "t_low2", "t_norm"}
+
+
+def test_noise_archive_proposal_apply_calls_label_thread_and_audits():
+    """make_label_apply_fn end-to-end: approving materializes via
+    connector.label_thread (never create_draft), and the audit trail
+    reflects it."""
+    from attune.orchestrator.draft_approve import make_label_apply_fn
+
+    connector = _LabelCapableConnector({
+        "t1": _FakeThread("t1", from_addr="deals@x.com"),
+    })
+    apply_fn = make_label_apply_fn(connector)
+    state = {
+        "action": "label", "domain": "mail",
+        "incoming_ref": "t1", "label_name": "Attune/Noise",
+        "source_snapshot": None,
+    }
+    ref = apply_fn(state)
+    assert ref == "t1"
+    assert connector.label_calls == [
+        {"thread_id": "t1", "label": "Attune/Noise", "archive": True}
+    ]
+
+
+def test_noise_archive_proposal_apply_refuses_stale_thread():
+    """Freshness check (mirrors _check_freshness_mail for reply drafts): a
+    thread that gained a message after the card was posted must not be
+    archived out from under the new message."""
+    from attune.orchestrator.draft_approve import SourceChangedError, make_label_apply_fn
+
+    stale_thread = _FakeThread("t1", from_addr="deals@x.com")
+    stale_thread.last_message_at = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    connector = _LabelCapableConnector({"t1": stale_thread})
+    apply_fn = make_label_apply_fn(connector)
+    state = {
+        "action": "label", "domain": "mail",
+        "incoming_ref": "t1", "label_name": "Attune/Noise",
+        "source_snapshot": "2026-07-18T10:00:00+00:00",  # older than last_message_at
+    }
+
+    with pytest.raises(SourceChangedError):
+        apply_fn(state)
+    assert connector.label_calls == []
+
+
+# ---------------------------------------------------------------------------
 # handle_source_message (Phase 2 stage 1, docs/future-state.md; G1/G3)
 # ---------------------------------------------------------------------------
 
@@ -1301,13 +1557,19 @@ from attune.connectors.base import CalendarEvent
 from attune.dispatcher import handle_calendar_notification
 
 
-def _cal_event(event_id, start_offset_min, duration_min=30, summary="Meeting", attendees=None):
+def _cal_event(
+    event_id, start_offset_min, duration_min=30, summary="Meeting", attendees=None,
+    response_status="", organizer="", organizer_is_self=False,
+):
     base = datetime(2026, 7, 10, 9, 0, tzinfo=timezone.utc)
     start = base + timedelta(minutes=start_offset_min)
     end = start + timedelta(minutes=duration_min)
     return CalendarEvent(
         event_id=event_id, summary=summary, start=start, end=end,
         attendees=attendees or [],
+        response_status=response_status,
+        organizer=organizer,
+        organizer_is_self=organizer_is_self,
     )
 
 
@@ -1862,6 +2124,605 @@ def test_calendar_notification_no_audit_call_when_log_absent():
         notify=lambda text: None,
         user_id="me@example.com",
     )
+
+
+# ---------------------------------------------------------------------------
+# DECLINE_INVITE / RESCHEDULE proposals (Phase 3 stage 2)
+# ---------------------------------------------------------------------------
+
+
+class _CalendarWriteCapableConnector(_FakeCalendarConnector):
+    """A _FakeCalendarConnector that also supports the gated
+    decline_invite/reschedule_event write paths, for proposal tests."""
+
+    def __init__(self, events_by_id, nearby=None, supports=True):
+        super().__init__(events_by_id, nearby)
+        self._supports = supports
+        self.decline_calls: list[str] = []
+        self.reschedule_calls: list[dict] = []
+
+    def supports_calendar_writes(self):
+        return self._supports
+
+    def decline_invite(self, event_id):
+        self.decline_calls.append(event_id)
+
+    def reschedule_event(self, event_id, *, new_start, new_end):
+        self.reschedule_calls.append(
+            {"event_id": event_id, "new_start": new_start, "new_end": new_end}
+        )
+
+
+class _FakeCalendarActionGraph:
+    """Fake compiled calendar_action_graph: records invoke() calls and
+    returns a canned result (no autonomy-gate interrupt by default — a real
+    card), mirroring _FakeLabelGraph."""
+
+    def __init__(self, proposed="do it", audit_events=None):
+        self._proposed = proposed
+        self._audit_events = audit_events or []
+        self.calls: list[dict] = []
+
+    def invoke(self, state, config):
+        self.calls.append({"state": state, "config": config})
+        return {
+            "proposed_draft": self._proposed,
+            "retrieved_memories": [],
+            "audit_events": self._audit_events,
+        }
+
+
+_INVITE_NOTIFICATION = {"resource_state": "exists"}
+
+
+def _single_event_notification(event_id="e1"):
+    return _FakeCalendarEventsService(pages=[
+        {"items": [{"id": event_id}], "nextSyncToken": "new"}
+    ])
+
+
+class _LowTierProfile:
+    """importance_profile.assess() stub: a fixed tier per address."""
+
+    def __init__(self, tiers):
+        self._tiers = tiers
+
+    def assess(self, address, *, now=None):
+        from attune.orchestrator.importance import ImportanceTier, TierAssessment
+
+        tier = self._tiers.get(address, ImportanceTier.NORMAL)
+        if tier == ImportanceTier.LOW:
+            reason = "sender ignored 3 of last 3 proposals"
+        else:
+            reason = "no recorded signals"
+        return TierAssessment(tier, reason, False)
+
+
+# --- invite detection, incl. missing-responseStatus back-compat ----------
+
+
+def test_pending_invite_with_low_tier_organizer_is_proposed_for_decline():
+    from attune.orchestrator.importance import ImportanceTier
+
+    e1 = _cal_event(
+        "e1", 0, duration_min=30, summary="1:1 with boss",
+        response_status="needsAction", organizer="boss@x.com",
+    )
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(
+        graph=_FakeGraph(), calendar_action_graph=calendar_graph,
+        importance_profile=_LowTierProfile({"boss@x.com": ImportanceTier.LOW}),
+    )
+    posted: list = []
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda tid, draft, rationale, *, title=None: posted.append(title),
+        calendar_writes_enabled=True,
+    )
+
+    assert len(calendar_graph.calls) == 1
+    state = calendar_graph.calls[0]["state"]
+    assert state["action"] == "decline_invite"
+    assert state["domain"] == "calendar"
+    assert "organizer ignored 3 of last 3 proposals" in state["incoming_summary"]
+    assert "1:1 with boss" in state["incoming_summary"]
+    assert len(posted) == 1
+
+
+def test_pending_invite_with_normal_tier_organizer_and_no_conflict_not_proposed():
+    """No deterministic reason (NORMAL-tier organizer, no conflict) ->
+    nothing proposed, even though the invite is needsAction."""
+    e1 = _cal_event(
+        "e1", 0, duration_min=30, response_status="needsAction",
+        organizer="colleague@x.com",
+    )
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), calendar_action_graph=calendar_graph)
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=True,
+    )
+
+    assert calendar_graph.calls == []
+
+
+def test_missing_response_status_is_back_compat_never_proposed():
+    """A connector/fake that doesn't populate response_status (the
+    pre-stage-2 default "") must never be mistaken for a pending invite,
+    even with a LOW-tier organizer that would otherwise qualify."""
+    from attune.orchestrator.importance import ImportanceTier
+
+    e1 = _cal_event("e1", 0, duration_min=30, organizer="boss@x.com")  # response_status="" (default)
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(
+        graph=_FakeGraph(), calendar_action_graph=calendar_graph,
+        importance_profile=_LowTierProfile({"boss@x.com": ImportanceTier.LOW}),
+    )
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=True,
+    )
+
+    assert calendar_graph.calls == []
+
+
+def test_decline_proposed_via_conflict_reason():
+    e1 = _cal_event(
+        "e1", 0, duration_min=60, summary="Conflicting invite",
+        response_status="needsAction",
+    )
+    e2 = _cal_event("e2", 15, duration_min=30, summary="Existing meeting")
+    connector = _CalendarWriteCapableConnector({"e1": e1, "e2": e2}, nearby=[e1, e2])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), calendar_action_graph=calendar_graph)
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=True,
+    )
+
+    assert len(calendar_graph.calls) == 1
+    state = calendar_graph.calls[0]["state"]
+    assert state["action"] == "decline_invite"
+    assert "conflicts with 'Existing meeting'" in state["incoming_summary"]
+
+
+def test_decline_invite_needs_all_three_gates():
+    """Matrix of the three independent gates (Deliverable B): only when
+    matrix rung + connector.supports_calendar_writes() + calendar_writes_enabled
+    ALL hold does a pending invite become a decline proposal."""
+    from attune.orchestrator import Action, Domain, default_matrix
+
+    granted_matrix = default_matrix()
+    revoked_matrix = default_matrix().revoke(Action.DECLINE_INVITE, Domain.CALENDAR)
+
+    cases = [
+        # (matrix, supports, enabled, expect_proposal)
+        (granted_matrix, True, True, True),
+        (revoked_matrix, True, True, False),
+        (granted_matrix, False, True, False),
+        (granted_matrix, True, False, False),
+    ]
+    for matrix, supports, enabled, expect in cases:
+        e1 = _cal_event(
+            "e1", 0, duration_min=60, summary="Conflicting invite",
+            response_status="needsAction",
+        )
+        e2 = _cal_event("e2", 15, duration_min=30, summary="Existing meeting")
+        connector = _CalendarWriteCapableConnector(
+            {"e1": e1, "e2": e2}, nearby=[e1, e2], supports=supports,
+        )
+        calendar_graph = _FakeCalendarActionGraph()
+        app = _fake_app_ctx(graph=_FakeGraph(), calendar_action_graph=calendar_graph)
+        app.matrix = matrix
+
+        handle_calendar_notification(
+            app, _INVITE_NOTIFICATION,
+            calendar_service=_single_event_notification("e1"),
+            calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+            connector=connector,
+            notify=lambda text: None,
+            user_id="me@example.com",
+            post_approval=lambda *a, **kw: None,
+            calendar_writes_enabled=enabled,
+        )
+
+        offered = len(calendar_graph.calls) == 1
+        assert offered == expect, (matrix is granted_matrix, supports, enabled)
+
+
+def test_decline_proposals_capped_and_ranked_conflict_above_tier():
+    """3 decline-eligible invites, cap 2 (MAX_DECLINE_PROPOSALS_PER_RUN):
+    the conflict-reason candidate ranks above both tier-reason candidates."""
+    from attune.orchestrator.importance import ImportanceTier
+
+    # e1/e2 conflict with each other -> e1 is a conflict-reason candidate.
+    e1 = _cal_event(
+        "e1", 0, duration_min=60, summary="Invite A",
+        response_status="needsAction",
+    )
+    e2 = _cal_event("e2", 15, duration_min=30, summary="Existing")
+    # e3, e4: no conflicts, LOW-tier organizers -> tier-reason candidates.
+    e3 = _cal_event(
+        "e3", 300, duration_min=30, summary="Invite B",
+        response_status="needsAction", organizer="low1@x.com",
+    )
+    e4 = _cal_event(
+        "e4", 400, duration_min=30, summary="Invite C",
+        response_status="needsAction", organizer="low2@x.com",
+    )
+
+    class _MultiConnector:
+        def __init__(self, by_id):
+            self._by_id = by_id
+
+        def get_event(self, event_id):
+            return self._by_id[event_id]
+
+        def list_events(self, *, time_min, time_max):
+            return [e for e in self._by_id.values() if e.start < time_max and time_min < e.end]
+
+        def supports_calendar_writes(self):
+            return True
+
+        def decline_invite(self, event_id):
+            pass
+
+    connector = _MultiConnector({"e1": e1, "e2": e2, "e3": e3, "e4": e4})
+    calendar_service = _FakeCalendarEventsService(pages=[
+        {"items": [{"id": "e1"}, {"id": "e3"}, {"id": "e4"}], "nextSyncToken": "new"}
+    ])
+    calendar_graph = _FakeCalendarActionGraph()
+    profile = _LowTierProfile({"low1@x.com": ImportanceTier.LOW, "low2@x.com": ImportanceTier.LOW})
+    app = _fake_app_ctx(
+        graph=_FakeGraph(), calendar_action_graph=calendar_graph, importance_profile=profile,
+    )
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=calendar_service,
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=True,
+    )
+
+    assert len(calendar_graph.calls) == 2  # capped
+    offered_refs = [c["state"]["incoming_ref"] for c in calendar_graph.calls]
+    assert "e1" in offered_refs  # conflict-reason always wins a slot
+    assert len({"e3", "e4"} & set(offered_refs)) == 1  # only one tier-reason slot left
+
+
+# --- reschedule: organizer-only, combined cap with hold offers ------------
+
+
+def test_reschedule_offered_when_principal_organizes_own_event():
+    e1 = _cal_event(
+        "e1", 60, duration_min=30, summary="My meeting", organizer_is_self=True,
+    )
+    e2 = _cal_event("e2", 75, duration_min=30, summary="Their meeting")
+    connector = _CalendarWriteCapableConnector({"e1": e1, "e2": e2}, nearby=[e1, e2])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), calendar_action_graph=calendar_graph)
+    posted: list = []
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda tid, draft, rationale, *, title=None: posted.append(title),
+        calendar_writes_enabled=True,
+    )
+
+    assert len(calendar_graph.calls) == 1
+    state = calendar_graph.calls[0]["state"]
+    assert state["action"] == "reschedule"
+    assert state["domain"] == "calendar"
+    assert state["incoming_ref"] == "e1"
+    assert "reschedule_start" in state and "reschedule_end" in state
+    assert "Move 'My meeting'" in state["incoming_summary"]
+    assert posted[0].startswith("Scheduling conflict — proposed reschedule")
+
+
+def test_hold_offer_stays_fallback_when_principal_organizes_neither_event():
+    """organizer_is_self False on both events -> the existing hold-offer
+    path is the unchanged fallback (Deliverable C)."""
+    e1 = _cal_event("e1", 60, duration_min=30, summary="Their meeting")
+    e2 = _cal_event("e2", 75, duration_min=30, summary="Also theirs")
+    connector = _CalendarWriteCapableConnector({"e1": e1, "e2": e2}, nearby=[e1, e2])
+    calendar_graph = _FakeCalendarActionGraph()
+    graph = _FakeGraph(proposed="hold text")
+    app = _fake_app_ctx(graph=graph, calendar_action_graph=calendar_graph)
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=True,
+    )
+
+    assert calendar_graph.calls == []  # no reschedule proposal
+    assert len(graph.calls) == 1       # the ordinary CREATE_HOLD graph ran
+    assert graph.calls[0]["state"]["action"] == "create_hold"
+
+
+def test_reschedule_needs_calendar_write_gates_else_falls_back_to_hold():
+    """organizer_is_self True but calendar_writes_enabled False (or the
+    matrix/connector gate missing) -> falls back to the hold offer, exactly
+    as if the principal organized neither event."""
+    e1 = _cal_event(
+        "e1", 60, duration_min=30, summary="My meeting", organizer_is_self=True,
+    )
+    e2 = _cal_event("e2", 75, duration_min=30, summary="Their meeting")
+    connector = _CalendarWriteCapableConnector({"e1": e1, "e2": e2}, nearby=[e1, e2])
+    calendar_graph = _FakeCalendarActionGraph()
+    graph = _FakeGraph(proposed="hold text")
+    app = _fake_app_ctx(graph=graph, calendar_action_graph=calendar_graph)
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=False,  # disabled
+    )
+
+    assert calendar_graph.calls == []
+    assert len(graph.calls) == 1
+    assert graph.calls[0]["state"]["action"] == "create_hold"
+
+
+def test_reschedule_and_hold_share_one_combined_cap():
+    """Deliverable C: reschedule offers count toward the SAME
+    MAX_HOLD_OFFERS_PER_RUN cap as hold offers -- never a second, separate
+    allowance that could flood the calendar approval channel."""
+    from attune.dispatcher import MAX_HOLD_OFFERS_PER_RUN
+
+    events = {}
+    changed = []
+    nearby = []
+    for i in range(5):
+        # every pair's "a" event is the principal's own -> every offer is a
+        # reschedule candidate, never a hold.
+        a = _cal_event(
+            f"a{i}", 60 + i * 120, duration_min=30, summary=f"A{i}",
+            organizer_is_self=True,
+        )
+        b = _cal_event(f"b{i}", 75 + i * 120, duration_min=30, summary=f"B{i}")
+        events[a.event_id] = a
+        events[b.event_id] = b
+        changed.append({"id": a.event_id})
+        nearby.extend([a, b])
+
+    class _PairConnector:
+        def get_event(self, event_id):
+            return events[event_id]
+
+        def list_events(self, *, time_min, time_max):
+            return [e for e in nearby if e.start < time_max and time_min < e.end]
+
+        def supports_calendar_writes(self):
+            return True
+
+        def reschedule_event(self, event_id, *, new_start, new_end):
+            pass
+
+    calendar_service = _FakeCalendarEventsService(pages=[
+        {"items": changed, "nextSyncToken": "new"}
+    ])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), calendar_action_graph=calendar_graph)
+    posted: list = []
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=calendar_service,
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=_PairConnector(),
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: posted.append(a),
+        calendar_writes_enabled=True,
+    )
+
+    assert MAX_HOLD_OFFERS_PER_RUN == 3
+    assert len(calendar_graph.calls) == 3  # all reschedules, capped combined
+    assert len(posted) == 3
+
+
+def test_calendar_action_proposals_audit_events_are_content_free():
+    """decline_proposed/reschedule_proposed audit events carry only ids and
+    a reason KIND, never the free-text reason/summary the card shows."""
+    e1 = _cal_event(
+        "e1", 0, duration_min=60, summary="Conflicting invite",
+        response_status="needsAction",
+    )
+    e2 = _cal_event("e2", 15, duration_min=30, summary="Existing meeting")
+    connector = _CalendarWriteCapableConnector({"e1": e1, "e2": e2}, nearby=[e1, e2])
+    calendar_graph = _FakeCalendarActionGraph()
+    audit_log = _FakeAuditLog()
+    app = _fake_app_ctx(
+        graph=_FakeGraph(), calendar_action_graph=calendar_graph, audit_log=audit_log,
+    )
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        audit_log=audit_log,
+        calendar_writes_enabled=True,
+    )
+
+    decline_records = [
+        r for r in audit_log.records
+        if any(e.get("event") == "decline_proposed" for e in r["events"])
+    ]
+    assert len(decline_records) == 1
+    proposed_event = next(
+        e for e in decline_records[0]["events"] if e["event"] == "decline_proposed"
+    )
+    assert set(proposed_event.keys()) == {"event", "ts", "event_id", "reason_kind"}
+    assert proposed_event["event_id"] == "e1"
+    assert proposed_event["reason_kind"] == "conflict"
+
+
+# --- apply-time freshness (make_calendar_action_apply_fn) -----------------
+
+
+def test_decline_apply_calls_decline_invite_and_returns_event_id():
+    from attune.orchestrator.draft_approve import make_calendar_action_apply_fn
+
+    e1 = _cal_event("e1", 0, response_status="needsAction")
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    apply_fn = make_calendar_action_apply_fn(connector)
+    state = {
+        "action": "decline_invite", "domain": "calendar",
+        "incoming_ref": "e1", "source_snapshot": e1.start.isoformat(),
+    }
+
+    ref = apply_fn(state)
+
+    assert ref == "e1"
+    assert connector.decline_calls == ["e1"]
+
+
+def test_decline_apply_refuses_when_event_start_changed():
+    from attune.orchestrator.draft_approve import SourceChangedError, make_calendar_action_apply_fn
+
+    e1 = _cal_event("e1", 30, response_status="needsAction")  # moved since proposal
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    apply_fn = make_calendar_action_apply_fn(connector)
+    stale_snapshot = _cal_event("e1", 0).start.isoformat()  # the ORIGINAL start
+    state = {
+        "action": "decline_invite", "domain": "calendar",
+        "incoming_ref": "e1", "source_snapshot": stale_snapshot,
+    }
+
+    with pytest.raises(SourceChangedError):
+        apply_fn(state)
+    assert connector.decline_calls == []
+
+
+def test_decline_apply_refuses_when_already_responded():
+    from attune.orchestrator.draft_approve import SourceChangedError, make_calendar_action_apply_fn
+
+    e1 = _cal_event("e1", 0, response_status="accepted")  # already responded elsewhere
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    apply_fn = make_calendar_action_apply_fn(connector)
+    state = {
+        "action": "decline_invite", "domain": "calendar",
+        "incoming_ref": "e1", "source_snapshot": e1.start.isoformat(),
+    }
+
+    with pytest.raises(SourceChangedError):
+        apply_fn(state)
+    assert connector.decline_calls == []
+
+
+def test_decline_apply_propagates_when_event_deleted():
+    """A deleted event: get_event raises (fake KeyError stands in for
+    Google's 404) -- apply must never swallow it; the graph's own apply
+    node records it honestly as apply_failed."""
+    from attune.orchestrator.draft_approve import make_calendar_action_apply_fn
+
+    connector = _CalendarWriteCapableConnector({}, nearby=[])  # get_event raises KeyError
+    apply_fn = make_calendar_action_apply_fn(connector)
+    state = {
+        "action": "decline_invite", "domain": "calendar",
+        "incoming_ref": "e1", "source_snapshot": None,
+    }
+
+    with pytest.raises(KeyError):
+        apply_fn(state)
+    assert connector.decline_calls == []
+
+
+def test_reschedule_apply_calls_reschedule_event_with_carried_slot():
+    from datetime import datetime as _dt
+    from attune.orchestrator.draft_approve import make_calendar_action_apply_fn
+
+    e1 = _cal_event("e1", 0)
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    apply_fn = make_calendar_action_apply_fn(connector)
+    new_start = _dt(2026, 7, 10, 15, 0, tzinfo=timezone.utc)
+    new_end = _dt(2026, 7, 10, 15, 30, tzinfo=timezone.utc)
+    state = {
+        "action": "reschedule", "domain": "calendar",
+        "incoming_ref": "e1", "source_snapshot": e1.start.isoformat(),
+        "reschedule_start": new_start.isoformat(),
+        "reschedule_end": new_end.isoformat(),
+    }
+
+    ref = apply_fn(state)
+
+    assert ref == "e1"
+    assert connector.reschedule_calls == [
+        {"event_id": "e1", "new_start": new_start, "new_end": new_end}
+    ]
+
+
+def test_reschedule_apply_refuses_when_event_start_changed():
+    from attune.orchestrator.draft_approve import SourceChangedError, make_calendar_action_apply_fn
+
+    e1 = _cal_event("e1", 30)  # moved since proposal
+    connector = _CalendarWriteCapableConnector({"e1": e1}, nearby=[e1])
+    apply_fn = make_calendar_action_apply_fn(connector)
+    stale_snapshot = _cal_event("e1", 0).start.isoformat()
+    state = {
+        "action": "reschedule", "domain": "calendar",
+        "incoming_ref": "e1", "source_snapshot": stale_snapshot,
+        "reschedule_start": "2026-07-10T15:00:00+00:00",
+        "reschedule_end": "2026-07-10T15:30:00+00:00",
+    }
+
+    with pytest.raises(SourceChangedError):
+        apply_fn(state)
+    assert connector.reschedule_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -2594,3 +3455,252 @@ def test_converse_uses_converse_model():
     _converse(app, "hi", user_id="me@example.com")
 
     assert client.calls[0]["model"] == model_for(Task.CONVERSE)
+
+
+# ---------------------------------------------------------------------------
+# THE PHASE 3 EXIT-CRITERION TEST (Phase 3 stage 3, docs/future-state.md;
+# G9/G10/G11)
+#
+# docs/future-state.md, Phase 3 exit criteria: "on a normal day the
+# assistant proposes at least: replies to draft, a follow-up, an invite
+# decision, and an inbox-hygiene action — each ranked, each one approval
+# away."
+# ---------------------------------------------------------------------------
+
+
+class _ExitScenarioConnector:
+    """One fake connector serving every read this scenario needs: Gmail
+    thread fetch/search, calendar event fetch/search (including the
+    workday-scan ``propose_free_slots`` uses), and the gated write probes —
+    none of the writes are ever exercised, since nothing in this test
+    approves a card (the whole point is that everything stops one human
+    decision short)."""
+
+    def __init__(self, mail_by_id, sent_threads, events_by_id, day_events, filler_event):
+        self._mail_by_id = mail_by_id
+        self._sent_threads = sent_threads
+        self._events_by_id = events_by_id
+        self._day_events = day_events
+        self._filler_event = filler_event
+        self.label_calls: list = []
+        self.decline_calls: list = []
+        self.reschedule_calls: list = []
+
+    # --- mail ---------------------------------------------------------
+    def get_thread(self, thread_id):
+        return self._mail_by_id[thread_id]
+
+    def list_threads(self, query="is:unread", *, max_results=20):
+        if query.startswith("is:unread"):
+            return list(self._mail_by_id.values())
+        if query == "in:sent":
+            return self._sent_threads
+        return []  # meeting-prep related-thread probes: none in this scenario
+
+    def create_draft(self, *, to, subject, body, thread_id=None):
+        raise AssertionError("nothing is approved in this scenario")
+
+    def supports_labeling(self):
+        return True
+
+    def label_thread(self, thread_id, *, label, archive):
+        self.label_calls.append((thread_id, label, archive))
+
+    # --- calendar -------------------------------------------------------
+    def get_event(self, event_id):
+        return self._events_by_id[event_id]
+
+    def list_events(self, *, time_min, time_max):
+        # propose_free_slots's own-day workday scan (8:00-18:00): pretend
+        # the whole day is booked solid so the conflict's hold/reschedule
+        # offer path finds no free slot and stays silent — the scenario is
+        # about the DECLINE_INVITE card this same conflict also produces,
+        # not a competing fifth card. Every other caller (detect_conflict's
+        # narrow event-window probe, the brief's full-day window) gets the
+        # real two events.
+        if time_min.hour == 8 and time_max.hour == 18 and time_max - time_min <= timedelta(hours=10):
+            return [self._filler_event]
+        return self._day_events
+
+    def supports_calendar_writes(self):
+        return True
+
+    def decline_invite(self, event_id):
+        self.decline_calls.append(event_id)
+
+    def reschedule_event(self, event_id, *, new_start, new_end):
+        self.reschedule_calls.append((event_id, new_start, new_end))
+
+
+class _ScenarioImportanceProfile:
+    def __init__(self, tiers: dict):
+        self._tiers = tiers
+
+    def assess(self, address, *, now=None):
+        from attune.orchestrator.importance import ImportanceTier, TierAssessment
+        tier = self._tiers.get(address, ImportanceTier.NORMAL)
+        return TierAssessment(tier, "test profile", False)
+
+
+def test_phase3_exit_criterion_normal_day_all_four_proposal_kinds(tmp_path):
+    """Simulates "a normal day" end-to-end at the dispatcher level with
+    fakes, exactly the four kinds of proposal the exit criteria name:
+
+    - a ROUTINE thread from a NORMAL sender -> draft-reply card
+    - a quiet sent-thread to a HIGH-tier counterpart -> follow-up nudge card
+    - a needsAction invite conflicting with an accepted event -> decline card
+    - a NOISE thread from a LOW-tier sender -> archive card
+
+    All four gates (matrix + connector capability + deployment opt-in) are
+    open, matching how stages 1-2 require every gate present before a
+    write-shaped proposal can even be built. Asserts: all four cards posted
+    to the approval-channel fake with distinct actions, the pending registry
+    holds all four, and the assembled brief — with that same registry
+    threaded through — shows the pending-card pointers and the bottom-of-
+    spine tally (Phase 3 stage 3, Deliverable C)."""
+    from attune.orchestrator import JsonPendingApprovals
+    from attune.orchestrator.followup import JsonNudgeState, run_follow_up_nudges
+    from attune.orchestrator.importance import ImportanceTier
+    from attune.brief import assemble_brief
+
+    NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+
+    # --- mail: one ROUTINE thread (NORMAL sender), one NOISE thread
+    # (LOW-tier sender), one quiet sent-thread to a HIGH-tier counterpart --
+    routine_thread = _FakeThread(
+        thread_id="t-routine", subject="Question about the launch",
+        from_addr="routine@example.com", body="Can you clarify the timeline?",
+    )
+    noise_thread = _FakeThread(
+        thread_id="t-noise", subject="50% off everything today only",
+        from_addr="noise@example.com", body="Limited time sale on widgets.",
+    )
+    quiet_thread = _FakeThread(
+        thread_id="t-quiet", subject="Renewal terms",
+        from_addr="counterpart@bigco.com", body="Sent over the draft terms.",
+    )
+    quiet_thread.last_from_addr = "me@example.com"
+    quiet_thread.last_message_at = NOW - timedelta(days=5)
+    quiet_thread.reply_to = "counterpart@bigco.com"
+
+    # --- calendar: an accepted event, and a needsAction invite that
+    # overlaps it (conflict-reason DECLINE_INVITE, Deliverable B) ---------
+    e_accepted = _cal_event("e-accepted", 0, duration_min=60, summary="Client sync")
+    e_invite = _cal_event(
+        "e-invite", 15, duration_min=30,
+        summary="1:1 with an overloaded stakeholder", response_status="needsAction",
+    )
+    filler = CalendarEvent(
+        event_id="filler", summary="(booked solid)",
+        start=datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc),
+        end=datetime(2026, 7, 10, 18, 0, tzinfo=timezone.utc),
+    )
+
+    connector = _ExitScenarioConnector(
+        mail_by_id={"t-routine": routine_thread, "t-noise": noise_thread},
+        sent_threads=[quiet_thread],
+        events_by_id={"e-accepted": e_accepted, "e-invite": e_invite},
+        day_events=[e_accepted, e_invite],
+        filler_event=filler,
+    )
+    profile = _ScenarioImportanceProfile({
+        "noise@example.com": ImportanceTier.LOW,
+        "counterpart@bigco.com": ImportanceTier.HIGH,
+    })
+
+    pending = JsonPendingApprovals(str(tmp_path / "pending.json"))
+    nudge_state = JsonNudgeState(str(tmp_path / "nudges.json"))
+    audit_log = _FakeAuditLog()
+    posted_cards: list[dict] = []
+
+    def _post_approval(thread_id, draft, rationale, *, title=None):
+        posted_cards.append({
+            "thread_id": thread_id, "draft": draft,
+            "rationale": rationale, "title": title,
+        })
+
+    app = _fake_app_ctx(
+        graph=_FakeGraph(), label_graph=_FakeLabelGraph(),
+        calendar_action_graph=_FakeCalendarActionGraph(),
+        importance_profile=profile, audit_log=audit_log,
+    )
+
+    def _triage_by_sender(client, summary):
+        if "noise@example.com" in summary:
+            return TriageResult(Priority.NOISE, "clearly promotional")
+        return TriageResult(Priority.ROUTINE, "a normal question")
+
+    # 1) Gmail notification: draft-reply + archive proposal.
+    gmail_result = handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "500"},
+        gmail_service=_FakeGmail(["t-routine", "t-noise"]),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=connector, post_approval=_post_approval,
+        user_id="me@example.com", triage_fn=_triage_by_sender,
+        pending=pending, audit_log=audit_log, mail_labels_enabled=True,
+    )
+    assert len(gmail_result) == 2
+
+    # 2) Calendar notification: the needsAction invite conflicts with the
+    # accepted event -> a DECLINE_INVITE proposal (its would-be hold/
+    # reschedule sibling finds no free slot, per the connector's filler day).
+    calendar_conflicts = handle_calendar_notification(
+        app, {"resource_state": "exists"},
+        calendar_service=_single_event_notification("e-invite"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector, notify=lambda text: None,
+        user_id="me@example.com", post_approval=_post_approval,
+        pending=pending, audit_log=audit_log, calendar_writes_enabled=True,
+    )
+    assert len(calendar_conflicts) == 1
+
+    # 3) Daily follow-up nudge sweep: the quiet thread to the HIGH-tier
+    # counterpart earns a nudge card.
+    nudge_results = run_follow_up_nudges(
+        app, connector, nudge_state, user_email="me@example.com",
+        user_id="me@example.com", post_approval=_post_approval,
+        pending=pending, audit_log=audit_log, now=NOW,
+        importance_profile=profile,
+    )
+    assert len(nudge_results) == 1
+
+    # --- all four cards posted, with distinct actions -----------------
+    assert len(posted_cards) == 4
+    action_prefixes = sorted(c["thread_id"].split(":")[0] for c in posted_cards)
+    assert action_prefixes == ["archive", "decline", "followup", "gmail"]
+    assert connector.label_calls == []       # proposed, never applied
+    assert connector.decline_calls == []
+    assert connector.reschedule_calls == []
+
+    # --- the pending registry holds all four ---------------------------
+    still_pending = pending.pending()
+    assert len(still_pending) == 4
+    assert {p.source_ref for p in still_pending} == {
+        "t-routine", "t-noise", "e-invite", "t-quiet",
+    }
+
+    # --- the assembled brief, with the SAME registry threaded through,
+    # shows a pointer on every entry with a pending card and the tally ---
+    client = _FakeClient()
+    brief = assemble_brief(
+        connector, client, user_id="me@example.com", user_email="me@example.com",
+        now=NOW, importance_profile=profile, pending=pending,
+        approval_channel_name="#approvals",
+    )
+
+    assert brief.pending_tally == "4 proposals awaiting your decision in #approvals"
+    content = client.calls[0]["messages"][-1]["content"]
+    assert brief.pending_tally in content
+
+    lines = content.splitlines()
+    noise_line = next(row for row in lines if "50% off everything" in row)
+    routine_line = next(row for row in lines if "Question about the launch" in row)
+    invite_line = next(row for row in lines if "overloaded stakeholder" in row)
+    accepted_line = next(row for row in lines if "Client sync" in row)
+    waiting_line = next(row for row in lines if row.startswith("- Renewal terms"))
+
+    assert noise_line.endswith("approval card pending")
+    assert routine_line.endswith("approval card pending")
+    assert invite_line.endswith("approval card pending")
+    assert "approval card pending" not in accepted_line  # no card for this one
+    assert waiting_line.endswith("approval card pending")

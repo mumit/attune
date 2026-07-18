@@ -57,10 +57,23 @@ def _render(brief: Any) -> str:
     if brief.spine:
         lines += ["", "What matters now:"]
         lines += [f"  {line}" for line in brief.spine]
+    # Phase 3 stage 3 (G11): the pending-approval tally, and — only when a
+    # snapshot store was threaded through (the daily posted-brief path; the
+    # plain preview never gets one) — the "since yesterday" section.
+    if getattr(brief, "pending_tally", None):
+        lines += [f"  {brief.pending_tally}"]
+    if getattr(brief, "since_yesterday", None):
+        lines += ["", "Since yesterday:"]
+        lines += [f"  - {line}" for line in brief.since_yesterday]
     lines += ["", brief.summary]
     if brief.waiting_on:
         lines += ["", "Waiting on:"]
-        lines += [f"  - {t.subject}" for t in brief.waiting_on]
+        for t in brief.waiting_on:
+            age = (
+                f" ({(brief.generated_at - t.last_message_at).days}d)"
+                if t.last_message_at is not None else ""
+            )
+            lines.append(f"  - {t.subject}{age}")
     return "\n".join(lines)
 
 

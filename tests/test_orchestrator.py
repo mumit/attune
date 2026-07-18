@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import pytest
 
 from attune.memory.base import MemoryRecord, MemoryStore
+from attune.memory.signals import ActionSignal
 from attune.orchestrator import (
     Action,
     Domain,
@@ -126,6 +127,172 @@ def test_reject_path_no_final_text():
     out = graph.invoke(Command(resume={"decision": "rejected"}), cfg)
     assert out["decision"] == "rejected"
     assert out.get("final_text") is None
+
+
+# ---------------------------------------------------------------------------
+# LABEL captures (Phase 3 stage 1, docs/future-state.md; G9) — the hygiene-
+# action approval-signal asymmetry, and the deterministic archive draft_fn.
+# ---------------------------------------------------------------------------
+
+
+class _FakeImportanceProfileForCapture:
+    """Records every record_signal call, for the dual-write pin test."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def record_signal(self, sender, signal, *, ts=None):
+        self.calls.append((sender, signal))
+
+
+def test_label_capture_does_not_dual_write_importance_profile():
+    """Deliverable B's pin: approving an archive proposal must NOT be
+    recorded as positive engagement for the sender in the importance
+    profile — that would push a noisy sender's tier toward HIGH, exactly
+    backwards. The raw signal still reaches memory, tagged hygiene_action,
+    for nightly consolidation."""
+    store = FakeStore()
+    profile = _FakeImportanceProfileForCapture()
+    graph = build_draft_approve_graph(
+        client=FakeClient(), store=store, importance_profile=profile,
+    )
+    cfg = {"configurable": {"thread_id": "t-label-capture"}}
+    graph.invoke(_base_state(action="label", sender="noisy@x.com"), cfg)
+    graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert profile.calls == []  # the sender's profile is untouched
+
+    action_entries = [
+        a for a in store.added if a["metadata"]["signal"] == "action"
+    ]
+    assert len(action_entries) == 1
+    assert action_entries[0]["metadata"].get("hygiene_action") is True
+
+
+def test_non_label_capture_still_dual_writes_importance_profile():
+    """Contrast case: a normal DRAFT_REPLY approval still feeds the
+    importance profile exactly as Phase 1 established — the asymmetry is
+    specific to LABEL, not a regression for every other action."""
+    store = FakeStore()
+    profile = _FakeImportanceProfileForCapture()
+    graph = build_draft_approve_graph(
+        client=FakeClient(), store=store, importance_profile=profile,
+    )
+    cfg = {"configurable": {"thread_id": "t-reply-capture"}}
+    graph.invoke(_base_state(sender="vendor@acme.com"), cfg)
+    graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert profile.calls == [("vendor@acme.com", ActionSignal.APPROVED)]
+
+
+def test_archive_draft_fn_is_deterministic_no_model_call():
+    """The archive proposal's draft_fn just echoes incoming_summary back —
+    no model call, since the thread was already classified by triage."""
+    from attune.orchestrator.draft_approve import archive_draft_fn
+
+    text = "Archive 'Sale!' from deals@x.com — triaged noise: newsletter"
+    assert archive_draft_fn(None, text, ["irrelevant memory"], "mail") == text
+
+
+def test_label_graph_never_calls_the_model():
+    """End-to-end: a graph compiled with archive_draft_fn never touches the
+    injected client, even through the normal retrieve -> draft flow."""
+    from attune.orchestrator.draft_approve import archive_draft_fn
+
+    store = FakeStore()
+    client = FakeClient()
+    graph = build_draft_approve_graph(
+        client=client, store=store, draft_fn=archive_draft_fn,
+    )
+    text = "Archive 'Sale!' from deals@x.com — triaged noise: newsletter"
+    out = graph.invoke(
+        _base_state(action="label", incoming_summary=text),
+        {"configurable": {"thread_id": "t-label-draft"}},
+    )
+    assert out["proposed_draft"] == text
+    assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# DECLINE_INVITE/RESCHEDULE captures (Phase 3 stage 2) — the generalized
+# HYGIENE_ACTIONS capture rule, and the deterministic calendar_action draft_fn.
+# ---------------------------------------------------------------------------
+
+
+def test_decline_invite_capture_does_not_dual_write_importance_profile():
+    """Deliverable C's pin: approving a decline-invite proposal must NOT be
+    recorded as positive engagement for the organizer -- same asymmetry as
+    LABEL, generalized via HYGIENE_ACTIONS."""
+    store = FakeStore()
+    profile = _FakeImportanceProfileForCapture()
+    graph = build_draft_approve_graph(
+        client=FakeClient(), store=store, importance_profile=profile,
+    )
+    cfg = {"configurable": {"thread_id": "t-decline-capture"}}
+    graph.invoke(
+        _base_state(action="decline_invite", domain="calendar", sender=None), cfg
+    )
+    graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert profile.calls == []  # the organizer's profile is untouched
+    action_entries = [a for a in store.added if a["metadata"]["signal"] == "action"]
+    assert len(action_entries) == 1
+    assert action_entries[0]["metadata"].get("hygiene_action") is True
+
+
+def test_reschedule_capture_does_not_dual_write_importance_profile():
+    """Same pin, for RESCHEDULE: approving a reschedule proposal leaves the
+    organizer's profile unchanged."""
+    store = FakeStore()
+    profile = _FakeImportanceProfileForCapture()
+    graph = build_draft_approve_graph(
+        client=FakeClient(), store=store, importance_profile=profile,
+    )
+    cfg = {"configurable": {"thread_id": "t-reschedule-capture"}}
+    graph.invoke(
+        _base_state(action="reschedule", domain="calendar", sender=None), cfg
+    )
+    graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert profile.calls == []
+    action_entries = [a for a in store.added if a["metadata"]["signal"] == "action"]
+    assert len(action_entries) == 1
+    assert action_entries[0]["metadata"].get("hygiene_action") is True
+
+
+def test_hygiene_actions_set_contains_all_three_stage_actions():
+    from attune.orchestrator.autonomy import Action
+    from attune.orchestrator.draft_approve import HYGIENE_ACTIONS
+
+    assert HYGIENE_ACTIONS == {
+        Action.LABEL.value, Action.DECLINE_INVITE.value, Action.RESCHEDULE.value,
+    }
+
+
+def test_calendar_action_draft_fn_is_deterministic_no_model_call():
+    """Mirrors archive_draft_fn: the dispatcher already computed the
+    deterministic reason/slot text, so there is nothing left to draft."""
+    from attune.orchestrator.draft_approve import calendar_action_draft_fn
+
+    text = "Decline 'Q3 sync' — conflicts with 'Design review'"
+    assert calendar_action_draft_fn(None, text, ["irrelevant memory"], "calendar") == text
+
+
+def test_calendar_action_graph_never_calls_the_model():
+    from attune.orchestrator.draft_approve import calendar_action_draft_fn
+
+    store = FakeStore()
+    client = FakeClient()
+    graph = build_draft_approve_graph(
+        client=client, store=store, draft_fn=calendar_action_draft_fn,
+    )
+    text = "Move 'Standup' (30 min) to Tue 15:00–15:30 — conflicts with 'Sync'"
+    out = graph.invoke(
+        _base_state(action="reschedule", domain="calendar", incoming_summary=text),
+        {"configurable": {"thread_id": "t-calendar-action-draft"}},
+    )
+    assert out["proposed_draft"] == text
+    assert client.calls == []
 
 
 def test_autonomy_grant_skips_interrupt():

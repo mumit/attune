@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .app import AppContext, build_app
-from .brief import assemble_brief
+from .brief import JsonBriefSnapshot, assemble_brief
 from .config import IngestionMode, Settings
 from .conversation import JsonConversationLog
 from .connectors import WorkspaceConnector, make_connector
@@ -79,7 +79,9 @@ from .orchestrator import (
     JsonAttentionStore,
     JsonNudgeState,
     JsonPendingApprovals,
+    make_calendar_action_apply_fn,
     make_connector_apply_fn,
+    make_label_apply_fn,
     resume_workflow,
     sweep_ignored,
 )
@@ -126,8 +128,25 @@ def _meaningful_poll_activity(summary: dict[str, str]) -> str | None:
     return ", ".join(active) or None
 
 
+def _approval_channel_label(settings: Settings) -> str | None:
+    """A human-readable approval-channel name, for the brief's bottom-of-
+    spine pending tally (Phase 3 stage 3, G11) — but only when the
+    configured destination already reads as a name rather than an opaque
+    provider id. Slack/Chat destination ids are validated elsewhere
+    (``Settings.validate_proactive_destinations``) to always begin with a
+    provider-specific ID prefix, never ``#``, so this deliberately makes no
+    live directory lookup to resolve a friendlier name — the brief performs
+    no extra reads — and most deployments honestly fall back to the generic
+    label at the render site (``brief._pending_tally_line``)."""
+    if settings.approval_channel == "slack" and settings.slack_default_channel:
+        if settings.slack_default_channel.startswith("#"):
+            return settings.slack_default_channel
+    return None
+
+
 def _assemble_runtime_brief(
-    connector: Any, app: AppContext, settings: Settings, *, attention_store: Any = None
+    connector: Any, app: AppContext, settings: Settings, *,
+    attention_store: Any = None, pending: Any = None, snapshot_store: Any = None,
 ):
     """The one place brief-assembly arguments are derived from settings, used
     by every surface that produces a brief (scheduled post, Slack DM, Chat
@@ -140,7 +159,14 @@ def _assemble_runtime_brief(
     is already threaded here. Only ``Runtime.post_brief`` (the daily posted
     brief) passes one; every caller that goes through ``Runtime`` directly
     (Slack/Chat "give me the brief" requests) gets it too since they all call
-    this same helper — see each call site below."""
+    this same helper — see each call site below.
+
+    ``pending`` (Phase 3 stage 3, G11) threads the real pending-approvals
+    registry the same way — every runtime brief render gets inline pointers
+    and the tally, since both are read-only. ``snapshot_store``, by
+    contrast, is passed by ONLY ``Runtime.post_brief`` (see its own
+    docstring and ``brief.py``'s module docstring): an on-demand Slack/Chat
+    brief request must not overwrite the "since yesterday" baseline."""
     user = settings.user_id
     return assemble_brief(
         connector,
@@ -151,6 +177,9 @@ def _assemble_runtime_brief(
         tz=settings.timezone,
         importance_profile=app.importance_profile,
         attention_store=attention_store,
+        pending=pending,
+        snapshot_store=snapshot_store,
+        approval_channel_name=_approval_channel_label(settings),
     )
 
 
@@ -225,6 +254,10 @@ class Runtime:
     attention_store: Any = None      # orchestrator.attention.AttentionStore
     source_poll_state: Any = None    # ingestion.state.JsonChatPollState (shared, key-prefixed)
     slack_client: Any = None         # raw slack_sdk.WebClient, for conversations_history
+    # Phase 3 stage 3 (docs/future-state.md, G11): the "since yesterday"
+    # brief snapshot (brief.BriefSnapshotStore). Only ``post_brief`` (the
+    # daily posted brief) reads/writes it — see ``_assemble_runtime_brief``.
+    brief_snapshot: Any = None       # brief.JsonBriefSnapshot
 
     # --- event processing (testable) ---------------------------------------
 
@@ -244,6 +277,7 @@ class Runtime:
             pending=self.pending,
             notify=self._notify_all,
             retry_queue=self.retry_queue,
+            mail_labels_enabled=self.settings.mail_labels_enabled,
         )
 
     def process_chat_event(self, event: dict[str, Any]) -> None:
@@ -257,7 +291,7 @@ class Runtime:
         def _brief_fn() -> str:
             return _assemble_runtime_brief(
                 self.connector, self.app, self.settings,
-                attention_store=self.attention_store,
+                attention_store=self.attention_store, pending=self.pending,
             ).summary
 
         handle_chat_message(
@@ -313,6 +347,7 @@ class Runtime:
             pending=self.pending,
             retry_queue=self.retry_queue,
             on_reconciled=on_reconciled,
+            calendar_writes_enabled=self.settings.calendar_writes_enabled,
         )
 
     def process_chat_interaction(self, event: dict[str, Any]) -> None:
@@ -521,6 +556,8 @@ class Runtime:
                             user_id=self.settings.user_id,
                             audit_log=self.app.audit_log, pending=self.pending,
                             notify=self._notify_all,
+                            connector=self.connector,
+                            mail_labels_enabled=self.settings.mail_labels_enabled,
                         )
                 elif item.kind == "calendar_event":
                     event = self.connector.get_event(item.source_ref)
@@ -567,7 +604,8 @@ class Runtime:
         this). Returns the Brief for callers that want the text."""
         brief = _assemble_runtime_brief(
             self.connector, self.app, self.settings,
-            attention_store=self.attention_store,
+            attention_store=self.attention_store, pending=self.pending,
+            snapshot_store=self.brief_snapshot,
         )
         if "slack" in self.settings.brief_channels and self.slack is not None and self.slack_say is not None:
             self.slack.post_brief(self.slack_say, brief)
@@ -689,6 +727,7 @@ class Runtime:
             min_age_days=self.settings.nudge_min_age_days,
             cooldown_days=self.settings.nudge_cooldown_days,
             notify=self._notify_all,
+            importance_profile=self.app.importance_profile,
         )
 
     def post_autonomy_digest(self) -> list:
@@ -839,6 +878,8 @@ class Runtime:
                         user_id=self.settings.user_id,
                         audit_log=self.app.audit_log, pending=self.pending,
                         notify=self._notify_all,
+                        connector=self.connector,
+                        mail_labels_enabled=self.settings.mail_labels_enabled,
                     )
                 for event in events:
                     submit_calendar_event(
@@ -1242,6 +1283,7 @@ def build_runtime(
     attention_store: Any = None,
     source_poll_state: Any = None,
     slack_client: Any = None,
+    brief_snapshot: Any = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -1275,13 +1317,26 @@ def build_runtime(
         resolved_credentials = load_google_credentials(settings)
 
     resolved_connector = connector or make_connector(
-        settings, credentials=resolved_credentials
+        settings,
+        credentials=resolved_credentials,
+        # Phase 3 stage 1 (G9): mirrors how send_enabled would be wired —
+        # the deployment's ATTUNE_MAIL_LABELS_ENABLED flag reaches the
+        # connector directly; label_thread's own double gate (this flag AND
+        # the gmail.modify scope) still applies underneath.
+        labels_enabled=settings.mail_labels_enabled,
+        # Phase 3 stage 2: same wiring again for
+        # ATTUNE_CALENDAR_WRITES_ENABLED; decline_invite/reschedule_event's
+        # own double gate (this flag AND the calendar.events scope) still
+        # applies underneath.
+        calendar_writes_enabled=settings.calendar_writes_enabled,
     )
 
     _owner = settings.user_id if "@" in settings.user_id else None
     resolved_app = app or build_app(
         settings,
         apply_fn=make_connector_apply_fn(resolved_connector, owner_email=_owner),
+        label_apply_fn=make_label_apply_fn(resolved_connector),
+        calendar_action_apply_fn=make_calendar_action_apply_fn(resolved_connector),
     )
 
     resolved_pending = pending or JsonPendingApprovals(settings.pending_state_path)
@@ -1361,6 +1416,7 @@ def build_runtime(
                 brief_fn=lambda: _assemble_runtime_brief(
                     resolved_connector, resolved_app, settings,
                     attention_store=resolved_attention_store,
+                    pending=resolved_pending,
                 ).summary,
                 conversation=resolved_conversation,
                 memory_ui=_memory_ui,
@@ -1444,6 +1500,9 @@ def build_runtime(
     resolved_attention_store = attention_store or JsonAttentionStore(
         settings.attention_path
     )
+    resolved_brief_snapshot = brief_snapshot or JsonBriefSnapshot(
+        settings.brief_snapshot_path
+    )
     resolved_source_poll_state = source_poll_state or JsonChatPollState(
         settings.source_poll_state_path
     )
@@ -1482,4 +1541,5 @@ def build_runtime(
         attention_store=resolved_attention_store,
         source_poll_state=resolved_source_poll_state,
         slack_client=resolved_slack_client,
+        brief_snapshot=resolved_brief_snapshot,
     )

@@ -127,12 +127,74 @@ def test_attention_path_derives_from_data_dir():
     assert s.source_poll_state_path == "/var/lib/adc/source_poll_state.json"
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 stage 1 — mail labeling opt-in (docs/future-state.md, G9)
+# ---------------------------------------------------------------------------
+
+
+def test_mail_labels_enabled_defaults_off():
+    s = Settings.from_env({})
+    assert s.mail_labels_enabled is False
+
+
+def test_mail_labels_enabled_parses_true_values():
+    for value in ("1", "true", "True", "yes", "on"):
+        s = Settings.from_env({"ATTUNE_MAIL_LABELS_ENABLED": value})
+        assert s.mail_labels_enabled is True, value
+
+
+def test_mail_labels_enabled_false_for_other_values():
+    for value in ("0", "false", "", "no"):
+        s = Settings.from_env({"ATTUNE_MAIL_LABELS_ENABLED": value})
+        assert s.mail_labels_enabled is False, value
+
+
+def test_calendar_writes_enabled_defaults_off():
+    s = Settings.from_env({})
+    assert s.calendar_writes_enabled is False
+
+
+def test_calendar_writes_enabled_parses_true_values():
+    for value in ("1", "true", "True", "yes", "on"):
+        s = Settings.from_env({"ATTUNE_CALENDAR_WRITES_ENABLED": value})
+        assert s.calendar_writes_enabled is True, value
+
+
+def test_calendar_writes_enabled_false_for_other_values():
+    for value in ("0", "false", "", "no"):
+        s = Settings.from_env({"ATTUNE_CALENDAR_WRITES_ENABLED": value})
+        assert s.calendar_writes_enabled is False, value
+
+
 def test_attention_path_explicit_override():
     s = Settings.from_env({
         "ATTUNE_DATA_DIR": "/var/lib/adc",
         "ATTUNE_ATTENTION_PATH": "/fast-disk/attention.json",
     })
     assert s.attention_path == "/fast-disk/attention.json"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 stage 3 — the "since yesterday" brief snapshot (docs/future-state.md, G11)
+# ---------------------------------------------------------------------------
+
+
+def test_brief_snapshot_path_defaults():
+    s = Settings.from_env({})
+    assert s.brief_snapshot_path == "./brief_snapshot.json"
+
+
+def test_brief_snapshot_path_derives_from_data_dir():
+    s = Settings.from_env({"ATTUNE_DATA_DIR": "/var/lib/adc"})
+    assert s.brief_snapshot_path == "/var/lib/adc/brief_snapshot.json"
+
+
+def test_brief_snapshot_path_explicit_override():
+    s = Settings.from_env({
+        "ATTUNE_DATA_DIR": "/var/lib/adc",
+        "ATTUNE_BRIEF_SNAPSHOT_PATH": "/fast-disk/snap.json",
+    })
+    assert s.brief_snapshot_path == "/fast-disk/snap.json"
 
 
 def test_validate_rejects_malformed_slack_source_channel():

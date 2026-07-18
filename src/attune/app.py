@@ -24,7 +24,12 @@ from .config import Settings
 from .llm import make_client
 from .memory.base import MemoryStore
 from .memory.mem0_store import Mem0Store, build_mem0_config
-from .orchestrator import PermissionMatrix, build_draft_approve_graph
+from .orchestrator import (
+    PermissionMatrix,
+    archive_draft_fn,
+    build_draft_approve_graph,
+    calendar_action_draft_fn,
+)
 
 
 @dataclass
@@ -42,6 +47,24 @@ class AppContext:
     store: MemoryStore
     settings: Settings
     audit_log: AuditLog
+    # Phase 3 stage 1 (docs/future-state.md, G9): the archive-proposal graph.
+    # Same collaborators (client/store/matrix/checkpointer/importance_profile)
+    # as ``graph``, compiled separately because its draft_fn (deterministic,
+    # no model call) and apply_fn (``label_thread``, not ``create_draft``)
+    # differ — see ``orchestrator.draft_approve.archive_draft_fn``. None
+    # until ``build_app`` builds it; the dispatcher only reaches for it once
+    # all three label gates (matrix rung, connector probe, opt-in flag) hold.
+    label_graph: Any = None
+    # Phase 3 stage 2: the decline-invite/reschedule proposal graph. Same
+    # collaborators as ``graph``/``label_graph``, compiled separately for the
+    # same reason ``label_graph`` was — a deterministic draft_fn (no model
+    # call — see ``orchestrator.draft_approve.calendar_action_draft_fn``)
+    # and an apply_fn that materializes via ``connector.decline_invite``/
+    # ``reschedule_event``, never ``create_draft``. None until ``build_app``
+    # builds it; the dispatcher only reaches for it once all three calendar-
+    # write gates (matrix rung, connector probe, opt-in flag) hold for the
+    # relevant action.
+    calendar_action_graph: Any = None
     matrix: PermissionMatrix | None = None
     # Live policy source (prompt 19): the gate and every posture surface
     # read through this so grants/revocations bite without a restart.
@@ -83,6 +106,8 @@ def build_app(
     audit_log: AuditLog | None = None,
     apply_fn: Any = None,
     importance_profile: Any = None,
+    label_apply_fn: Any = None,
+    calendar_action_apply_fn: Any = None,
 ) -> AppContext:
     """Assemble the runtime from config and optional overrides.
 
@@ -105,6 +130,20 @@ def build_app(
                      ``JsonImportanceProfile(settings.importance_profile_path)``
                      (Phase 1, G5/G6) — the deterministic per-sender profile
                      the capture node dual-writes to alongside memory.
+    - *label_apply_fn* (Phase 3 stage 1, G9) — the archive-proposal
+                     counterpart to ``apply_fn``, compiled into a SEPARATE
+                     graph (``AppContext.label_graph``) sharing every other
+                     collaborator. Production (``runtime.build_runtime``)
+                     binds ``orchestrator.make_label_apply_fn(connector)``.
+                     Absent, label apply is a no-op — matches ``apply_fn``'s
+                     own default.
+    - *calendar_action_apply_fn* (Phase 3 stage 2) — the decline-invite/
+                     reschedule counterpart to ``apply_fn``, compiled into
+                     its own SEPARATE graph (``AppContext.calendar_action_graph``)
+                     sharing every other collaborator. Production binds
+                     ``orchestrator.make_calendar_action_apply_fn(connector)``.
+                     Absent, apply is a no-op — matches ``apply_fn``'s own
+                     default.
 
     Pass fakes for all five in tests to keep the suite offline::
 
@@ -171,6 +210,36 @@ def build_app(
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
     )
+    # The archive-proposal graph (Phase 3 stage 1, G9): same collaborators,
+    # a deterministic draft_fn (no model call — see archive_draft_fn) and a
+    # label-specific apply_fn. Sharing ``resolved_checkpointer`` is safe —
+    # LangGraph keys checkpoints by thread_id, and label proposals use their
+    # own "archive:..." namespace (dispatcher._offer_archive_proposal), so
+    # the two graphs never collide over the same checkpoint row.
+    label_graph = build_draft_approve_graph(
+        client=resolved_client,
+        store=resolved_store,
+        matrix=resolved_matrix,
+        checkpointer=resolved_checkpointer,
+        draft_fn=archive_draft_fn,
+        apply_fn=label_apply_fn,
+        matrix_provider=resolved_provider,
+        importance_profile=resolved_importance_profile,
+    )
+    # The decline-invite/reschedule proposal graph (Phase 3 stage 2): same
+    # collaborators and disjoint thread-id namespaces ("decline:..."/
+    # "calendar:reschedule:...") as every other graph sharing
+    # ``resolved_checkpointer``, so nothing about them can collide.
+    calendar_action_graph = build_draft_approve_graph(
+        client=resolved_client,
+        store=resolved_store,
+        matrix=resolved_matrix,
+        checkpointer=resolved_checkpointer,
+        draft_fn=calendar_action_draft_fn,
+        apply_fn=calendar_action_apply_fn,
+        matrix_provider=resolved_provider,
+        importance_profile=resolved_importance_profile,
+    )
 
     from .orchestrator import default_matrix as _default_matrix
 
@@ -180,6 +249,8 @@ def build_app(
         store=resolved_store,
         settings=settings,
         audit_log=resolved_audit_log,
+        label_graph=label_graph,
+        calendar_action_graph=calendar_action_graph,
         matrix=resolved_matrix or _default_matrix(),
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,

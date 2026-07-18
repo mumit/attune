@@ -165,6 +165,17 @@ management and sending. Attune's connector only creates drafts; it does not
 send mail. `calendar.events` is needed because approving a conflict proposal
 can create a tentative hold.
 
+Add `https://www.googleapis.com/auth/gmail.modify` only if you intend to set
+`ATTUNE_MAIL_LABELS_ENABLED=1` (Phase 3 stage 1's archive-proposal write
+path, disabled by default). Without it, Attune only reads and drafts;
+`attune doctor` reports whether the enabled flag and the connector agree.
+
+`ATTUNE_CALENDAR_WRITES_ENABLED=1` (Phase 3 stage 2's decline-invite/
+reschedule write path, also disabled by default) needs no additional scope
+beyond `calendar.events` above — the same scope tentative holds already
+use. `attune doctor` reports whether this enabled flag and the connector
+agree, the same way it does for `ATTUNE_MAIL_LABELS_ENABLED`.
+
 An External app in Testing normally issues refresh tokens that expire after
 seven days for these scopes. That is adequate for a smoke test, not an
 always-on service. Use the appropriate Internal/Published and verification

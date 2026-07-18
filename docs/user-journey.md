@@ -195,6 +195,20 @@ consistently important sender, surface first. Every item still appears in
 its own section below regardless of whether it made the ranked list, so
 nothing attended is ever silently dropped from the brief.
 
+Right after that ranked list, the daily posted brief adds a compact "since
+yesterday" summary — new unread threads, resolved ones, new events, and how
+the waiting-on count moved — whenever the previous day's brief is still
+recent enough to compare against (an on-demand "give me the brief" ask in
+Slack or Chat never resets this baseline). The waiting-on section itself is
+now ordered by who the principal is waiting on — the most important
+counterpart first, longest-waiting within that — instead of arrival order.
+Any item anywhere in the brief — a ranked entry, an unread thread, a
+calendar event, someone still waiting for a reply — that already has an
+approval card sitting in the configured approval channel gets a small "→
+approval card pending" pointer, and the ranked list ends with a one-line
+count of how many decisions are waiting there. Nothing here is a new place
+to act from; it only tells the principal where a decision already lives.
+
 ## 2. Ask a live Workspace question
 
 The same conversation can narrow into Gmail or Calendar:
@@ -254,6 +268,36 @@ prepare a reply through the durable draft-and-approve workflow. The configured
 `ATTUNE_APPROVAL_CHANNEL` receives one approval card. Approve, edit, or reject
 there; an approved result becomes a Gmail draft for human review rather than a
 silently sent message.
+
+With `ATTUNE_MAIL_LABELS_ENABLED=1` (Phase 3 stage 1), a message triaged as
+noise can also surface as an archive proposal — the same kind of approval
+card, titled something like "Archive proposal — triaged noise: <subject>".
+Nothing is archived until you approve it; up to three such proposals appear
+per run, the most confidently-noise senders first. Approving one archives the
+thread from Gmail; it does not count toward that sender's importance the way
+approving a reply would, since "yes, archive this" means the opposite of "this
+sender matters."
+
+With `ATTUNE_CALENDAR_WRITES_ENABLED=1` (Phase 3 stage 2), the calendar path
+can propose two more kinds of card, both still requiring your approval:
+
+- **Decline invite** — for an invite you haven't responded to yet, titled
+  "Decline invite proposal: <event>", with a stated reason such as "Decline
+  'Q3 sync' — conflicts with 'Design review'" or "Decline 'Weekly check-in'
+  — organizer ignored 3 of last 3 proposals." Up to two appear per run,
+  conflict-based reasons first. Approving one declines only your own
+  attendance — nobody else on the invite is affected.
+- **Reschedule** — when a detected conflict involves a meeting you
+  organize, instead of the usual hold-offer the card proposes moving your
+  own meeting to a specific free slot, titled "Scheduling conflict —
+  proposed reschedule: <event>". Approving one moves the event; Attune
+  refuses (and tells you so) if you're no longer that event's organizer by
+  the time you approve. When neither conflicting meeting is yours to move,
+  you still get the familiar hold-offer card instead.
+
+Like the archive proposal, approving a decline or reschedule does not count
+as positive engagement with the organizer — these are hygiene/logistics
+judgments, not "this person matters."
 
 Free-form conversation does not bypass that workflow. For example:
 

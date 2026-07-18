@@ -26,8 +26,10 @@ from typing import Any
 
 from .base import (
     CalendarEvent,
+    CalendarWriteNotPermitted,
     DraftRef,
     EmailThread,
+    LabelNotPermitted,
     Provenance,
     SendNotPermitted,
     WorkspaceConnector,
@@ -42,6 +44,23 @@ SCOPES_READONLY = (
 )
 SCOPE_COMPOSE = "https://www.googleapis.com/auth/gmail.compose"
 SCOPE_SEND = "https://www.googleapis.com/auth/gmail.send"
+# Labeling/archiving (Phase 3 stage 1, G9) needs to both add a label and
+# remove INBOX -- gmail.modify is Google's scope for that (gmail.compose has
+# no label-removal capability). Escalating set: request it only alongside
+# ATTUNE_MAIL_LABELS_ENABLED, same discipline as SCOPE_SEND.
+SCOPE_MODIFY = "https://www.googleapis.com/auth/gmail.modify"
+SCOPES_LABEL = SCOPES_READONLY + (SCOPE_MODIFY,)
+
+# Calendar writes (Phase 3 stage 2: decline invites, reschedule the
+# principal's own events) need events.patch, which calendar.events already
+# covers. Unlike SCOPE_MODIFY, this scope is typically ALREADY present in a
+# standard install — ``credentials.py``'s ``SCOPES_DEFAULT`` requests it by
+# default for the Phase 2 hold-creation write path (``create_hold``, which
+# has no equivalent double gate). ``calendar_writes_enabled`` below is
+# still a real second gate: having the scope doesn't mean the deployment
+# has opted into declining invites or moving the principal's meetings.
+SCOPE_CALENDAR_WRITE = "https://www.googleapis.com/auth/calendar.events"
+SCOPES_CALENDAR_WRITE = SCOPES_READONLY + (SCOPE_CALENDAR_WRITE,)
 
 _USER = "me"
 
@@ -57,17 +76,32 @@ class DirectOAuthConnector(WorkspaceConnector):
         gmail_service: Any = None,
         calendar_service: Any = None,
         send_enabled: bool = False,
+        labels_enabled: bool = False,
+        calendar_writes_enabled: bool = False,
         owner_email: str | None = None,
         internal_domains: frozenset[str] = frozenset(),
     ):
         self._creds = credentials
         self._send_enabled = send_enabled
+        # Same double-gate posture as send_enabled: set ONLY alongside the
+        # gmail.modify scope (SCOPE_MODIFY above) and, in practice, an
+        # explicit ATTUNE_MAIL_LABELS_ENABLED opt-in (Phase 3 stage 1, G9).
+        self._labels_enabled = labels_enabled
+        # Same double-gate posture again: set ONLY alongside the
+        # calendar.events scope (SCOPE_CALENDAR_WRITE above) and an explicit
+        # ATTUNE_CALENDAR_WRITES_ENABLED opt-in (Phase 3 stage 2).
+        self._calendar_writes_enabled = calendar_writes_enabled
         self._gmail_svc = gmail_service
         self._cal_svc = calendar_service
         # Lets the thread builders tell counterparty messages from the
         # owner's own, so reply_to targets the right person (finding #3).
         self._owner_email = owner_email
         self._internal_domains = internal_domains
+        # Gmail label ids rarely change; resolving/creating one is a
+        # list-then-maybe-create round trip. Bounded (one entry per distinct
+        # label name actually used) and cached per instance so a run
+        # proposing several archive candidates doesn't repeat the API calls.
+        self._label_id_cache: dict[str, str] = {}
 
     # --- service accessors -------------------------------------------------
 
@@ -168,6 +202,36 @@ class DirectOAuthConnector(WorkspaceConnector):
             body={"addLabelIds": [label_id]},
         ).execute()
 
+    def supports_labeling(self) -> bool:
+        """Structural capability, independent of whether it's turned on —
+        the direct-OAuth backend CAN label/archive (unlike MCP contract v1,
+        which has no label-removal tool). ``label_thread`` itself still
+        refuses unless ``labels_enabled`` was set (the second, deployment-
+        level gate)."""
+        return True
+
+    def label_thread(self, thread_id: str, *, label: str, archive: bool) -> None:
+        """Add ``label`` to a Gmail thread via ``threads.modify``, removing
+        INBOX when ``archive`` is True (Gmail's own definition of archiving —
+        there is no separate "archive" verb, just removing the INBOX label).
+
+        Refuses unless ``labels_enabled`` was explicitly set alongside the
+        gmail.modify scope (the same double-gate discipline as
+        ``send_reply``/``send_enabled``)."""
+        if not self._labels_enabled:
+            raise LabelNotPermitted(
+                "DirectOAuthConnector labeling disabled: requires the "
+                "gmail.modify scope AND ATTUNE_MAIL_LABELS_ENABLED=1. "
+                "Draft-only is the default; nothing is archived silently."
+            )
+        label_id = self._resolve_label_id_cached(label)
+        body: dict[str, Any] = {"addLabelIds": [label_id]}
+        if archive:
+            body["removeLabelIds"] = ["INBOX"]
+        self._gmail().users().threads().modify(
+            userId=_USER, id=thread_id, body=body,
+        ).execute()
+
     # --- read: calendar ----------------------------------------------------
 
     def list_events(
@@ -215,6 +279,106 @@ class DirectOAuthConnector(WorkspaceConnector):
         )
         return result.get("id", "")
 
+    def supports_calendar_writes(self) -> bool:
+        """Structural capability, independent of whether it's turned on —
+        the direct-OAuth backend CAN decline/reschedule (unlike MCP
+        contract v1, which has neither tool). ``decline_invite``/
+        ``reschedule_event`` still refuse unless ``calendar_writes_enabled``
+        was set (the second, deployment-level gate)."""
+        return True
+
+    def decline_invite(self, event_id: str) -> None:
+        """Patch the PRINCIPAL's own attendee responseStatus to "declined"
+        (Phase 3 stage 2, Deliverable A) via ``events.patch`` — never
+        touches any other attendee's entry. Calendar's PATCH replaces the
+        whole ``attendees`` array rather than merging into it, so this
+        fetches the current array, flips only the principal's own entry,
+        and sends the full array back.
+
+        Refuses unless ``calendar_writes_enabled`` was explicitly set
+        alongside the calendar write scope (the same double-gate discipline
+        as ``label_thread``/``labels_enabled``)."""
+        if not self._calendar_writes_enabled:
+            raise CalendarWriteNotPermitted(
+                "DirectOAuthConnector calendar writes disabled: requires "
+                "the calendar.events scope AND "
+                "ATTUNE_CALENDAR_WRITES_ENABLED=1. Read-only is the "
+                "default; nothing is declined or rescheduled silently."
+            )
+        event = (
+            self._calendar()
+            .events()
+            .get(calendarId="primary", eventId=event_id)
+            .execute()
+        )
+        updated_attendees = []
+        found_self = False
+        for attendee in event.get("attendees", []):
+            entry = dict(attendee)
+            if self._is_self_attendee(entry):
+                entry["responseStatus"] = "declined"
+                found_self = True
+            updated_attendees.append(entry)
+        if not found_self:
+            raise CalendarWriteNotPermitted(
+                f"cannot decline {event_id}: the principal is not listed "
+                "as an attendee on this event"
+            )
+        self._calendar().events().patch(
+            calendarId="primary",
+            eventId=event_id,
+            body={"attendees": updated_attendees},
+        ).execute()
+
+    def reschedule_event(
+        self, event_id: str, *, new_start: datetime, new_end: datetime
+    ) -> None:
+        """Move ``event_id`` to a new start/end via ``events.patch`` (Phase
+        3 stage 2, Deliverable A). Refuses (``CalendarWriteNotPermitted``)
+        unless the principal is this event's ORGANIZER, verified from a
+        FRESH ``events.get`` fetch performed right here — never from
+        cached workflow state, which is exactly what would let a stale
+        checkpoint move someone else's meeting."""
+        if not self._calendar_writes_enabled:
+            raise CalendarWriteNotPermitted(
+                "DirectOAuthConnector calendar writes disabled: requires "
+                "the calendar.events scope AND "
+                "ATTUNE_CALENDAR_WRITES_ENABLED=1. Read-only is the "
+                "default; nothing is declined or rescheduled silently."
+            )
+        event = (
+            self._calendar()
+            .events()
+            .get(calendarId="primary", eventId=event_id)
+            .execute()
+        )
+        organizer = event.get("organizer", {}) or {}
+        if not self._is_self_attendee(organizer):
+            raise CalendarWriteNotPermitted(
+                f"cannot reschedule {event_id}: the principal is not this "
+                "event's organizer"
+            )
+        self._calendar().events().patch(
+            calendarId="primary",
+            eventId=event_id,
+            body={
+                "start": {"dateTime": new_start.isoformat()},
+                "end": {"dateTime": new_end.isoformat()},
+            },
+        ).execute()
+
+    def _is_self_attendee(self, entry: dict[str, Any]) -> bool:
+        """Whether ``entry`` (an attendee or organizer sub-object from a
+        FRESH Calendar API fetch) is the principal — Google's own ``self``
+        flag first, falling back to an email match against
+        ``owner_email`` when the flag is absent (some fake/test payloads,
+        or older API responses)."""
+        if entry.get("self"):
+            return True
+        if self._owner_email and entry.get("email", "").lower() == self._owner_email.lower():
+            return True
+        return False
+
     # --- internal ----------------------------------------------------------
 
     def _resolve_label_id(self, name: str) -> str:
@@ -231,6 +395,18 @@ class DirectOAuthConnector(WorkspaceConnector):
             .execute()
         )
         return created["id"]
+
+    def _resolve_label_id_cached(self, name: str) -> str:
+        """Cached wrapper around :meth:`_resolve_label_id` for the
+        ``label_thread`` write path — bounded (one entry per distinct label
+        name seen) and per-instance, so proposing several archives in one
+        run costs one labels.list/create round trip, not one per thread."""
+        cached = self._label_id_cache.get(name)
+        if cached is not None:
+            return cached
+        label_id = self._resolve_label_id(name)
+        self._label_id_cache[name] = label_id
+        return label_id
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +533,7 @@ def _event_from_google(
     start = _parse_event_dt(data.get("start", {}))
     end = _parse_event_dt(data.get("end", {}))
     attendees = [a["email"] for a in data.get("attendees", []) if "email" in a]
+    organizer = data.get("organizer") or {}
     return CalendarEvent(
         event_id=data.get("id", ""),
         summary=data.get("summary", ""),
@@ -364,7 +541,21 @@ def _event_from_google(
         end=end,
         attendees=attendees,
         external_attendees=has_external_attendees(attendees, internal_domains),
+        organizer=organizer.get("email", ""),
+        organizer_is_self=bool(organizer.get("self")),
+        response_status=_self_response_status(data.get("attendees", [])),
     )
+
+
+def _self_response_status(raw_attendees: list[dict[str, Any]]) -> str:
+    """The PRINCIPAL's own responseStatus from the raw attendees array —
+    Google marks the calendar owner's own entry with ``"self": true``
+    (Phase 3 stage 2, Deliverable B). "" when the principal isn't an
+    attendee (e.g. events they organize solo) or the backend omits it."""
+    for attendee in raw_attendees:
+        if attendee.get("self"):
+            return attendee.get("responseStatus", "")
+    return ""
 
 
 def _parse_event_dt(dt_obj: dict[str, Any]) -> datetime:

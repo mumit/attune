@@ -134,7 +134,10 @@ def test_grant_persists_audits_and_leaves_original_immutable(tmp_path):
     )
 
     assert updated.max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
-    assert original.max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+    # original is untouched by the grant() call (immutability) — its LABEL
+    # rung is whatever default_matrix() ships (Phase 3 stage 1, G9: PROPOSE,
+    # not the bare READ_ONLY floor other still-dormant actions default to).
+    assert original.max_rung(Action.LABEL, Domain.MAIL) == Rung.PROPOSE
     assert store.load().max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
     event = audit.records[0]["events"][0]
     assert event["event"] == "autonomy_granted"
@@ -426,8 +429,11 @@ def test_provider_reloads_on_file_change(tmp_path):
     store = JsonPermissionMatrixStore(str(tmp_path / "grants.json"))
     provider = make_matrix_provider(store)
 
-    # never saved -> conservative default
-    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+    # never saved -> conservative default (Phase 3 stage 1, G9: LABEL/MAIL
+    # ships PROPOSE in default_matrix() itself — still conservative, since
+    # PROPOSE always interrupts for human approval; it just isn't the bare
+    # READ_ONLY floor of a still-dormant action).
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.PROPOSE
 
     store.save(default_matrix().grant(Action.LABEL, Domain.MAIL, Rung.ACT_NOTIFY))
     assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.ACT_NOTIFY
@@ -435,7 +441,7 @@ def test_provider_reloads_on_file_change(tmp_path):
     # revocation bites too (force a distinct mtime for coarse filesystems)
     store.save(default_matrix())
     _os.utime(store._path, (_time.time() + 2, _time.time() + 2))
-    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.PROPOSE
 
 
 def test_provider_fails_closed_on_corrupt_or_deleted_file(tmp_path):
@@ -450,12 +456,14 @@ def test_provider_fails_closed_on_corrupt_or_deleted_file(tmp_path):
 
     path.write_text('{"hack_the_planet|mail": 4}')
     _os.utime(str(path), (_time.time() + 2, _time.time() + 2))
-    # corrupt file -> conservative default, never cached autonomous authority
-    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+    # corrupt file -> conservative default (default_matrix()'s own PROPOSE
+    # grant for LABEL/MAIL, Phase 3 stage 1 G9), never cached autonomous
+    # authority.
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.PROPOSE
     assert provider().max_rung(Action.SEND_REPLY, Domain.MAIL) == Rung.READ_ONLY
 
     path.unlink()
-    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.READ_ONLY
+    assert provider().max_rung(Action.LABEL, Domain.MAIL) == Rung.PROPOSE
 
 
 def test_gate_honors_live_grant_and_revocation(tmp_path):

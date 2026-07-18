@@ -23,7 +23,7 @@ CheckFn = Callable[[], tuple[str, str]]
 # Checks that must pass before `attune run` will start (see run_cmd.py).
 FATAL_CHECKS = (
     "installation", "env", "data-dir", "llm", "workspace", "channels",
-    "source-channels",
+    "source-channels", "mail-labels", "calendar-writes",
 )
 
 
@@ -138,6 +138,53 @@ def check_source_channels(settings) -> tuple[str, str]:
     return PASS, (
         f"{len(settings.slack_source_channels)} Slack channel(s), "
         f"{len(settings.chat_source_spaces)} Chat space(s) configured"
+    )
+
+
+def check_mail_labels(settings) -> tuple[str, str]:
+    """Validate the opt-in archive/label write path (Phase 3 stage 1, G9): a
+    deployment that flips ``ATTUNE_MAIL_LABELS_ENABLED`` on a backend that
+    structurally cannot label threads would otherwise silently never
+    propose archive actions — fail fast instead, same posture as
+    :func:`check_source_channels` for opt-in source ingestion."""
+    if not settings.mail_labels_enabled:
+        return SKIP, "ATTUNE_MAIL_LABELS_ENABLED=0 (mail labeling disabled)"
+
+    from ..config import WorkspaceBackend
+
+    if settings.workspace_backend == WorkspaceBackend.MCP:
+        return FAIL, (
+            "MCP backend cannot label/archive threads (contract v1 has no "
+            "label-removal tool — see docs/mcp-contract.md); disable "
+            "ATTUNE_MAIL_LABELS_ENABLED or set ATTUNE_WORKSPACE_BACKEND=google_oauth"
+        )
+    return PASS, (
+        "google_oauth backend supports thread labeling (requires the "
+        "gmail.modify scope on the authorized credential)"
+    )
+
+
+def check_calendar_writes(settings) -> tuple[str, str]:
+    """Validate the opt-in decline-invite/reschedule write path (Phase 3
+    stage 2), mirroring :func:`check_mail_labels` exactly: a deployment that
+    flips ``ATTUNE_CALENDAR_WRITES_ENABLED`` on a backend that structurally
+    cannot write to Calendar would otherwise silently never propose a
+    decline or reschedule — fail fast instead."""
+    if not settings.calendar_writes_enabled:
+        return SKIP, "ATTUNE_CALENDAR_WRITES_ENABLED=0 (calendar writes disabled)"
+
+    from ..config import WorkspaceBackend
+
+    if settings.workspace_backend == WorkspaceBackend.MCP:
+        return FAIL, (
+            "MCP backend cannot decline invites or reschedule events "
+            "(contract v1 has neither tool — see docs/mcp-contract.md); "
+            "disable ATTUNE_CALENDAR_WRITES_ENABLED or set "
+            "ATTUNE_WORKSPACE_BACKEND=google_oauth"
+        )
+    return PASS, (
+        "google_oauth backend supports calendar writes (requires the "
+        "calendar.events scope on the authorized credential)"
     )
 
 
@@ -392,6 +439,8 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("workspace", check_workspace),
         Check("channels", lambda: check_channel_routes(settings)),
         Check("source-channels", lambda: check_source_channels(settings)),
+        Check("mail-labels", lambda: check_mail_labels(settings)),
+        Check("calendar-writes", lambda: check_calendar_writes(settings)),
         Check("audit-chain", lambda: check_audit_chain(settings)),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),

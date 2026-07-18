@@ -89,6 +89,8 @@ Only the variables for the selected Workspace backend are required.
 |---|---|---|
 | `GOOGLE_PROJECT_ID` | blank | Google Cloud project owning enabled Workspace APIs and, in push mode, Pub/Sub resources. Use the project ID, not its display name or numeric project number. |
 | `ATTUNE_GOOGLE_CREDENTIALS_FILE` | Application Default Credentials | Authorized-user JSON for the principal in direct OAuth mode. Suggested: `~/.attune/google_authorized_user.json` locally or a protected absolute path on a server. Do not substitute a VM service account for human mailbox consent. |
+| `ATTUNE_MAIL_LABELS_ENABLED` | `0` | Opt-in archive/label write path for triaged-noise mail (Phase 3 stage 1). google_oauth only — requires the optional `gmail.modify` scope alongside the scopes above. `attune doctor` fails if this is set while `ATTUNE_WORKSPACE_BACKEND=mcp` (contract v1 has no label-removal tool). |
+| `ATTUNE_CALENDAR_WRITES_ENABLED` | `0` | Opt-in decline-invite/reschedule write path for calendar events (Phase 3 stage 2). google_oauth only — uses the `calendar.events` scope already requested for tentative holds, so no extra Google consent step is needed. `attune doctor` fails if this is set while `ATTUNE_WORKSPACE_BACKEND=mcp` (contract v1 has neither tool). |
 | `ATTUNE_MCP_URL` | blank | Shared Streamable HTTP MCP endpoint implementing both Gmail and Calendar contract tools, such as `https://workspace-mcp.example.com/mcp`. Use this or both service-specific URLs. |
 | `ATTUNE_MCP_GMAIL_URL` | shared MCP URL | Gmail-specific MCP endpoint. Set together with the Calendar URL when no shared URL is used. |
 | `ATTUNE_MCP_CALENDAR_URL` | shared MCP URL | Calendar-specific MCP endpoint. Set together with the Gmail URL when no shared URL is used. |
@@ -132,6 +134,7 @@ matching read credential.
 | `ATTUNE_SLACK_SOURCE_CHANNELS` | blank | Comma-separated Slack channel IDs (`C…`/`G…`) to attend as signal sources. Requires `SLACK_BOT_TOKEN`. Blank disables the feature. |
 | `ATTUNE_CHAT_SOURCE_SPACES` | blank | Comma-separated Google Chat space resource names (`spaces/AAAA`) to attend as signal sources. Requires `ATTUNE_CHAT_CREDENTIALS_FILE`. Blank disables the feature. |
 | `ATTUNE_ATTENTION_PATH` | `ATTUNE_DATA_DIR/attention.json` | Path to the bounded attention store (recent ROUTINE/URGENT source items; 200-item cap, 7-day retention) — the seam a future unified brief reads from. |
+| `ATTUNE_BRIEF_SNAPSHOT_PATH` | `ATTUNE_DATA_DIR/brief_snapshot.json` | Path to the "since yesterday" brief snapshot (Phase 3: unread thread ids/subjects, today's event ids/titles, waiting-on ids, a timestamp; ignored once older than 48h). Written only by the daily posted brief, never by an on-demand brief request or the CLI preview. |
 
 ## Schedule, conversation, and logging
 

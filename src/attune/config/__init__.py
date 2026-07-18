@@ -78,6 +78,20 @@ class Settings:
     google_project_id: str | None = None
     google_credentials_file: str | None = None
 
+    # Phase 3 stage 1 (docs/future-state.md, G9): opt-in archive/label write
+    # path for triaged-NOISE mail. Default off. Mirrors send_enabled's
+    # double-gate discipline (config flag + a real gmail.modify scope) and is
+    # itself only one of three gates the dispatcher checks — see
+    # dispatcher.py's docstring and docs/decisions.md.
+    mail_labels_enabled: bool = False
+
+    # Phase 3 stage 2: opt-in decline-invite/reschedule write path for
+    # calendar events. Default off. Same double-gate discipline as
+    # ``mail_labels_enabled`` (config flag + a real calendar write scope)
+    # and, like it, only one of three gates the dispatcher checks — see
+    # dispatcher.py's docstring and docs/decisions.md.
+    calendar_writes_enabled: bool = False
+
     # MCP backend (Streamable HTTP). Separate URLs support managed Gmail and
     # Calendar servers; ATTUNE_MCP_URL is the shared fallback.
     mcp_url: str | None = None
@@ -144,6 +158,12 @@ class Settings:
     chat_source_spaces: frozenset[str] = frozenset()
     attention_path: str = "./attention.json"
     source_poll_state_path: str = "./source_poll_state.json"
+
+    # Phase 3 stage 3 (docs/future-state.md, G11): the "since yesterday"
+    # brief snapshot — bounded state written ONLY on the runtime's daily
+    # posted-brief path (see brief.py's module docstring and
+    # docs/decisions.md). Never read/written by the CLI's plain preview.
+    brief_snapshot_path: str = "./brief_snapshot.json"
 
     extra: dict[str, str] = field(default_factory=dict)
 
@@ -214,6 +234,8 @@ class Settings:
             internal_domains=domains,
             google_project_id=e.get("GOOGLE_PROJECT_ID"),
             google_credentials_file=e.get("ATTUNE_GOOGLE_CREDENTIALS_FILE"),
+            mail_labels_enabled=_is_true(e.get("ATTUNE_MAIL_LABELS_ENABLED")),
+            calendar_writes_enabled=_is_true(e.get("ATTUNE_CALENDAR_WRITES_ENABLED")),
             mcp_url=e.get("ATTUNE_MCP_URL"),
             mcp_gmail_url=e.get("ATTUNE_MCP_GMAIL_URL"),
             mcp_calendar_url=e.get("ATTUNE_MCP_CALENDAR_URL"),
@@ -281,6 +303,9 @@ class Settings:
             attention_path=_path("ATTUNE_ATTENTION_PATH", "attention.json"),
             source_poll_state_path=_path(
                 "ATTUNE_SOURCE_POLL_STATE_PATH", "source_poll_state.json"
+            ),
+            brief_snapshot_path=_path(
+                "ATTUNE_BRIEF_SNAPSHOT_PATH", "brief_snapshot.json"
             ),
         )
 

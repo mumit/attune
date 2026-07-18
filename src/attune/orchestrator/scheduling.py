@@ -11,8 +11,16 @@ offer a *resolution hold*. `propose_free_slots` is the read-only math for
 that offer — same-day gaps big enough to rebook the conflicted meeting
 into. The offer itself rides the standard draft-approve graph
 (`Action.CREATE_HOLD` at PROPOSE), and only human approval materializes a
-hold. Invite accept/decline, rescheduling, and time negotiation remain
-explicitly deferred — argue with the decisions entry, not this docstring.
+hold.
+
+Phase 3 stage 2 (see `docs/decisions.md`, "Calendar writes ship") adds two
+more consumers of the same read-only functions here, both living in
+`dispatcher.py` rather than this module: a DECLINE_INVITE proposal (using
+`detect_conflict`'s result as one of its deterministic reasons) and a
+RESCHEDULE proposal for a conflict the principal organizes (reusing
+`propose_free_slots` unchanged). Time negotiation with the other party
+remains explicitly deferred — argue with the decisions entry, not this
+docstring.
 """
 
 from __future__ import annotations

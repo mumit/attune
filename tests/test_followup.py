@@ -134,6 +134,70 @@ def test_cooldown_survives_restart(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# importance-ranked candidates (Phase 3 stage 1, docs/future-state.md; G10)
+# ---------------------------------------------------------------------------
+
+
+class _FakeImportanceProfile:
+    """Deterministic tier-by-address lookup, no signals/decay logic needed
+    for ranking tests."""
+
+    def __init__(self, tiers: dict):
+        self._tiers = tiers
+
+    def assess(self, address):
+        from attune.orchestrator.importance import ImportanceTier, TierAssessment
+
+        tier = self._tiers.get(address, ImportanceTier.NORMAL)
+        return TierAssessment(tier, "fake", False)
+
+
+def test_high_tier_counterparts_win_the_cap_before_it_binds(tmp_path):
+    """5 candidates, cap 3 (MAX_NUDGES_PER_RUN): the HIGH-tier counterparts
+    must win the cap even though they arrived later than some LOW/NORMAL
+    ones — ranking happens BEFORE max_candidates binds."""
+    from attune.orchestrator.importance import ImportanceTier
+
+    state = JsonNudgeState(str(tmp_path / "nudges.json"))
+    conn = _FakeConnector(sent=[
+        _quiet_thread("low1", days_quiet=10, reply_to="low1@x.com"),
+        _quiet_thread("low2", days_quiet=10, reply_to="low2@x.com"),
+        _quiet_thread("normal1", days_quiet=10, reply_to="normal1@x.com"),
+        _quiet_thread("high1", days_quiet=10, reply_to="high1@x.com"),
+        _quiet_thread("high2", days_quiet=10, reply_to="high2@x.com"),
+    ])
+    profile = _FakeImportanceProfile({
+        "low1@x.com": ImportanceTier.LOW,
+        "low2@x.com": ImportanceTier.LOW,
+        "normal1@x.com": ImportanceTier.NORMAL,
+        "high1@x.com": ImportanceTier.HIGH,
+        "high2@x.com": ImportanceTier.HIGH,
+    })
+
+    candidates = find_nudge_candidates(
+        conn, state, user_email=ME, now=NOW, importance_profile=profile
+    )
+
+    assert len(candidates) == MAX_NUDGES_PER_RUN
+    ids = [t.thread_id for t in candidates]
+    assert ids[:2] == ["high1", "high2"]  # HIGH first, stable within tier
+    assert "normal1" in ids
+    assert "low1" not in ids and "low2" not in ids  # LOW loses the cap
+
+
+def test_without_profile_ranking_is_arrival_order_backcompat(tmp_path):
+    state = JsonNudgeState(str(tmp_path / "nudges.json"))
+    conn = _FakeConnector(sent=[
+        _quiet_thread(f"t{i}", days_quiet=10, reply_to=f"c{i}@x.com")
+        for i in range(5)
+    ])
+
+    candidates = find_nudge_candidates(conn, state, user_email=ME, now=NOW)
+
+    assert [t.thread_id for t in candidates] == ["t0", "t1", "t2"]
+
+
+# ---------------------------------------------------------------------------
 # the nudge run: normal draft-approve workflows, nudge-titled cards
 # ---------------------------------------------------------------------------
 

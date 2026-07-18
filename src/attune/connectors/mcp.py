@@ -11,6 +11,20 @@ Two things worth stating plainly:
   the human sends the drafted message from Gmail. That's not a limitation we're
   working around — it's the safe pattern, and we keep it.
 
+- ``modify_labels``/``add_label`` above is add-only. The gated
+  ``label_thread`` write path (Phase 3 stage 1, G9 — archiving triaged-NOISE
+  mail, which needs to REMOVE the INBOX label) is deliberately NOT
+  implemented here: contract v1 has no label-removal tool, so
+  ``supports_labeling()`` stays at the base class's ``False`` and
+  ``label_thread`` stays refused. New write actions land google_oauth-only
+  until a v2 contract adds the capability (see ``docs/decisions.md``).
+
+- Same posture again for ``decline_invite``/``reschedule_event`` (Phase 3
+  stage 2): contract v1 has neither tool, so ``supports_calendar_writes()``
+  stays the base class's ``False`` and both stay refused here regardless of
+  whether the optional ``organizer``/``organizer_is_self``/
+  ``response_status`` event fields below are populated.
+
 - This class talks to the MCP server through an injected ``mcp_call`` callable
   (``mcp_call(server, tool, arguments) -> dict``) rather than hard-wiring a
   transport. That keeps the connector testable while the live runtime supplies
@@ -149,4 +163,13 @@ class McpWorkspaceConnector(WorkspaceConnector):
             external_attendees=has_external_attendees(
                 attendees, self._internal_domains
             ),
+            # Phase 3 stage 2: OPTIONAL pass-through fields, backward
+            # compatible with a server that doesn't emit them (defaults to
+            # "read nothing decided" — never a false positive for
+            # decline/reschedule detection). Contract v1 has no
+            # decline/reschedule tool regardless of what these report —
+            # supports_calendar_writes() stays the base class's False.
+            organizer=d.get("organizer", ""),
+            organizer_is_self=bool(d.get("organizer_is_self", False)),
+            response_status=d.get("response_status", ""),
         )
