@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from ..fslock import locked
 from ..memory.base import MemoryStore
 from ..memory.signals import ActionSignal, capture_action_signal
 
@@ -83,6 +84,17 @@ class JsonPendingApprovals:
     round-tripped through :func:`sweep_ignored`'s age math, which is what
     actually consumes it (see the ``ingestion/state.py`` precedent for why
     the consuming path, not the field, defines the format).
+
+    Security finding F2: the ``threading.RLock`` below only serializes
+    threads inside one process — it does nothing against two overlapping
+    *runtime processes* both reading, mutating, and rewriting this file, e.g.
+    both claiming the same approval card. Every load-mutate-save critical
+    section (``register``, ``resolve``, ``claim``, ``mark_ignored``, and the
+    ``_load`` inside ``pending``) additionally holds
+    ``fslock.locked(path + ".lock")``, an OS-level advisory lock that also
+    serializes across processes. The in-process lock stays in place too —
+    cheap, and it keeps this class safe on platforms where the file lock
+    degrades to a no-op (see ``fslock.py``).
     """
 
     def __init__(self, path: str):
@@ -98,7 +110,7 @@ class JsonPendingApprovals:
     def register(
         self, *, lg_tid: str, source_ref: str, domain: str, posted_at: datetime
     ) -> None:
-        with self._lock:
+        with self._lock, locked(self._path + ".lock"):
             data = self._load()
             data[lg_tid] = {
                 "source_ref": source_ref,
@@ -109,15 +121,19 @@ class JsonPendingApprovals:
             self._save(data)
 
     def resolve(self, lg_tid: str) -> None:
-        with self._lock:
+        with self._lock, locked(self._path + ".lock"):
             data = self._load()
             if lg_tid in data:
                 data[lg_tid]["status"] = STATUS_RESOLVED
                 self._save(data)
 
     def claim(self, lg_tid: str, *, actor: str | None = None) -> bool | None:
-        """Single-process atomic claim shared by Slack and Chat callbacks."""
-        with self._lock:
+        """Cross-process atomic claim shared by Slack and Chat callbacks:
+        the load-check-mutate-save sequence runs under both the in-process
+        ``threading.RLock`` and the advisory ``fslock`` on ``path + ".lock"``
+        (finding F2), so two overlapping runtime processes racing the same
+        ``lg_tid`` can't both see ``STATUS_PENDING`` and both win."""
+        with self._lock, locked(self._path + ".lock"):
             data = self._load()
             entry = data.get(lg_tid)
             if entry is None:
@@ -134,13 +150,15 @@ class JsonPendingApprovals:
         """The sweep's honest label: expired unanswered, not human-resolved
         (prompt 21) — the workflow itself stays resumable, and a late click
         is protected by the apply-time freshness check, not by this flag."""
-        with self._lock:
+        with self._lock, locked(self._path + ".lock"):
             data = self._load()
             if lg_tid in data:
                 data[lg_tid]["status"] = STATUS_IGNORED
                 self._save(data)
 
     def pending(self) -> list[PendingApproval]:
+        with self._lock, locked(self._path + ".lock"):
+            data = self._load()
         return [
             PendingApproval(
                 lg_tid=tid,
@@ -149,7 +167,7 @@ class JsonPendingApprovals:
                 posted_at=datetime.fromisoformat(raw["posted_at"]),
                 status=raw.get("status", STATUS_PENDING),
             )
-            for tid, raw in self._load().items()
+            for tid, raw in data.items()
             if raw.get("status") == STATUS_PENDING
         ]
 
