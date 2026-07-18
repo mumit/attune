@@ -42,6 +42,20 @@ class DraftApproveState(TypedDict, total=False):
                                      # thread id — what apply materializes
                                      # against); NOT the raw body
     incoming_summary: str            # short, provenance-tagged summary for the model
+    sender: Optional[str]            # the thread's counterparty address (mail:
+                                     # thread.from_addr; calendar: organizer, or
+                                     # None) — feeds the per-sender importance
+                                     # profile at capture time (Phase 1, G5)
+    priority: Optional[str]          # effective triage.Priority value ("urgent" |
+                                     # "routine" | "noise") that got this workflow
+                                     # started (Phase 1, G4) — a seam for future
+                                     # autonomy gating (Phase 4). The graph itself
+                                     # does NOT branch on this today; only
+                                     # dispatcher-level presentation (the urgent
+                                     # card marker/notification) reads it.
+    priority_adjusted: Optional[bool]  # whether the importance profile moved the
+                                     # tier away from the model's own classification
+                                     # (triage.TriageResult.adjusted)
 
     # --- working state (overwrite) ---
     retrieved_memories: list[str]    # preference/context snippets pulled pre-draft

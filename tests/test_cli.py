@@ -32,7 +32,7 @@ def test_parser_knows_all_subcommands():
     for argv in (["doctor"], ["status", "--check"], ["repair", "--yes"],
                  ["brief"], ["brief", "--post"],
                  ["run", "--no-checks"], ["init", "--fresh"],
-                 ["memory"], ["autonomy"]):
+                 ["memory"], ["autonomy"], ["importance"]):
         args = parser.parse_args(argv)
         assert hasattr(args, "func")
 
@@ -50,6 +50,11 @@ def test_autonomy_without_subcommand_prints_help(capsys):
 def test_memory_without_subcommand_prints_help(capsys):
     assert main(["memory"]) == 1
     assert "remember" in capsys.readouterr().out
+
+
+def test_importance_without_subcommand_prints_help(capsys):
+    assert main(["importance"]) == 1
+    assert "pin" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

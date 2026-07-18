@@ -2,6 +2,58 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-18 — Phase 1 learned importance, stage 2: deterministic triage adjustment
+
+- `triage_thread` applies the per-sender importance profile as a
+  deterministic, audited nudge on top of the model's own classification.
+  The adjustment is asymmetric on purpose: LOW demotes one step
+  (URGENT→ROUTINE, ROUTINE→NOISE), but HIGH only ever promotes
+  NOISE→ROUTINE — never to URGENT. Urgency is a judgment about the content
+  of the current message; the profile is a judgment about the sender's
+  track record, and letting a good track record fabricate same-day urgency
+  the model itself didn't see would be the profile inventing facts about
+  the current message rather than protecting an important sender's mail
+  from being dropped.
+- The adjustment DOES apply on top of the model's ROUTINE parse-failure
+  default, unlike the pre-existing soft memory-reaction garnish (which must
+  never move that default). The distinguishing factor is provenance: the
+  memory garnish is retrieved, unverified context feeding a model call
+  whose failure must not be compounded; the importance profile is the
+  principal's own already-recorded, deterministic state (a pin, or a
+  counted signal run) — the same class of trusted input the autonomy gate
+  already treats as authoritative.
+- `TriageResult` keeps `base_priority` (the model's own classification)
+  alongside the effective `priority` and an `adjusted` flag; the dispatcher
+  prepends a content-free `"triaged"`/`"triaged_noise"` audit event
+  (priority/base_priority/adjusted only) to both the NOISE-skip and the
+  proceed-path audit records.
+- URGENT mail gets presentation-only differentiation: the approval card's
+  `title` (not the draft body) carries a "🔴 URGENT" marker plus the
+  model's own reason, and a separate short heads-up goes to the configured
+  notification route. The marker deliberately never touches the draft text
+  itself — that text can become the actual sent reply if approved/edited,
+  so nothing presentation-only may leak into it. `DraftApproveState` gained
+  `priority`/`priority_adjusted` as a seam for future (Phase 4) autonomy
+  gating; the graph does not branch on them yet.
+- Calendar hold offers (`MAX_HOLD_OFFERS_PER_RUN`) are now ranked by the
+  conflicting event's attendees' importance tier before the per-run cap is
+  applied, since `CalendarEvent` has attendees but no organizer field —
+  "the counterpart's importance" is read as the best tier among its
+  attendees, the closest available proxy. Every conflict is still notified
+  regardless of rank; ranking only orders who gets a card first once the
+  cap binds. Absent a profile, every conflict ranks equally and Python's
+  stable sort preserves arrival order (back-compat).
+- The brief's unread-mail section is ordered HIGH/NORMAL/LOW by sender
+  tier, stable within each tier — presentation only, never a filter; LOW
+  senders stay visible (dropping mail is triage's job, not the brief's).
+  `runtime.py`'s daily posted brief threads the real
+  `app.importance_profile` through; the CLI's plain, `--post`-less preview
+  path deliberately does not construct one by default (it would create a
+  local JSON state file — and its lock file — as a side effect of a
+  read-only preview command, contradicting that path's existing "no extra
+  state" contract), but accepts one via `assemble_brief`'s new optional
+  argument for callers that want it.
+
 ## 2026-07-18 — The local audit log is hash-chained; local state takes file locks
 
 - Every line the local `JsonlAuditLog` appends now carries `prev_hash` and

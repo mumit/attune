@@ -112,6 +112,26 @@ def build_parser() -> argparse.ArgumentParser:
     m_remember.set_defaults(func=_cmd_memory_remember)
     p_memory.set_defaults(func=_cmd_memory_help, parser=p_memory)
 
+    p_importance = sub.add_parser(
+        "importance", help="see and correct the learned per-sender importance profile"
+    )
+    importance_sub = p_importance.add_subparsers(dest="importance_command")
+    i_list = importance_sub.add_parser("list", help="every sender's tier + reason")
+    i_list.set_defaults(func=_cmd_importance_list)
+    i_show = importance_sub.add_parser(
+        "show", help="one sender's assessment + recorded signals"
+    )
+    i_show.add_argument("sender")
+    i_show.set_defaults(func=_cmd_importance_show)
+    i_pin = importance_sub.add_parser("pin", help="pin a sender to a tier")
+    i_pin.add_argument("sender")
+    i_pin.add_argument("tier", help="high, normal, or low")
+    i_pin.set_defaults(func=_cmd_importance_pin)
+    i_unpin = importance_sub.add_parser("unpin", help="remove a sender's pin")
+    i_unpin.add_argument("sender")
+    i_unpin.set_defaults(func=_cmd_importance_unpin)
+    p_importance.set_defaults(func=_cmd_importance_help, parser=p_importance)
+
     p_autonomy = sub.add_parser(
         "autonomy", help="see and change the autonomy posture (grants are CLI-only)"
     )
@@ -223,6 +243,35 @@ def _cmd_memory_remember(args: Any) -> int:
 
 
 def _cmd_memory_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
+
+
+def _cmd_importance_list(args: Any) -> int:
+    from .importance_cmd import run_importance_list
+
+    return run_importance_list()
+
+
+def _cmd_importance_show(args: Any) -> int:
+    from .importance_cmd import run_importance_show
+
+    return run_importance_show(args.sender)
+
+
+def _cmd_importance_pin(args: Any) -> int:
+    from .importance_cmd import run_importance_pin
+
+    return run_importance_pin(args.sender, args.tier)
+
+
+def _cmd_importance_unpin(args: Any) -> int:
+    from .importance_cmd import run_importance_unpin
+
+    return run_importance_unpin(args.sender)
+
+
+def _cmd_importance_help(args: Any) -> int:
     args.parser.print_help()
     return 1
 

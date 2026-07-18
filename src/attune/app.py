@@ -46,6 +46,10 @@ class AppContext:
     # Live policy source (prompt 19): the gate and every posture surface
     # read through this so grants/revocations bite without a restart.
     matrix_provider: Any = None
+    # Phase 1 (docs/future-state.md, G5/G6): the deterministic per-sender
+    # importance profile, wired the same way the memory store and audit log
+    # are — injected here so the graph's capture node can dual-write.
+    importance_profile: Any = None
     _db_conn: Any = field(default=None, repr=False)
 
     def current_matrix(self) -> PermissionMatrix:
@@ -78,6 +82,7 @@ def build_app(
     matrix: PermissionMatrix | None = None,
     audit_log: AuditLog | None = None,
     apply_fn: Any = None,
+    importance_profile: Any = None,
 ) -> AppContext:
     """Assemble the runtime from config and optional overrides.
 
@@ -96,11 +101,15 @@ def build_app(
                      ``make_connector_apply_fn(connector)`` so approved drafts
                      materialize as Gmail drafts. Absent, apply is a no-op —
                      this module has no connector to bind.
+    - *importance_profile* via
+                     ``JsonImportanceProfile(settings.importance_profile_path)``
+                     (Phase 1, G5/G6) — the deterministic per-sender profile
+                     the capture node dual-writes to alongside memory.
 
-    Pass fakes for all four in tests to keep the suite offline::
+    Pass fakes for all five in tests to keep the suite offline::
 
         build_app(client=FakeClient(), store=FakeStore(), checkpointer=InMemorySaver(),
-                  audit_log=FakeAuditLog())
+                  audit_log=FakeAuditLog(), importance_profile=FakeImportanceProfile())
     """
     settings = settings or Settings.from_env()
 
@@ -145,6 +154,14 @@ def build_app(
     )
     resolved_audit_log: AuditLog = audit_log or JsonlAuditLog(settings.audit_log_path)
 
+    resolved_importance_profile = importance_profile
+    if resolved_importance_profile is None:
+        from .orchestrator.importance import JsonImportanceProfile
+
+        resolved_importance_profile = JsonImportanceProfile(
+            settings.importance_profile_path
+        )
+
     graph = build_draft_approve_graph(
         client=resolved_client,
         store=resolved_store,
@@ -152,6 +169,7 @@ def build_app(
         checkpointer=resolved_checkpointer,
         apply_fn=apply_fn,
         matrix_provider=resolved_provider,
+        importance_profile=resolved_importance_profile,
     )
 
     from .orchestrator import default_matrix as _default_matrix
@@ -164,5 +182,6 @@ def build_app(
         audit_log=resolved_audit_log,
         matrix=resolved_matrix or _default_matrix(),
         matrix_provider=resolved_provider,
+        importance_profile=resolved_importance_profile,
         _db_conn=db_conn,
     )

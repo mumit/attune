@@ -198,3 +198,178 @@ def test_parse_failure_defaults_routine_even_with_memory():
     )
 
     assert result.priority == Priority.ROUTINE
+
+
+# ---------------------------------------------------------------------------
+# Deterministic importance-profile adjustment (Phase 1, docs/future-state.md
+# G4). Offline: a real JsonImportanceProfile backed by tmp_path, so the
+# regression exercises the actual rule engine, not a stand-in.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from attune.memory.signals import ActionSignal  # noqa: E402
+from attune.orchestrator.importance import (  # noqa: E402
+    ImportanceTier,
+    JsonImportanceProfile,
+)
+
+T0 = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+
+
+def _profile(tmp_path):
+    return JsonImportanceProfile(str(tmp_path / "importance.json"))
+
+
+def test_thrice_ignored_sender_demotes_routine_to_noise_same_day(tmp_path):
+    """The Phase 1 exit criterion, literally: a sender ignored 3 of the last
+    3 proposals is LOW; a model ROUTINE classification for them comes back
+    NOISE the same day, with the demotion fully audited."""
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: standard follow-up.")
+
+    result = triage_thread(
+        client, "weekly digest", sender="newsletter@example.com",
+        importance_profile=profile,
+    )
+
+    assert result.priority == Priority.NOISE
+    assert result.base_priority == Priority.ROUTINE
+    assert result.adjusted is True
+    assert "demoted from routine" in result.reason
+    assert "ignored 3 of last 3" in result.reason
+
+
+def test_approval_heavy_sender_rescues_noise_to_routine(tmp_path):
+    profile = _profile(tmp_path)
+    for i in range(5):
+        profile.record_signal(
+            "vip@example.com", ActionSignal.APPROVED, ts=T0 + timedelta(days=i)
+        )
+    client = _FakeClient("PRIORITY: NOISE\nREASON: looks automated.")
+
+    result = triage_thread(
+        client, "quick note", sender="vip@example.com", importance_profile=profile,
+    )
+
+    assert result.priority == Priority.ROUTINE
+    assert result.base_priority == Priority.NOISE
+    assert result.adjusted is True
+    assert "promoted from noise" in result.reason
+
+
+def test_high_tier_sender_never_fabricates_urgent():
+    """HIGH tier promotes NOISE->ROUTINE only — never to URGENT. Urgency is
+    a content judgment about THIS message, not the sender's track record."""
+
+    class _PinnedHighProfile:
+        def assess(self, sender, *, now=None):
+            from attune.orchestrator.importance import TierAssessment
+
+            return TierAssessment(ImportanceTier.HIGH, "pinned high by the principal", True)
+
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: nothing urgent here.")
+    result = triage_thread(
+        client, "routine update", sender="vip@example.com",
+        importance_profile=_PinnedHighProfile(),
+    )
+
+    assert result.priority == Priority.ROUTINE  # not URGENT
+    assert result.adjusted is False
+
+
+def test_low_tier_never_demotes_noise_further():
+    """NOISE has nowhere lower to go; a LOW-tier sender's NOISE classification
+    is left alone."""
+
+    class _PinnedLowProfile:
+        def assess(self, sender, *, now=None):
+            from attune.orchestrator.importance import TierAssessment
+
+            return TierAssessment(ImportanceTier.LOW, "pinned low by the principal", True)
+
+    client = _FakeClient("PRIORITY: NOISE\nREASON: automated digest.")
+    result = triage_thread(
+        client, "digest", sender="newsletter@example.com",
+        importance_profile=_PinnedLowProfile(),
+    )
+
+    assert result.priority == Priority.NOISE
+    assert result.adjusted is False
+
+
+def test_normal_tier_never_adjusts(tmp_path):
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: fine.")
+    profile = _profile(tmp_path)  # unknown sender -> NORMAL, "no recorded signals"
+    result = triage_thread(
+        client, "hello", sender="stranger@example.com", importance_profile=profile,
+    )
+    assert result.priority == Priority.ROUTINE
+    assert result.adjusted is False
+
+
+def test_no_sender_or_no_profile_is_unadjusted(tmp_path):
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: fine.")
+
+    # profile present, but no sender -> no adjustment
+    result = triage_thread(client, "hello", importance_profile=profile)
+    assert result.priority == Priority.ROUTINE
+    assert result.adjusted is False
+
+    # sender present, but no profile -> no adjustment
+    result2 = triage_thread(client, "hello", sender="newsletter@example.com")
+    assert result2.priority == Priority.ROUTINE
+    assert result2.adjusted is False
+
+
+def test_importance_profile_failure_never_breaks_triage():
+    class _FailingProfile:
+        def assess(self, sender, *, now=None):
+            raise RuntimeError("profile store unavailable")
+
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: fine.")
+    result = triage_thread(
+        client, "hello", sender="a@b.com", importance_profile=_FailingProfile(),
+    )
+
+    assert result.priority == Priority.ROUTINE
+    assert result.adjusted is False
+
+
+def test_importance_adjustment_applies_even_to_parse_failure_fallback(tmp_path):
+    """Unlike the soft memory garnish (which must never move the ROUTINE
+    parse-failure default), the deterministic profile is the principal's own
+    recorded state and DOES apply to that fallback."""
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    client = _FakeClient("this response does not parse at all")
+
+    result = triage_thread(
+        client, "weekly digest", sender="newsletter@example.com",
+        importance_profile=profile,
+    )
+
+    assert result.priority == Priority.NOISE
+    assert result.base_priority == Priority.ROUTINE
+    assert result.adjusted is True
+
+
+def test_triage_result_backward_compatible_construction():
+    """Existing call sites (tests, injected triage_fns) build TriageResult
+    with just (priority, reason) — base_priority/adjusted must default
+    sanely without every caller needing to know about Phase 1."""
+    result = TriageResult(Priority.NOISE, "newsletter")
+    assert result.base_priority == Priority.NOISE
+    assert result.adjusted is False
