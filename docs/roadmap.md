@@ -317,6 +317,27 @@ The dated design record, including what was and wasn't reused from
 `brief.py`, is in [`decisions.md`](decisions.md); the delivery flow and its
 gates are also described in [`hosted-channels.md`](hosted-channels.md).
 
+Phase 6's hosted onboarding item (`docs/future-state.md` Phase 6;
+`docs/gap-analysis.md` G19's "no production signup" half) has its production
+signup half implemented and tested behind a new default-off gate,
+`ATTUNE_HOSTED_SIGNUP_ENABLED`, and not deployed. A verified Identity
+Platform subject with zero Attune membership can call a new,
+authenticated-but-sessionless `POST /v1/signup` to create its own tenant
+(or learn it already has one), reusing the exact login token-verification
+code path rather than a parallel one. Migration 0045 adds
+`attune.provision_hosted_signup_tenant` -- a new function, deliberately not
+a grant on the operator-only `provision_initial_identity`, since that
+function's caller-supplied slug parameter would hand a general web caller a
+slug oracle; the new function takes no slug at all and is owned by the
+same existing memberless executor role, so the migration adds no new role,
+table grant, or schema privilege. Signup never mints a session itself --
+the client performs the ordinary sign-in flow afterward -- and inviting a
+second member into an existing tenant remains out of scope. The full
+design, including the abuse-throttle posture and what remains operator
+work (the Cloud Armor edge rule, a live probe, abuse monitoring), is in
+[`hosted-signup.md`](hosted-signup.md); the dated decision record is in
+[`decisions.md`](decisions.md).
+
 ## Later
 
 - richer calendar negotiation and follow-up workflows

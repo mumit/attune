@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Protocol
 from urllib.parse import urlencode
 
+from .hosted_signup import SignupResult, SignupThrottle
 from .identity import IdentityRefused, VerifiedIdentity, verify_identity_platform_token
 from .identity_session import (
     IdentitySession,
@@ -17,6 +19,8 @@ from .identity_session import (
 )
 from .oauth_transaction import create_oauth_transaction_secrets
 from .slack_provider import build_authorize_url as build_slack_authorize_url
+
+LOG = logging.getLogger(__name__)
 
 HOSTNAME = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -122,6 +126,10 @@ class HostedBrief(Protocol):
     def run(self, context, **kwargs): ...
 
 
+class HostedSignup(Protocol):
+    def provision(self, identity: VerifiedIdentity) -> SignupResult: ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -154,6 +162,9 @@ def create_app(
     web_conversation: WebConversation | None = None,
     hosted_brief_enabled: bool = False,
     hosted_brief: HostedBrief | None = None,
+    hosted_signup_enabled: bool = False,
+    hosted_signup: HostedSignup | None = None,
+    hosted_signup_throttle: SignupThrottle | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -248,6 +259,13 @@ def create_app(
         raise ValueError(
             "enabled hosted brief requires identity and a dispatching service"
         )
+    if hosted_signup_enabled and (not identity_enabled or hosted_signup is None):
+        raise ValueError(
+            "enabled hosted signup requires identity and a provisioning service"
+        )
+    signup_throttle = hosted_signup_throttle
+    if hosted_signup_enabled and signup_throttle is None:
+        signup_throttle = SignupThrottle()
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
         MAX_CONTENT_LENGTH=20_000 if identity_enabled else 1024,
@@ -377,6 +395,66 @@ def create_app(
                 path="/",
             )
             return response
+
+        if hosted_signup_enabled:
+
+            @app.post("/v1/signup")
+            def hosted_signup_provision():
+                # Same shape and same anti-CSRF login binding as
+                # POST /v1/session (see docs/hosted-signup.md section 2) --
+                # signup has no session to authorize a mutation with, so it
+                # reuses login's own same-origin + login-challenge proof
+                # rather than inventing a second one.
+                if (
+                    not _same_origin_request(request, expected_origin)
+                    or not request.is_json
+                ):
+                    return jsonify({"error": "invalid_sign_in"}), 401
+                payload = request.get_json(silent=True)
+                if not isinstance(payload, dict) or set(payload) != {
+                    "id_token",
+                    "login_challenge",
+                }:
+                    return jsonify({"error": "invalid_sign_in"}), 401
+                token = payload["id_token"]
+                challenge = payload["login_challenge"]
+                cookie_challenge = request.cookies.get(LOGIN_COOKIE, "")
+                if (
+                    not isinstance(token, str)
+                    or not isinstance(challenge, str)
+                    or len(challenge) != 43
+                    or not hmac.compare_digest(challenge, cookie_challenge)
+                ):
+                    return jsonify({"error": "invalid_sign_in"}), 401
+                now = datetime.now(timezone.utc)
+                client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                if client_ip and not signup_throttle.allow(  # type: ignore[union-attr]
+                    b"ip:" + client_ip.encode("utf-8", "ignore"), now=now
+                ):
+                    LOG.info("hosted_signup_throttled scope=ip")
+                    return jsonify({"error": "signup_throttled"}), 429
+                try:
+                    identity = token_verifier(token, project_id)  # type: ignore[arg-type]
+                except IdentityRefused:
+                    return jsonify({"error": "invalid_sign_in"}), 401
+                except Exception:
+                    return jsonify({"error": "sign_in_unavailable"}), 503
+                if not signup_throttle.allow(  # type: ignore[union-attr]
+                    b"subject:" + identity.subject_hash, now=now
+                ):
+                    LOG.info("hosted_signup_throttled scope=subject")
+                    return jsonify({"error": "signup_throttled"}), 429
+                LOG.info("hosted_signup_attempted")
+                try:
+                    result = hosted_signup.provision(identity)  # type: ignore[union-attr]
+                except Exception:
+                    return jsonify({"error": "signup_unavailable"}), 503
+                response = jsonify({"status": result.status})
+                response.delete_cookie(
+                    LOGIN_COOKIE, path="/", secure=True, samesite="Lax"
+                )
+                response.status_code = 201 if result.status == "created" else 200
+                return response
 
         @app.get("/v1/session")
         def read_session():

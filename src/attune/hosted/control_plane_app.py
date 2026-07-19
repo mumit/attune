@@ -26,6 +26,7 @@ from .oauth import (
 from .onboarding import PostgresHostedOnboardingRepository
 from .hosted_policy import PostgresHostedPolicyRepository
 from .hosted_policy_service import HostedPolicyService
+from .hosted_signup import HostedSignupService, PostgresHostedSignupRepository
 from .repositories import PostgresJobRepository
 from .secret_broker_mutation_client import SecretBrokerMutationClient
 from .customer_export import PostgresCustomerExportRequests
@@ -115,6 +116,12 @@ def create_production_app():
     hosted_brief_enabled = hosted_brief_enabled_value == "true"
     if hosted_brief_enabled and not identity_enabled:
         raise ValueError("hosted brief requires identity")
+    signup_enabled_value = os.environ.get("ATTUNE_HOSTED_SIGNUP_ENABLED", "false")
+    if signup_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_HOSTED_SIGNUP_ENABLED must be true or false")
+    signup_enabled = signup_enabled_value == "true"
+    if signup_enabled and not identity_enabled:
+        raise ValueError("hosted signup requires identity")
     google_oauth = (
         PostgresGoogleOAuthStartRepository(iam_connection) if oauth_enabled else None
     )
@@ -142,12 +149,12 @@ def create_production_app():
         )
     audit = (
         PostgresAuditProducerRepository(iam_connection, producer_kind="control_plane")
-        if policy_enabled or channels_enabled or channel_setup_enabled
+        if policy_enabled or channels_enabled or channel_setup_enabled or signup_enabled
         else None
     )
     audit_writer = (
         AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"])
-        if policy_enabled or channels_enabled or channel_setup_enabled
+        if policy_enabled or channels_enabled or channel_setup_enabled or signup_enabled
         else None
     )
     return create_app(
@@ -260,6 +267,17 @@ def create_production_app():
                 ),
             )
             if hosted_brief_enabled
+            else None
+        ),
+        hosted_signup_enabled=signup_enabled,
+        hosted_signup=(
+            HostedSignupService(
+                PostgresHostedSignupRepository(iam_connection),
+                audit,
+                audit_writer,
+                region=os.environ["ATTUNE_HOSTED_SIGNUP_REGION"],
+            )
+            if signup_enabled
             else None
         ),
     )
