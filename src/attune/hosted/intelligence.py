@@ -61,7 +61,7 @@ import hashlib
 import hmac
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from typing import Sequence
+from typing import Protocol, Sequence
 from uuid import UUID
 
 from ..memory.signals import ActionSignal
@@ -379,6 +379,57 @@ class PostgresAttentionStore:
                 cursor.execute(statement, tuple(params))
                 rows = cursor.fetchall()
         return [_attention_item_from_row(row) for row in rows]
+
+
+class ImportanceSignalRecorder(Protocol):
+    """The subset of signal capture the draft-and-approve capability's
+    decision path uses (Phase 5 stage 4, G12 -- "signal capture closes the
+    loop"). Deliberately narrower than the full :class:`ImportanceProfile`
+    shape: a decision-path caller only ever records, never assesses/pins."""
+
+    def record(
+        self, context: TenantContext, *, principal_id: UUID, reference: str,
+        signal: ActionSignal,
+    ) -> None: ...
+
+
+class PostgresImportanceSignalCapture:
+    """Thin per-call wrapper around :class:`PostgresImportanceProfile` for
+    callers (the hosted draft-and-approve decision path today) that have no
+    other reason to hold a whole profile instance -- constructs one
+    short-lived profile per call, exactly the "one instance per job/request"
+    binding the module docstring documents, and calls only
+    :meth:`~PostgresImportanceProfile.record_signal`.
+
+    **Hosted profiles key on hashed provider references, not necessarily
+    email addresses (module docstring's hashed-reference design).** The
+    draft-and-approve flow never resolves a Gmail thread's actual sender --
+    only a caller-typed ``thread_ref`` exists at either the propose or the
+    decide step -- so ``reference`` here is that thread reference, hashed
+    under the SAME ``"sender"`` HMAC domain :class:`PostgresImportanceProfile`
+    already uses for a real sender address. This is a deliberate, documented
+    consequence of the reference-hashing design: two independent lookup keys
+    (a real sender address, or -- absent one -- a thread reference) can
+    share one hashed keyspace without colliding in practice, and the tier
+    this produces is scoped to "how has approving drafts on this thread
+    gone", not to a resolved counterpart identity. A future hosted surface
+    that resolves the real Gmail thread participant can record against that
+    instead, without changing this class.
+    """
+
+    def __init__(
+        self, connection_factory: ConnectionFactory, reference_hasher: IntelligenceReferenceHasher,
+    ):
+        self._connect = connection_factory
+        self._hasher = reference_hasher
+
+    def record(
+        self, context: TenantContext, *, principal_id: UUID, reference: str,
+        signal: ActionSignal,
+    ) -> None:
+        PostgresImportanceProfile(
+            self._connect, context, principal_id, reference_hasher=self._hasher,
+        ).record_signal(reference, signal)
 
 
 def _attention_item_from_row(row: Sequence[object]) -> AttentionItem:

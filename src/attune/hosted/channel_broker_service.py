@@ -185,6 +185,36 @@ def create_app(
             jsonify({"error": "delivery_unavailable"}), 503
         )
 
+    @app.post("/v1/google-chat/deliver-brief")
+    def deliver_brief():
+        if not authorized(expected_worker):
+            return jsonify({"error": "forbidden"}), 403
+        if not request.is_json:
+            return jsonify({"error": "invalid_request"}), 400
+        body = request.get_json(silent=True)
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"version", "destination_id", "job_id"}
+            or body.get("version") != 1
+        ):
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            destination_id = UUID(body["destination_id"])
+            job_id = UUID(body["job_id"])
+            if str(destination_id) != body["destination_id"] or str(job_id) != body["job_id"]:
+                raise ValueError("non-canonical UUID")
+            delivered = broker.deliver_brief(
+                destination_id=destination_id, job_id=job_id
+            )
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid_request"}), 400
+        except Exception as error:
+            LOG.warning("channel brief failed (%s)", type(error).__name__)
+            return jsonify({"error": "delivery_unavailable"}), 503
+        return jsonify({"status": "delivered"}) if delivered else (
+            jsonify({"error": "delivery_unavailable"}), 503
+        )
+
     if slack_broker is not None:
 
         @app.post("/v1/slack/install")
@@ -347,6 +377,39 @@ def create_app(
                 return jsonify({"error": "invalid_request"}), 400
             except Exception as error:
                 LOG.warning("Slack reply failed (%s)", type(error).__name__)
+                return jsonify({"error": "delivery_unavailable"}), 503
+            return jsonify({"status": "delivered"}) if delivered else (
+                jsonify({"error": "delivery_unavailable"}), 503
+            )
+
+        @app.post("/v1/slack/deliver-brief")
+        def deliver_slack_brief():
+            if not authorized(expected_worker):
+                return jsonify({"error": "forbidden"}), 403
+            if not request.is_json:
+                return jsonify({"error": "invalid_request"}), 400
+            body = request.get_json(silent=True)
+            if (
+                not isinstance(body, dict)
+                or set(body) != {"version", "destination_id", "job_id"}
+                or body.get("version") != 1
+            ):
+                return jsonify({"error": "invalid_request"}), 400
+            try:
+                destination_id = UUID(body["destination_id"])
+                job_id = UUID(body["job_id"])
+                if (
+                    str(destination_id) != body["destination_id"]
+                    or str(job_id) != body["job_id"]
+                ):
+                    raise ValueError("non-canonical UUID")
+                delivered = slack_broker.deliver_brief(
+                    destination_id=destination_id, job_id=job_id
+                )
+            except (TypeError, ValueError):
+                return jsonify({"error": "invalid_request"}), 400
+            except Exception as error:
+                LOG.warning("Slack brief failed (%s)", type(error).__name__)
                 return jsonify({"error": "delivery_unavailable"}), 503
             return jsonify({"status": "delivered"}) if delivered else (
                 jsonify({"error": "delivery_unavailable"}), 503

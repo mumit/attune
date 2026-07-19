@@ -271,6 +271,56 @@ class ChannelBrokerClient:
         except ValueError:
             return False
 
+    def deliver_google_chat_brief(
+        self, *, destination_id: UUID, job_id: UUID
+    ) -> bool:
+        """Hosted proactive brief delivery (docs/future-state.md Phase 5 item
+        4, G12) -- mirrors :meth:`deliver_google_chat_reply` exactly."""
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/google-chat/deliver-brief",
+            json={"version": 1, "destination_id": str(destination_id), "job_id": str(job_id)},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            return response.json() == {"status": "delivered"}
+        except ValueError:
+            return False
+
+    def deliver_slack_brief(self, *, destination_id: UUID, job_id: UUID) -> bool:
+        """Hosted proactive brief delivery (docs/future-state.md Phase 5 item
+        4, G12) -- mirrors :meth:`deliver_slack_reply` exactly."""
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        token = self._token_provider(self._audience)
+        if not isinstance(token, str) or not token:
+            raise RuntimeError("channel broker identity token is unavailable")
+        response = self._session.post(
+            f"{self._service_url}/v1/slack/deliver-brief",
+            json={
+                "version": 1,
+                "destination_id": str(destination_id),
+                "job_id": str(job_id),
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._timeout,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            return False
+        try:
+            return response.json() == {"status": "delivered"}
+        except ValueError:
+            return False
+
 
 def _https_origin(value: str) -> str:
     parsed = urlsplit(value)

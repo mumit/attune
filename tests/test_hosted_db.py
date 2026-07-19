@@ -62,6 +62,11 @@ from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
 from attune.hosted.hosted_channels import PostgresHostedChannelRepository
 from attune.hosted.channel_setup import PostgresHostedChannelSetupRepository
 from attune.hosted.channel_broker import PostgresChannelBrokerRepository
+from attune.hosted.brief_delivery import (
+    BriefDestination,
+    BriefWork,
+    PostgresHostedBriefRepository,
+)
 from attune.hosted.google_chat_conversation_executor import (
     PostgresGoogleChatConversationWorkRepository,
 )
@@ -147,7 +152,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0043_capability_admission.sql"
+    assert migrations[-1].name == "0044_hosted_brief_delivery.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -295,6 +300,15 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
         "REVOKE UPDATE ON attune.approvals FROM attune_worker, attune_control_plane"
         in capability_admission
     )
+    brief_delivery = sql_by_name["0044_hosted_brief_delivery.sql"]
+    assert "CREATE TABLE attune.hosted_brief_deliveries" in brief_delivery
+    assert "PRIMARY KEY (tenant_id, job_id, destination_id)" in brief_delivery
+    assert "claim_google_chat_brief_delivery" in brief_delivery
+    assert "claim_slack_brief_delivery" in brief_delivery
+    assert "'google_chat' = ANY(preference.brief_channels)" in brief_delivery
+    assert "'slack' = ANY(preference.brief_channels)" in brief_delivery
+    assert "GRANT SELECT, INSERT ON attune.hosted_brief_deliveries TO attune_worker" in brief_delivery
+    assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in brief_delivery
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -521,7 +535,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 43
+    assert apply_migrations(admin) == 44
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -1375,6 +1389,176 @@ def test_google_chat_conversation_delivery_is_canonical_replay_safe_and_broker_o
             psycopg.errors.InsufficientPrivilege
         ):
             cursor.execute("SELECT * FROM attune.hosted_channel_deliveries")
+        direct.rollback()
+    finally:
+        direct.close()
+
+
+def test_hosted_brief_job_round_trips_through_real_stores_and_holds_rls(
+    initialized_database, database_url
+):
+    """Gated Postgres round trip (Phase 5 stage 4, G12): a self-contained
+    tenant/principal/destination/preference/job fixture, proving
+    ``PostgresHostedBriefRepository`` resolves authority and fan-out
+    destinations, and the new brief delivery claim/complete functions round-
+    trip real rows -- plus the same forced-RLS/function-only isolation every
+    other delivery table in this schema holds."""
+    psycopg = pytest.importorskip("psycopg")
+    tenant_id = UUID("30000000-0000-4000-8000-000000000201")
+    principal_id = UUID("30000000-0000-4000-8000-000000000202")
+    installation_id = UUID("30000000-0000-4000-8000-000000000203")
+    destination_id = UUID("30000000-0000-4000-8000-000000000204")
+    connector_id = UUID("30000000-0000-4000-8000-000000000205")
+    job_id = UUID("30000000-0000-4000-8000-000000000206")
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) VALUES (%s,%s,%s)",
+            (tenant_id, "hosted-brief-tenant", "test"),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test')
+            """,
+            (tenant_id, principal_id, hashlib.sha256(b"hosted-brief-principal").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.installations
+                (tenant_id, id, provider, kind, external_ref_hash, status)
+            VALUES (%s, %s, 'google', 'channel', %s, 'active')
+            """,
+            (tenant_id, installation_id, hashlib.sha256(b"hosted-brief-install").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.connectors
+                (tenant_id, id, principal_id, installation_id, provider,
+                 credential_ref, status)
+            VALUES (%s, %s, %s, %s, 'google', %s, 'active')
+            """,
+            (tenant_id, connector_id, principal_id, installation_id,
+             UUID("30000000-0000-4000-8000-000000000207")),
+        )
+        cursor.execute(
+            "INSERT INTO attune.policies "
+            "(tenant_id, version, document, active, created_by) "
+            "VALUES (%s, 1, '{}'::jsonb, true, %s)",
+            (tenant_id, principal_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.hosted_channel_destinations
+                (tenant_id, id, owner_principal_id, installation_id, provider,
+                 installation_ref_hash, actor_ref_hash, destination_ref_hash,
+                 visibility, status, ingress_verified_at, delivery_verified_at,
+                 route_version)
+            VALUES (%s, %s, %s, %s, 'google_chat', %s, %s, %s, 'owner_dm',
+                    'active', clock_timestamp(), clock_timestamp(), 1)
+            """,
+            (
+                tenant_id, destination_id, principal_id, installation_id,
+                hashlib.sha256(b"hosted-brief-install-ref").digest(),
+                hashlib.sha256(b"hosted-brief-actor-ref").digest(),
+                hashlib.sha256(b"hosted-brief-destination-ref").digest(),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.hosted_channel_routes
+                (tenant_id, destination_id, ciphertext, nonce, wrapped_dek, key_resource)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                tenant_id, destination_id, b"ciphertext", b"0" * 12, b"wrapped",
+                "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.hosted_channel_preferences
+                (tenant_id, owner_principal_id, interaction_channels, brief_channels)
+            VALUES (%s, %s, ARRAY[]::text[], ARRAY['google_chat'])
+            """,
+            (tenant_id, principal_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.jobs
+                (tenant_id, id, kind, state, idempotency_key, capability,
+                 payload, attempts, lease_expires_at)
+            VALUES (%s, %s, 'channel.brief.deliver', 'leased', %s,
+                    'assistant.brief.deliver',
+                    jsonb_build_object('schema_version', 1,
+                        'principal_id', %s::text),
+                    1, clock_timestamp() + interval '5 minutes')
+            """,
+            (tenant_id, job_id, hashlib.sha256(b"hosted-brief-job").digest(),
+             principal_id),
+        )
+    initialized_database.commit()
+
+    worker_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_worker"]
+    )
+    context = TenantContext(tenant_id)
+    canonical_job = PostgresJobRepository(worker_factory).get(context, job_id)
+    assert canonical_job is not None
+    brief_repository = PostgresHostedBriefRepository(worker_factory)
+    work = brief_repository.resolve(context, canonical_job)
+    assert work == BriefWork(principal_id, connector_id)
+    destinations = brief_repository.list_brief_destinations(
+        context, principal_id=principal_id
+    )
+    assert destinations == (BriefDestination(destination_id, "google_chat"),)
+    brief_repository.propose_delivery(
+        context, job_id=job_id, destination_id=destination_id,
+        brief_text="Hello, this is your brief.",
+    )
+    # Idempotent: proposing again for the same (job, destination) is a no-op,
+    # never an error.
+    brief_repository.propose_delivery(
+        context, job_id=job_id, destination_id=destination_id,
+        brief_text="A different rendering would be ignored.",
+    )
+
+    broker = PostgresChannelBrokerRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_channel_broker"])
+    )
+    writer = PostgresAuditWriterRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_audit_writer"])
+    )
+    first_hash = hashlib.sha256(b"hosted-brief-delivery-first").digest()
+    first = broker.claim_brief_delivery(
+        destination_id=destination_id, job_id=job_id, claim_hash=first_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert first.brief_text == "Hello, this is your brief."
+    assert not first.already_delivered
+    assert writer.write(first.pre_audit_intent_id) is not None
+    completed = broker.complete_brief_delivery(
+        job_id=job_id, destination_id=destination_id, claim_hash=first_hash,
+        succeeded=True,
+        provider_message_ref_hash=hashlib.sha256(b"hosted-brief-message").digest(),
+    )
+    assert completed.delivery_state == "delivered"
+    assert writer.write(completed.outcome_audit_intent_id) is not None
+
+    replay = broker.claim_brief_delivery(
+        destination_id=destination_id, job_id=job_id,
+        claim_hash=hashlib.sha256(b"hosted-brief-delivery-replay").digest(),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert replay.already_delivered and replay.brief_text is None
+
+    direct = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_channel_broker"]
+    )()
+    try:
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT * FROM attune.hosted_brief_deliveries")
         direct.rollback()
     finally:
         direct.close()
@@ -3378,9 +3562,15 @@ def test_customer_export_request_and_claim_are_fixed_recent_and_function_only(
     with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
         cursor.execute(
             "SELECT action, outcome FROM attune.audit_intents "
-            "WHERE target_ref_hash = %s",
+            "WHERE target_ref_hash = %s ORDER BY created_at",
             (hashlib.sha256(str(requested[0]).encode()).digest(),),
         )
+        # Pre-existing gap fixed in passing (Phase 5 stage 4): this query had
+        # no ORDER BY, relying on undefined physical row order -- harmless
+        # while few rows existed ahead of it in the shared TENANT_A fixture,
+        # but exposed as soon as an earlier test in this module (this
+        # stage's own hosted-brief test) added enough preceding audit_intents
+        # volume for the planner to stop returning rows in insertion order.
         assert cursor.fetchall() == [
             ("export.requested", "observed"),
             ("export.claimed", "observed"),

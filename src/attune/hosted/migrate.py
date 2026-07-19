@@ -235,6 +235,21 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
             "attune.hosted_channel_credentials",
             "DELETE",
         ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_brief_deliveries",
+            "SELECT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_brief_deliveries",
+            "INSERT",
+        ),
+        (
+            "attune_channel_link_executor",
+            "attune.hosted_brief_deliveries",
+            "UPDATE",
+        ),
         ("attune_channel_message_executor", "attune.tenants", "SELECT"),
         ("attune_channel_message_executor", "attune.principals", "SELECT"),
         ("attune_channel_message_executor", "attune.installations", "SELECT"),
@@ -408,6 +423,7 @@ TENANT_TABLES = (
     "importance_signals",
     "attention_items",
     "capability_admissions",
+    "hosted_brief_deliveries",
 )
 
 validate_relational_lifecycle_inventory(TENANT_TABLES)

@@ -94,6 +94,27 @@ class CompletedSlackConversationDelivery:
 
 
 @dataclass(frozen=True)
+class ClaimedSlackBriefDelivery:
+    """Hosted proactive brief delivery (docs/future-state.md Phase 5 item 4,
+    G12) -- mirrors :class:`ClaimedSlackConversationDelivery` except the text
+    comes from ``attune.hosted_brief_deliveries`` (a job can fan out to more
+    than one destination), never from a conversation turn."""
+
+    tenant_id: UUID
+    encrypted_route: EncryptedCredential | None
+    encrypted_token: EncryptedCredential | None
+    brief_text: str | None
+    pre_audit_intent_id: UUID | None
+    already_delivered: bool
+
+
+@dataclass(frozen=True)
+class CompletedSlackBriefDelivery:
+    delivery_state: str
+    outcome_audit_intent_id: UUID
+
+
+@dataclass(frozen=True)
 class ClaimedSlackAcknowledgment:
     tenant_id: UUID
     destination_id: UUID
@@ -348,6 +369,50 @@ class PostgresSlackChannelBrokerRepository:
             (job_id, claim_hash, succeeded, provider_message_ref_hash),
         )
         return CompletedSlackConversationDelivery(*row)
+
+    def claim_brief_delivery(
+        self, *, destination_id: UUID, job_id: UUID, claim_hash: bytes,
+        expires_at: datetime,
+    ) -> ClaimedSlackBriefDelivery:
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        _fixed_hash("claim_hash", claim_hash)
+        row = self._call(
+            "SELECT * FROM attune.claim_slack_brief_delivery(%s, %s, %s, %s)",
+            (destination_id, job_id, claim_hash, expires_at),
+        )
+        (
+            tenant_id,
+            route_ciphertext, route_nonce, route_wrapped, route_key, route_version,
+            token_ciphertext, token_nonce, token_wrapped, token_key, token_version,
+            text, audit, delivered,
+        ) = row
+        encrypted_route = None if delivered else EncryptedCredential(
+            route_ciphertext, route_nonce, route_wrapped, route_key, route_version
+        )
+        encrypted_token = None if delivered else EncryptedCredential(
+            token_ciphertext, token_nonce, token_wrapped, token_key, token_version
+        )
+        return ClaimedSlackBriefDelivery(
+            tenant_id, encrypted_route, encrypted_token, text, audit, delivered
+        )
+
+    def complete_brief_delivery(
+        self, *, job_id: UUID, destination_id: UUID, claim_hash: bytes,
+        succeeded: bool, provider_message_ref_hash: bytes | None,
+    ) -> CompletedSlackBriefDelivery:
+        if not isinstance(job_id, UUID) or not isinstance(destination_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        if not isinstance(succeeded, bool):
+            raise TypeError("delivery completion is invalid")
+        _fixed_hash("claim_hash", claim_hash)
+        if provider_message_ref_hash is not None:
+            _fixed_hash("provider_message_ref_hash", provider_message_ref_hash)
+        row = self._call(
+            "SELECT * FROM attune.complete_slack_brief_delivery(%s, %s, %s, %s, %s)",
+            (job_id, destination_id, claim_hash, succeeded, provider_message_ref_hash),
+        )
+        return CompletedSlackBriefDelivery(*row)
 
     def claim_acknowledgment(
         self,
@@ -686,6 +751,69 @@ class SlackInstallBroker:
             raise RuntimeError("conversation delivery outcome audit is unavailable")
         return True
 
+    def deliver_brief(
+        self, *, destination_id: UUID, job_id: UUID,
+        now: datetime | None = None,
+    ) -> bool:
+        """Deliver one already-stored proactive brief to one Slack owner-DM
+        destination (docs/future-state.md Phase 5 item 4, G12). Mirrors
+        :meth:`deliver_reply` exactly, except the request id derives from
+        BOTH ``job_id`` and ``destination_id`` -- a brief job can legitimately
+        fan out to more than one destination, unlike a conversation reply."""
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise ValueError("invalid brief delivery")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("delivery time must be timezone-aware")
+        claim_hash = hashlib.sha256(secrets.token_bytes(32)).digest()
+        claim = self._repository.claim_brief_delivery(
+            destination_id=destination_id, job_id=job_id,
+            claim_hash=claim_hash, expires_at=current + timedelta(seconds=45),
+        )
+        if claim.already_delivered:
+            return True
+        if (
+            claim.encrypted_route is None or claim.encrypted_token is None
+            or claim.brief_text is None or claim.pre_audit_intent_id is None
+        ):
+            raise RuntimeError("brief delivery claim is invalid")
+        if not self._audit_writer.write(claim.pre_audit_intent_id):
+            self._complete_brief_failed(job_id, destination_id, claim_hash)
+            raise RuntimeError("brief delivery pre-effect audit is unavailable")
+        try:
+            channel, bot_token = self._decrypt_route_and_token(
+                claim.encrypted_route, claim.encrypted_token,
+                tenant_id=claim.tenant_id, destination_id=destination_id,
+            )
+            team = self._decrypt_team(
+                claim.encrypted_route, tenant_id=claim.tenant_id,
+                destination_id=destination_id,
+            )
+            request_id = UUID(
+                bytes=hashlib.sha256(
+                    job_id.bytes + destination_id.bytes
+                ).digest()[:16],
+                version=4,
+            )
+            posted_ts = self._provider.send_message(
+                bot_token=bot_token, channel=channel, text=claim.brief_text,
+                request_id=request_id,
+            )
+            message_ref = f"teams/{team}/channels/{channel}/messages/{posted_ts}"
+            message_hash = self._reference_hasher.hash("message", message_ref)
+        except BaseException:
+            self._complete_brief_failed(job_id, destination_id, claim_hash)
+            raise
+        completed = self._repository.complete_brief_delivery(
+            job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
+            succeeded=True, provider_message_ref_hash=message_hash,
+        )
+        if completed.delivery_state != "delivered":
+            raise RuntimeError("brief delivery completion is invalid")
+        if not self._audit_writer.write(completed.outcome_audit_intent_id):
+            raise RuntimeError("brief delivery outcome audit is unavailable")
+        return True
+
     def _references(
         self, installation: SlackInstallation, dm_channel: str
     ) -> dict[str, bytes]:
@@ -777,6 +905,18 @@ class SlackInstallBroker:
             completed = self._repository.complete_conversation_delivery(
                 job_id=job_id, claim_hash=claim_hash, succeeded=False,
                 provider_message_ref_hash=None,
+            )
+            self._audit_writer.write(completed.outcome_audit_intent_id)
+        except Exception:
+            pass
+
+    def _complete_brief_failed(
+        self, job_id: UUID, destination_id: UUID, claim_hash: bytes
+    ) -> None:
+        try:
+            completed = self._repository.complete_brief_delivery(
+                job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
+                succeeded=False, provider_message_ref_hash=None,
             )
             self._audit_writer.write(completed.outcome_audit_intent_id)
         except Exception:

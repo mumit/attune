@@ -24,6 +24,7 @@ from .google_chat_conversation_executor import (
     MemoryRepository,
     build_turn_provenance,
 )
+from .intelligence import ImportanceSignalRecorder
 from .repositories import ConnectionFactory, HostedJob
 from .tenant import TenantContext, tenant_transaction
 
@@ -198,6 +199,7 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
         memory_audit: MemoryAuditSink | None = None,
         capability_gateway: DraftCapabilityGateway | None = None,
         capability_admissions: DraftCapabilityAdmissions | None = None,
+        importance_signals: ImportanceSignalRecorder | None = None,
     ):
         super().__init__(
             work, intents, workspace, models, None,
@@ -207,6 +209,7 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
             memory=memory, memory_audit=memory_audit,
             capability_gateway=capability_gateway,
             capability_admissions=capability_admissions,
+            importance_signals=importance_signals,
         )
 
     def __call__(self, context: TenantContext, job: HostedJob) -> None:

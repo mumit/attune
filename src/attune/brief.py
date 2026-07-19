@@ -716,7 +716,7 @@ def _render_spine_entry(group: list[CorrelatableItem], *, pending: Any = None) -
     return line
 
 
-def _build_spine(
+def build_spine(
     threads: list[EmailThread],
     events: list[CalendarEvent],
     attention_items: list[AttentionItem],
@@ -728,7 +728,15 @@ def _build_spine(
     """Assemble, correlate, rank, and render the spine (Phase 2 step 3, G11).
     Pure presentation over already-fetched data — no additional reads, no
     model calls (``orchestrator/correlation.py`` is deterministic by design,
-    per the Phase 2 plan's explicit deferral of embedding similarity)."""
+    per the Phase 2 plan's explicit deferral of embedding similarity).
+
+    Public (Phase 5 stage 4, ``docs/future-state.md`` Phase 5 item 4; G12):
+    this is the exact minimal pure ranking/rendering seam a hosted proactive
+    brief job imports directly, rather than reimplementing spine assembly
+    against ``PostgresAttentionStore``/``PostgresImportanceProfile`` results —
+    see ``attune.hosted.brief_delivery``. No other behavior changed; this is
+    a rename of the previously-private ``_build_spine`` with no logic change.
+    """
     correlatable: list[CorrelatableItem] = (
         [from_mail_thread(t, now=now) for t in threads]
         + [from_calendar_event(e) for e in events]
@@ -813,7 +821,7 @@ def assemble_brief(
     )
     attention_items = _recent_attention_items(attention_store, now=now)
 
-    spine = _build_spine(
+    spine = build_spine(
         threads, events, attention_items,
         importance_profile=importance_profile, now=now, pending=pending,
     )

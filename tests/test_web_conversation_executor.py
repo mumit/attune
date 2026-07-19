@@ -219,7 +219,10 @@ def test_draft_admitted_records_admission_and_pending_approval_but_never_dispatc
     assert admissions.decide_calls == []
     turn = work.appended[0]
     assert "approve draft" in turn["content"] and "reject draft" in turn["content"]
-    assert turn["extra_provenance"] == {"pending_draft_approval_id": str(APPROVAL)}
+    assert turn["extra_provenance"] == {
+        "pending_draft_approval_id": str(APPROVAL),
+        "pending_draft_thread_ref": "thread_1",
+    }
 
 
 def test_draft_approve_with_pending_admission_claims_and_dispatches():
@@ -321,3 +324,184 @@ def test_draft_decide_failure_is_reported_honestly_not_as_success():
         capability_gateway=FakeGateway(), capability_admissions=RaisingAdmissions(),
     )(TenantContext(TENANT), job(user_sequence=2))
     assert "couldn't queue" in work.appended[0]["content"]
+
+
+# -- Signal capture closes the loop (Phase 5 stage 4, G12) ------------------
+# docs/future-state.md Phase 5 item 4; docs/decisions.md dated entry.
+
+
+def _propose_turns(sequence=2, thread_ref="thread_1"):
+    return [
+        HostedTurn(
+            CONVERSATION, sequence - 1, "assistant", "I've prepared a draft...",
+            {
+                "pending_draft_approval_id": str(APPROVAL),
+                "pending_draft_thread_ref": thread_ref,
+            },
+        ),
+        HostedTurn(CONVERSATION, sequence, "user", "approve draft", {}),
+    ]
+
+
+class FakeImportanceSignals:
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+
+    def record(self, context, *, principal_id, reference, signal):
+        self.calls.append(
+            {"context": context, "principal_id": principal_id,
+             "reference": reference, "signal": signal}
+        )
+        if self.error:
+            raise self.error
+
+
+class FakeMemory:
+    def __init__(self, error=None):
+        self.add_calls = []
+        self.error = error
+
+    def add(self, context, **kwargs):
+        self.add_calls.append({"context": context, **kwargs})
+        if self.error:
+            raise self.error
+        return SimpleNamespace(id=UUID(int=1))
+
+
+class EmbeddingModels(Models):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.embed_calls = []
+
+    def embed(self, *, text):
+        self.embed_calls.append(text)
+        return (0.1, 0.2, 0.3)
+
+
+def test_draft_approve_records_engagement_signal_and_raw_memory():
+    from attune.memory.signals import ActionSignal
+
+    turns = [
+        HostedTurn(
+            CONVERSATION, 1, "assistant", "I've prepared a draft...",
+            {"pending_draft_approval_id": str(APPROVAL), "pending_draft_thread_ref": "thread_1"},
+        ),
+        HostedTurn(CONVERSATION, 2, "user", "approve draft", {}),
+    ]
+    work = TwoTurnWork(turns)
+    importance_signals = FakeImportanceSignals()
+    memory = FakeMemory()
+    models = EmbeddingModels()
+    WebConversationExecutor(
+        work, None, None, models, now=lambda: NOW,
+        capability_gateway=FakeGateway(), capability_admissions=FakeAdmissions(decide_status="consumed"),
+        importance_signals=importance_signals, memory=memory,
+    )(TenantContext(TENANT), job(user_sequence=2))
+    assert importance_signals.calls == [
+        {"context": TenantContext(TENANT), "principal_id": PRINCIPAL,
+         "reference": "thread_1", "signal": ActionSignal.APPROVED}
+    ]
+    assert len(memory.add_calls) == 1
+    assert memory.add_calls[0]["source_class"] == "assistant_derived"
+    assert memory.add_calls[0]["principal_id"] == PRINCIPAL
+    # Content-free signal capture never leaks the draft body itself.
+    assert "see you then" not in memory.add_calls[0]["content"]
+
+
+def test_draft_reject_records_rejected_signal():
+    from attune.memory.signals import ActionSignal
+
+    turns = [
+        HostedTurn(
+            CONVERSATION, 1, "assistant", "I've prepared a draft...",
+            {"pending_draft_approval_id": str(APPROVAL), "pending_draft_thread_ref": "thread_9"},
+        ),
+        HostedTurn(CONVERSATION, 2, "user", "reject draft", {}),
+    ]
+    work = TwoTurnWork(turns)
+    importance_signals = FakeImportanceSignals()
+    WebConversationExecutor(
+        work, None, None, EmbeddingModels(), now=lambda: NOW,
+        capability_gateway=FakeGateway(), capability_admissions=FakeAdmissions(decide_status="rejected"),
+        importance_signals=importance_signals,
+    )(TenantContext(TENANT), job(user_sequence=2))
+    assert importance_signals.calls == [
+        {"context": TenantContext(TENANT), "principal_id": PRINCIPAL,
+         "reference": "thread_9", "signal": ActionSignal.REJECTED}
+    ]
+
+
+def test_no_signal_capture_on_expired_or_not_found_decisions():
+    for status in ("expired", "not_found"):
+        turns = _propose_turns()
+        work = TwoTurnWork(turns)
+        importance_signals = FakeImportanceSignals()
+        WebConversationExecutor(
+            work, None, None, EmbeddingModels(), now=lambda: NOW,
+            capability_gateway=FakeGateway(),
+            capability_admissions=FakeAdmissions(decide_status=status),
+            importance_signals=importance_signals,
+        )(TenantContext(TENANT), job(user_sequence=2))
+        assert importance_signals.calls == []
+
+
+def test_signal_capture_failure_never_breaks_the_decision_path():
+    """Failures never break the decision path (log + continue), exactly
+    like the local dual-write's own posture."""
+    turns = _propose_turns()
+    work = TwoTurnWork(turns)
+    importance_signals = FakeImportanceSignals(error=RuntimeError("db is down"))
+    WebConversationExecutor(
+        work, None, None, EmbeddingModels(), now=lambda: NOW,
+        capability_gateway=FakeGateway(), capability_admissions=FakeAdmissions(decide_status="consumed"),
+        importance_signals=importance_signals,
+    )(TenantContext(TENANT), job(user_sequence=2))
+    assert importance_signals.calls  # attempted
+    assert "creating that draft" in work.appended[0]["content"]
+
+
+def test_memory_capture_failure_never_breaks_the_decision_path():
+    turns = _propose_turns()
+    work = TwoTurnWork(turns)
+    memory = FakeMemory(error=RuntimeError("embedding service down"))
+    WebConversationExecutor(
+        work, None, None, EmbeddingModels(), now=lambda: NOW,
+        capability_gateway=FakeGateway(), capability_admissions=FakeAdmissions(decide_status="consumed"),
+        memory=memory,
+    )(TenantContext(TENANT), job(user_sequence=2))
+    assert memory.add_calls  # attempted
+    assert "creating that draft" in work.appended[0]["content"]
+
+
+def test_signal_capture_is_a_no_op_without_gates_injected():
+    """No importance_signals/memory injected (the default, and every
+    non-web surface) -- the decision path is byte-identical to before this
+    stage, no crash, nothing recorded."""
+    turns = _propose_turns()
+    work = TwoTurnWork(turns)
+    WebConversationExecutor(
+        work, None, None, Models(), now=lambda: NOW,
+        capability_gateway=FakeGateway(), capability_admissions=FakeAdmissions(decide_status="consumed"),
+    )(TenantContext(TENANT), job(user_sequence=2))
+    assert "creating that draft" in work.appended[0]["content"]
+
+
+def test_signal_capture_skips_a_missing_or_malformed_thread_ref():
+    """Older provenance (no pending_draft_thread_ref at all, e.g. a turn
+    from before this stage) skips capture rather than guessing or raising."""
+    turns = [
+        HostedTurn(
+            CONVERSATION, 1, "assistant", "I've prepared a draft...",
+            {"pending_draft_approval_id": str(APPROVAL)},
+        ),
+        HostedTurn(CONVERSATION, 2, "user", "approve draft", {}),
+    ]
+    work = TwoTurnWork(turns)
+    importance_signals = FakeImportanceSignals()
+    WebConversationExecutor(
+        work, None, None, EmbeddingModels(), now=lambda: NOW,
+        capability_gateway=FakeGateway(), capability_admissions=FakeAdmissions(decide_status="consumed"),
+        importance_signals=importance_signals,
+    )(TenantContext(TENANT), job(user_sequence=2))
+    assert importance_signals.calls == []

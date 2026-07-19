@@ -107,3 +107,18 @@ def test_web_conversation_route_requires_explicit_executor():
     conversation_job = job({"conversation_id": "10000000-0000-4000-8000-000000000715"})
     route.execute(context, conversation_job)
     assert calls == [(context, conversation_job)]
+
+
+def test_hosted_brief_route_requires_explicit_executor():
+    """Gate-off pin (Phase 5 stage 4, G12): with no executor supplied, the
+    brief route is absent, exactly like every other optional route."""
+    calls = []
+    assert "channel.brief.deliver" not in registered_routes()
+    routes = registered_routes(hosted_brief=lambda *args: calls.append(args))
+    assert set(routes) == {"platform.smoke", "channel.brief.deliver"}
+    route = routes["channel.brief.deliver"]
+    assert route.capability == "assistant.brief.deliver"
+    context = TenantContext(UUID("10000000-0000-4000-8000-000000000717"))
+    brief_job = job({"principal_id": "10000000-0000-4000-8000-000000000718"})
+    route.execute(context, brief_job)
+    assert calls == [(context, brief_job)]

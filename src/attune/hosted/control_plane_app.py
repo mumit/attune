@@ -6,6 +6,7 @@ import os
 
 from .cloud_sql import iam_connection
 from .control_plane_service import create_app
+from .brief_producer import HostedBriefProducer
 from .dispatch import PostgresDispatchProducerRepository
 from .audit import PostgresAuditProducerRepository
 from .audit_client import AuditWriterClient
@@ -108,6 +109,12 @@ def create_production_app():
     web_conversation_enabled = web_conversation_enabled_value == "true"
     if web_conversation_enabled and not identity_enabled:
         raise ValueError("hosted web conversation requires identity")
+    hosted_brief_enabled_value = os.environ.get("ATTUNE_ENABLE_HOSTED_BRIEF", "false")
+    if hosted_brief_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_HOSTED_BRIEF must be true or false")
+    hosted_brief_enabled = hosted_brief_enabled_value == "true"
+    if hosted_brief_enabled and not identity_enabled:
+        raise ValueError("hosted brief requires identity")
     google_oauth = (
         PostgresGoogleOAuthStartRepository(iam_connection) if oauth_enabled else None
     )
@@ -239,6 +246,20 @@ def create_production_app():
                 ),
             )
             if web_conversation_enabled
+            else None
+        ),
+        hosted_brief_enabled=hosted_brief_enabled,
+        hosted_brief=(
+            HostedBriefProducer(
+                PostgresDispatchProducerRepository(
+                    iam_connection, producer_kind="control_plane",
+                ),
+                DispatchBrokerClient(
+                    os.environ["ATTUNE_DISPATCH_BROKER_URL"],
+                    os.environ["ATTUNE_DISPATCH_BROKER_AUDIENCE"],
+                ),
+            )
+            if hosted_brief_enabled
             else None
         ),
     )

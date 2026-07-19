@@ -2,6 +2,137 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-19 — Hosted proactive briefs close Phase 5 (stage 4, G12)
+
+This closes `docs/future-state.md` Phase 5 item 4 on top of stages 1-3
+(Postgres intelligence stores, hosted conversational memory, the capability
+gateway's first R2 write). Behind a new default-off gate,
+`ATTUNE_ENABLE_HOSTED_BRIEF`, implemented and tested, not deployed.
+
+- **The brief job reuses the shared spine, not a reimplementation.**
+  `brief._build_spine` is renamed to the public `brief.build_spine` --
+  otherwise unchanged -- and `attune.hosted.brief_delivery.HostedBriefExecutor`
+  imports it directly, exactly as `orchestrator/correlation.py`'s own module
+  docstring anticipated ("a future hosted brief assembler calls
+  correlate/from_attention_item directly ... over
+  PostgresAttentionStore.recent() results"). No other refactor was needed:
+  `build_spine` was already a pure function of caller-supplied
+  `EmailThread`/`CalendarEvent`/`AttentionItem` sequences plus an
+  `ImportanceProfile`, with no dependency on any local file/store shape.
+- **The one real adapter lives in the hosted module, not in brief.py.** The
+  secret broker returns `GmailThreadSummary`/`CalendarEventSummary` -- a
+  more data-minimized shape than `connectors.base.EmailThread`/
+  `CalendarEvent` (no message body ever leaves the broker; one `sender`/
+  `date` pair instead of first/last-message fields). `_thread_from_summary`/
+  `_event_from_summary` in `brief_delivery.py` adapt one into the other,
+  defensively (a malformed date falls back rather than raising) -- this is
+  the "smallest possible refactor" the stage's plan asked for, and it turned
+  out to belong entirely on the hosted side.
+- **Deterministic, no model call.** Unlike the local daily brief (one
+  `converse` call to prose-summarize), the hosted brief renders the ranked
+  spine plus bounded unread-mail/upcoming-events sections as plain text.
+  Smaller surface for a job that runs on a timer rather than in response to
+  a request, and content-free by construction: the audit records counts
+  only (`brief.assemble`/`brief.deliver`, each a bounded int), never
+  rendered text.
+- **Delivery reuses the channel broker's own rigor, via a new small table.**
+  `hosted_channel_deliveries` is keyed `(tenant_id, job_id)` UNIQUE on
+  `job_id` -- a deliberate 1:1 job:destination shape for conversation
+  replies. A brief job legitimately fans out to every ACTIVE destination
+  whose preference includes briefs (hosted-channels.md), so migration 0044
+  adds `attune.hosted_brief_deliveries` keyed `(tenant_id, job_id,
+  destination_id)` instead, storing the rendered `brief_text` directly
+  (classified `CUSTOMER_CONTENT`/`ERASE`/exportable, like
+  `conversation_turns` -- unlike `hosted_channel_deliveries`, which never
+  stores content, this table does, so it gets that table's classification,
+  not the operational-delivery-state one). The worker inserts its own
+  tenant's pending row directly under ordinary RLS (trusted for its own
+  tenant, exactly like `append_assistant`'s existing INSERT); the new
+  `claim_google_chat_brief_delivery`/`claim_slack_brief_delivery` (and their
+  `complete_*` pairs) are SECURITY DEFINER, owned by the existing
+  `attune_channel_link_executor`, and mirror the conversation-delivery
+  functions exactly except they read `brief_channels` (never
+  `interaction_channels`) and source text from this new table instead of a
+  conversation turn. Both provider pairs were implemented together --
+  Google Chat and Slack are symmetric peers in the preference ceremony, so
+  shipping only one would have left the other channel silently unable to
+  receive a brief despite the owner having selected it.
+- **Hashed-reference profile keying, extended to a reference that isn't a
+  sender address.** The draft-and-approve decision path (deliverable 3,
+  below) needed a place to record an APPROVED/REJECTED signal, but never
+  resolves a real Gmail participant anywhere in that flow -- only a
+  caller-typed `thread_ref` exists. `intelligence.PostgresImportanceSignalCapture`
+  records against that thread reference, hashed under the SAME `"sender"`
+  HMAC domain `PostgresImportanceProfile` already uses for a real address.
+  This is a deliberate, documented consequence of stage 1's hashed-reference
+  design (`attune.hosted.intelligence`'s own module docstring): hosted
+  profiles key on hashed provider references, not necessarily resolved
+  identities, and two independently-typed reference spaces can share one
+  hashed keyspace without colliding in practice. A future surface that
+  resolves the real thread participant can record against that address
+  instead without changing this class.
+- **Signal capture is engagement, with no hygiene exception to invert.**
+  Draft approvals/rejections are recorded as `ActionSignal.APPROVED`/
+  `REJECTED` -- the same rule Phase 3's `orchestrator/draft_approve.py`
+  states for local `DRAFT_REPLY`/`FOLLOW_UP` approvals, and deliberately NOT
+  that rule's hygiene-action exception (`LABEL`/`DECLINE_INVITE`/
+  `RESCHEDULE`, where an approval means "this sender is noise," not
+  engagement): no hosted hygiene action exists yet, so the asymmetry that
+  exception exists to prevent never arises here. A raw action-signal hosted
+  memory write (mirrors local `capture_action_signal`'s verbatim,
+  `infer=False` write) also fires when `ATTUNE_ENABLE_HOSTED_MEMORY` is on.
+  Both writes are best-effort: a failure is logged and swallowed, never
+  breaking the decision path the human is waiting on -- the same posture
+  the local dual-write has always had.
+- **Pre-existing gap fixed in passing: `build_turn_provenance` never
+  actually allowed the draft capability's own provenance key.**
+  `pending_draft_approval_id` -- the exact key `_draft_create_propose` has
+  written since stage 3 -- was never added to `build_turn_provenance`'s
+  allowed-key set, so the REAL `append_assistant` repositories would have
+  raised `unsupported provenance extension` the first time a draft was ever
+  proposed against a real database. Every existing stage-3 test used a fake
+  `Work.append_assistant` that records whatever it's given, so nothing
+  caught it until this stage's own signal-capture work needed to add a
+  second key (`pending_draft_thread_ref`) to the same set and read the
+  function's body closely enough to notice. Fixed alongside the new key;
+  pinned with a dedicated regression test
+  (`test_build_turn_provenance_accepts_the_draft_capability_keys`).
+- **Producer idempotency is a key, not a lookup.** `POST /v1/brief/run`
+  (ordinary session, same-origin, CSRF -- not the ten-minute recency gate,
+  citing the same 'Web conversation acceptance uses ordinary proofs, not
+  recency' precedent above) uses `HostedBriefProducer`, which folds the
+  current UTC hour into the dispatch idempotency key alongside tenant and
+  principal. Two clicks in the same hour derive the identical key and
+  `PostgresDispatchProducerRepository.enqueue`'s own conflict handling
+  returns the same job both times -- documented as "at most one job per
+  tenant per principal per UTC hour," not enforced by a separate read-check.
+  Recurring scheduling (a cron-like trigger with no owner click) is
+  explicitly deferred, mirroring `protocol_retention.py`'s own "separate,
+  non-database scheduler identity" pattern rather than inventing a second
+  scheduling mechanism for this one job kind.
+- **A second pre-existing gap, unrelated to this stage's own code, found
+  and fixed while adding the gated Postgres test.** A customer-export test's
+  `SELECT ... FROM attune.audit_intents WHERE target_ref_hash = %s` had no
+  `ORDER BY`, relying on undefined physical row order for a three-row
+  equality assertion. It happened to pass while few enough rows existed
+  ahead of it in the shared `TENANT_A` fixture; adding this stage's own
+  self-contained gated test earlier in the same module (more preceding
+  `audit_intents` volume) was enough to flip the planner's returned order
+  and fail it. Fixed with an explicit `ORDER BY created_at` -- the
+  underlying bug, not a symptom of this stage's change.
+- **Chosen over:** threading the brief through `conversations`/
+  `conversation_turns` (would have required widening the `surface` CHECK and
+  fabricating a synthetic "brief" installation the way stage 4's own `web`
+  precedent did for a channel that already has no natural installation --
+  rejected as needless coupling for a proactive deliverable that isn't a
+  conversation turn); a single job fanning out via the worker calling the
+  broker directly with live text (rejected -- would let a compromised
+  worker hand arbitrary text to the broker, violating the documented "the
+  worker cannot supply reply text" boundary); shipping Google Chat only and
+  deferring Slack (rejected -- both channels are equal peers in the
+  existing preference ceremony, and the second SQL/broker pair was a
+  mechanical, low-risk addition once the first existed).
+
 ## 2026-07-19 — Send becomes real, graduation cards, and demotion symmetry (Phase 4 stage 2, G13/G15)
 
 This closes out `docs/future-state.md` Phase 4 (items 2, 4, 5 and the exit

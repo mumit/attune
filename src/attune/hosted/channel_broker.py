@@ -106,6 +106,26 @@ class CompletedGoogleChatConversationDelivery:
     outcome_audit_intent_id: UUID
 
 
+@dataclass(frozen=True)
+class ClaimedGoogleChatBriefDelivery:
+    """Hosted proactive brief delivery (docs/future-state.md Phase 5 item 4,
+    G12) -- the same claim shape as :class:`ClaimedGoogleChatConversationDelivery`
+    except the text comes from ``attune.hosted_brief_deliveries`` (a job can
+    fan out to more than one destination), never from a conversation turn."""
+
+    tenant_id: UUID
+    encrypted: EncryptedCredential | None
+    brief_text: str | None
+    pre_audit_intent_id: UUID | None
+    already_delivered: bool
+
+
+@dataclass(frozen=True)
+class CompletedGoogleChatBriefDelivery:
+    delivery_state: str
+    outcome_audit_intent_id: UUID
+
+
 class GoogleChatSender(Protocol):
     def send_connection_test(self, *, space: str, request_id: UUID) -> None: ...
     def send_message(self, *, space: str, text: str, request_id: UUID) -> str: ...
@@ -290,6 +310,42 @@ class PostgresChannelBrokerRepository:
             (job_id, claim_hash, succeeded, provider_message_ref_hash),
         )
         return CompletedGoogleChatConversationDelivery(*row)
+
+    def claim_brief_delivery(
+        self, *, destination_id: UUID, job_id: UUID, claim_hash: bytes,
+        expires_at: datetime,
+    ) -> ClaimedGoogleChatBriefDelivery:
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        _fixed_hash("claim_hash", claim_hash)
+        row = self._call(
+            "SELECT * FROM attune.claim_google_chat_brief_delivery(%s, %s, %s, %s)",
+            (destination_id, job_id, claim_hash, expires_at),
+        )
+        tenant_id, ciphertext, nonce, wrapped, key, version, text, audit, delivered = row
+        encrypted = None if delivered else EncryptedCredential(
+            ciphertext, nonce, wrapped, key, version
+        )
+        return ClaimedGoogleChatBriefDelivery(
+            tenant_id, encrypted, text, audit, delivered
+        )
+
+    def complete_brief_delivery(
+        self, *, job_id: UUID, destination_id: UUID, claim_hash: bytes,
+        succeeded: bool, provider_message_ref_hash: bytes | None,
+    ) -> CompletedGoogleChatBriefDelivery:
+        if not isinstance(job_id, UUID) or not isinstance(destination_id, UUID):
+            raise TypeError("delivery references must be UUIDs")
+        if not isinstance(succeeded, bool):
+            raise TypeError("delivery completion is invalid")
+        _fixed_hash("claim_hash", claim_hash)
+        if provider_message_ref_hash is not None:
+            _fixed_hash("provider_message_ref_hash", provider_message_ref_hash)
+        row = self._call(
+            "SELECT * FROM attune.complete_google_chat_brief_delivery(%s, %s, %s, %s, %s)",
+            (job_id, destination_id, claim_hash, succeeded, provider_message_ref_hash),
+        )
+        return CompletedGoogleChatBriefDelivery(*row)
 
     def _call(self, statement: str, values: tuple):
         with closing(self._connect()) as connection:
@@ -525,6 +581,68 @@ class GoogleChatLinkBroker:
             raise RuntimeError("conversation delivery outcome audit is unavailable")
         return True
 
+    def deliver_brief(
+        self, *, destination_id: UUID, job_id: UUID,
+        now: datetime | None = None,
+    ) -> bool:
+        """Deliver one already-stored proactive brief to one destination
+        (docs/future-state.md Phase 5 item 4, G12). Mirrors :meth:`deliver_reply`
+        exactly, except the request id is derived from BOTH ``job_id`` and
+        ``destination_id`` -- unlike a conversation reply, one brief job can
+        legitimately fan out to more than one destination, so ``job_id``
+        alone is not a unique idempotency key for Google's own dedup here."""
+        if not isinstance(destination_id, UUID) or not isinstance(job_id, UUID):
+            raise ValueError("invalid brief delivery")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("delivery time must be timezone-aware")
+        claim_hash = hashlib.sha256(secrets.token_bytes(32)).digest()
+        claim = self._repository.claim_brief_delivery(
+            destination_id=destination_id, job_id=job_id,
+            claim_hash=claim_hash, expires_at=current + timedelta(seconds=45),
+        )
+        if claim.already_delivered:
+            return True
+        if (
+            claim.encrypted is None or claim.brief_text is None
+            or claim.pre_audit_intent_id is None
+        ):
+            raise RuntimeError("brief delivery claim is invalid")
+        if not self._audit_writer.write(claim.pre_audit_intent_id):
+            self._complete_brief_failed(job_id, destination_id, claim_hash)
+            raise RuntimeError("brief delivery pre-effect audit is unavailable")
+        try:
+            route = self._cipher.decrypt(
+                claim.encrypted, tenant_id=claim.tenant_id,
+                connector_id=destination_id, provider="google_chat_route",
+                credential_version=1,
+            )
+            space = route.get("space")
+            if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
+                raise RuntimeError("stored channel route is invalid")
+            request_id = UUID(
+                bytes=hashlib.sha256(
+                    job_id.bytes + destination_id.bytes
+                ).digest()[:16],
+                version=4,
+            )
+            message_ref = self._sender.send_message(
+                space=space, text=claim.brief_text, request_id=request_id
+            )
+            message_hash = self._reference_hasher.hash("message", message_ref)
+        except BaseException:
+            self._complete_brief_failed(job_id, destination_id, claim_hash)
+            raise
+        completed = self._repository.complete_brief_delivery(
+            job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
+            succeeded=True, provider_message_ref_hash=message_hash,
+        )
+        if completed.delivery_state != "delivered":
+            raise RuntimeError("brief delivery completion is invalid")
+        if not self._audit_writer.write(completed.outcome_audit_intent_id):
+            raise RuntimeError("brief delivery outcome audit is unavailable")
+        return True
+
     def _complete_failed(self, destination_id: UUID, claim_hash: bytes) -> None:
         try:
             completed = self._repository.complete_delivery(
@@ -541,6 +659,18 @@ class GoogleChatLinkBroker:
             completed = self._repository.complete_conversation_delivery(
                 job_id=job_id, claim_hash=claim_hash, succeeded=False,
                 provider_message_ref_hash=None,
+            )
+            self._audit_writer.write(completed.outcome_audit_intent_id)
+        except Exception:
+            pass
+
+    def _complete_brief_failed(
+        self, job_id: UUID, destination_id: UUID, claim_hash: bytes
+    ) -> None:
+        try:
+            completed = self._repository.complete_brief_delivery(
+                job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
+                succeeded=False, provider_message_ref_hash=None,
             )
             self._audit_writer.write(completed.outcome_audit_intent_id)
         except Exception:

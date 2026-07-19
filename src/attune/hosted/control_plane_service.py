@@ -118,6 +118,10 @@ class WebConversation(Protocol):
     def turns(self, context, **kwargs): ...
 
 
+class HostedBrief(Protocol):
+    def run(self, context, **kwargs): ...
+
+
 def create_app(
     expected_host: str,
     *,
@@ -148,6 +152,8 @@ def create_app(
     customer_exports: CustomerExports | None = None,
     hosted_web_conversation_enabled: bool = False,
     web_conversation: WebConversation | None = None,
+    hosted_brief_enabled: bool = False,
+    hosted_brief: HostedBrief | None = None,
     token_verifier: Callable[[str, str], VerifiedIdentity] = (
         verify_identity_platform_token
     ),
@@ -237,6 +243,10 @@ def create_app(
     ):
         raise ValueError(
             "enabled web conversation requires identity and an audited service"
+        )
+    if hosted_brief_enabled and (not identity_enabled or hosted_brief is None):
+        raise ValueError(
+            "enabled hosted brief requires identity and a dispatching service"
         )
     app = Flask(__name__, static_url_path="/assets")
     app.config.update(
@@ -424,6 +434,9 @@ def create_app(
                         "available"
                         if hosted_web_conversation_enabled
                         else "not_configured"
+                    ),
+                    "hosted_brief": (
+                        "available" if hosted_brief_enabled else "not_configured"
                     ),
                 }
             )
@@ -866,6 +879,50 @@ def create_app(
                         "pending": pending,
                     }
                 )
+
+        if hosted_brief_enabled:
+
+            @app.post("/v1/brief/run")
+            def run_hosted_brief():
+                """Create the brief job + dispatch intent (Deliverable 2,
+                docs/future-state.md Phase 5 item 4). Ordinary session,
+                same-origin, and CSRF proofs -- not the ten-minute recency
+                reserved for destructive ceremonies -- the same bar as
+                ``POST /v1/conversation/messages`` (see the dated
+                'Web conversation acceptance uses ordinary proofs, not
+                recency' entry in decisions.md: triggering a bounded,
+                read-only-executed job is not an authority-changing
+                ceremony). Idempotent per tenant per principal per UTC hour
+                (``HostedBriefProducer``'s documented bound) -- a second
+                click in the same hour returns the same job, never a
+                duplicate delivery."""
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"schema_version"}
+                    or payload.get("schema_version") != 1
+                ):
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request, expected_origin, sessions,  # type: ignore[arg-type]
+                )
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    started = hosted_brief.run(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id,
+                    )
+                except Exception:
+                    return jsonify({"error": "brief_unavailable"}), 503
+                return jsonify(
+                    {
+                        "schema_version": 1,
+                        "job_id": str(started.job_id),
+                        "state": "accepted",
+                    }
+                ), 202
 
         if hosted_channels_enabled:
 
