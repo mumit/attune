@@ -22,6 +22,8 @@ from .google_chat_conversation_executor import (
     GoogleChatConversationExecutor,
     MemoryAuditSink,
     MemoryRepository,
+    ModelUsageMeter,
+    TenantModelProfiles,
     build_turn_provenance,
 )
 from .intelligence import ImportanceSignalRecorder
@@ -200,6 +202,8 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
         capability_gateway: DraftCapabilityGateway | None = None,
         capability_admissions: DraftCapabilityAdmissions | None = None,
         importance_signals: ImportanceSignalRecorder | None = None,
+        model_profiles: TenantModelProfiles | None = None,
+        usage: ModelUsageMeter | None = None,
     ):
         super().__init__(
             work, intents, workspace, models, None,
@@ -210,6 +214,8 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
             capability_gateway=capability_gateway,
             capability_admissions=capability_admissions,
             importance_signals=importance_signals,
+            model_profiles=model_profiles,
+            usage=usage,
         )
 
     def __call__(self, context: TenantContext, job: HostedJob) -> None:
