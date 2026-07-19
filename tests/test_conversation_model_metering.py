@@ -13,7 +13,7 @@ import pytest
 from attune.hosted.google_chat_conversation_executor import GoogleChatConversationExecutor
 from attune.hosted.model_gateway import TokenUsage
 from attune.hosted.tenant import TenantContext
-from tests.test_google_chat_conversation_executor import (
+from test_google_chat_conversation_executor import (
     NOW,
     TENANT,
     Intents,
