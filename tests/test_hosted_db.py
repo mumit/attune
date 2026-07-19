@@ -152,7 +152,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0044_hosted_brief_delivery.sql"
+    assert migrations[-1].name == "0045_hosted_signup.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -309,6 +309,21 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     assert "'slack' = ANY(preference.brief_channels)" in brief_delivery
     assert "GRANT SELECT, INSERT ON attune.hosted_brief_deliveries TO attune_worker" in brief_delivery
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in brief_delivery
+    signup = sql_by_name["0045_hosted_signup.sql"]
+    assert "CREATE FUNCTION attune.provision_hosted_signup_tenant" in signup
+    assert "'tn-' || replace(v_tenant_id::text, '-', '')" in signup
+    assert "pg_advisory_xact_lock(214748301)" in signup
+    assert "GRANT EXECUTE ON FUNCTION" in signup
+    assert "TO attune_control_plane" in signup
+    assert "GRANT attune_identity_provisioning_executor TO %I" in signup
+    assert "REVOKE CREATE ON SCHEMA attune\nFROM attune_identity_provisioning_executor" in signup
+    assert "REVOKE attune_identity_provisioning_executor FROM %I" in signup
+    # No new relation, role, or table grant is introduced by this migration:
+    # the function reuses 0016's existing owner-role table privileges.
+    assert "CREATE TABLE" not in signup
+    assert "CREATE ROLE" not in signup
+    assert "GRANT SELECT" not in signup
+    assert "GRANT INSERT" not in signup
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -535,7 +550,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 44
+    assert apply_migrations(admin) == 45
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -3308,6 +3323,84 @@ def test_initial_identity_provisioning_is_idempotent_conflict_closed_and_functio
         with connection.cursor() as cursor:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 cursor.execute("SELECT id FROM attune.tenants")
+        connection.rollback()
+    finally:
+        connection.close()
+
+
+def test_hosted_signup_provisioning_is_idempotent_server_slugged_and_function_only(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    subject_hash = hashlib.sha256(b"hosted-signup-subject").digest()
+    issuer = "https://securetoken.google.com/attune-development-502421"
+    connection = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.provision_hosted_signup_tenant(%s,%s,%s)",
+                (subject_hash, issuer, "test-region1"),
+            )
+            first = cursor.fetchone()
+        connection.commit()
+        assert first[2] is True
+        tenant_id = first[0]
+
+        # The control plane never chose the slug: the function derived it
+        # from the tenant id it created, never from caller input (there is
+        # no slug parameter at all).
+        with initialized_database.cursor() as cursor:
+            cursor.execute(
+                "SELECT slug FROM attune.tenants WHERE id = %s", (tenant_id,)
+            )
+            (slug,) = cursor.fetchone()
+        assert slug == "tn-" + str(tenant_id).replace("-", "")
+
+        # Exact replay by the same subject is idempotent, not a second tenant.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.provision_hosted_signup_tenant(%s,%s,%s)",
+                (subject_hash, issuer, "test-region1"),
+            )
+            repeated = cursor.fetchone()
+        connection.commit()
+        assert repeated[:2] == first[:2]
+        assert repeated[2] is False
+
+        # It cannot join or alter any other tenant: there is no tenant
+        # identifier this ceremony ever accepts as input. Two assertions
+        # about the OPERATOR ceremony for the same subject: (1) the control
+        # plane's runtime role cannot even invoke it — that function is
+        # granted only to the operator-job identity, and the denial IS the
+        # boundary; (2) a privileged caller attempting it under a different
+        # slug is refused with a conflict, not silently merged into the
+        # signup tenant.
+        with connection.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "SELECT * FROM attune.provision_initial_identity(%s,%s,%s,%s)",
+                    (subject_hash, issuer, "operator-conflict-test", "test-region1"),
+                )
+        connection.rollback()
+        with initialized_database.cursor() as cursor:
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                cursor.execute(
+                    "SELECT * FROM attune.provision_initial_identity(%s,%s,%s,%s)",
+                    (subject_hash, issuer, "operator-conflict-test", "test-region1"),
+                )
+        initialized_database.rollback()
+
+        # Function-only: the control plane's runtime role has no direct
+        # table authority, only EXECUTE on the function.
+        with connection.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute("SELECT id FROM attune.tenants")
+        connection.rollback()
+        with connection.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute("SELECT id FROM attune.principals")
         connection.rollback()
     finally:
         connection.close()

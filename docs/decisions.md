@@ -2113,3 +2113,86 @@ document and is not rewritten — a "Status" footnote below the table
 records what shipped where for F1 through F9, dated to this entry, so the
 review itself stays an honest snapshot of 2026-07-18 while the current
 state of each finding remains discoverable.
+
+## 2026-07-19 — Hosted production signup is a sessionless, function-owned ceremony (G19)
+
+Closes `docs/future-state.md` Phase 6's "hosted onboarding: production
+signup" bullet and `docs/gap-analysis.md` G19's "no production signup"
+half. Behind a new default-off gate, `ATTUNE_HOSTED_SIGNUP_ENABLED`,
+implemented and tested, not deployed. Full design record:
+[`hosted-signup.md`](hosted-signup.md).
+
+- **Explicit consent, not login side effect.** `POST /v1/signup` is a
+  second, deliberate action distinct from `POST /v1/session`; logging in
+  never creates a tenant, and a zero-mapping subject still gets the exact
+  same `409 identity_membership_unavailable` response it always has
+  (pinned by test). Membership is still never inferred from email or
+  domain.
+- **Trust chain is reused, not reimplemented.** Signup verifies the fresh
+  Identity Platform token through the exact same
+  `verify_identity_platform_token` function and `token_verifier` hook
+  `open_session` already calls -- same issuer/audience/freshness checks,
+  same certificate URL, same login-challenge anti-CSRF cookie. Only the
+  resulting SHA-256 subject hash crosses into SQL. It is necessarily the
+  one authenticated-but-sessionless route in the control plane: zero
+  mappings fail closed *before* a session can exist, so there is no
+  session to require here, only the verified token itself.
+- **A new function, deliberately not a grant on the existing one.**
+  `attune.provision_initial_identity` (0016) accepts a caller-supplied
+  slug and is reachable only by the private operator job's distinct IAM
+  identity -- granting it to `attune_control_plane` would both hand the
+  control plane a slug oracle and blur that one-purpose operator
+  boundary. Migration 0045 instead adds
+  `attune.provision_hosted_signup_tenant(subject_hash, issuer, region)`,
+  which takes **no slug parameter at all** (it derives one from the
+  tenant id it creates) and shares 0016's fixed advisory-lock constant so
+  the two ceremonies serialize against each other, not just themselves.
+  It preserves every property of the operator function: atomic
+  tenant-plus-first-principal creation, idempotent exact replay, and no
+  code path that can ever join or alter an existing tenant.
+- **Same owner role, no new grants.** The new function is owned by the
+  *existing* memberless `attune_identity_provisioning_executor` role --
+  its current `SELECT, INSERT` on `attune.tenants`/`attune.principals`
+  and `USAGE` on `attune`/`attune_ext` are exactly what it needs.
+  `attune_control_plane` receives `EXECUTE` on the function and nothing
+  else -- no direct table grant, for this feature or any other. Migration
+  0045 needed no new role, no new `FUNCTION_OWNER_ROLES` entry, and no new
+  `FUNCTION_OWNER_TABLE_PRIVILEGES` tuple in `migrate.py` -- only one new
+  row in the existing `privileged_functions` catalog.
+- **No session minted by signup.** `POST /v1/signup` returns `created`
+  (`201`) or `already_provisioned` (`200`) and nothing else -- no session
+  or CSRF cookie. The client performs the ordinary sign-in flow next, so
+  there remains exactly one code path (`open_identity_session`, called
+  from exactly one route) capable of ever setting the session cookie.
+- **Server-generated identifiers only.** The slug is derived from the
+  function's own freshly generated tenant id; the request body accepts
+  only `{id_token, login_challenge}`, identical to login's shape, so no
+  user-supplied text of any kind reaches `attune.tenants.slug`. This phase
+  adds no display-name column at all -- unnecessary scope for a first,
+  dormant phase -- but the principle is recorded for when one is added: a
+  display name is data, never an identifier.
+- **Throttle posture: edge remains authoritative, app layer is a new
+  backstop.** Cloud Armor's already-established 10-per-60-second
+  onboarding-ceremony rule (`hosted-policy.md` priority `885`,
+  `hosted-channels.md` priority `886`) is the required, not-yet-applied
+  operator edge control (next unused priority: `894`). A new in-process
+  `SignupThrottle` (`hosted_signup.py`) additionally bounds attempts
+  per-IP (the load balancer's verified `X-Forwarded-For` leftmost entry)
+  and per-verified-subject-hash with the same 10-per-60-second constant.
+  This is the first ceremony in the codebase to add an application-level
+  limiter -- every other route relies solely on the edge -- justified
+  because signup's failure mode is creating a billable tenant row, not
+  merely reading or flipping existing state.
+- **Content-free audit, split by whether a tenant yet exists.** `created`
+  and `already_provisioned` are written through the existing tenant-scoped
+  `audit_intents`/`audit_events` pipeline (`actor_ref_hash` = subject hash,
+  metadata = `{"created": bool}`, deduped by a `(tenant_id, outcome)`
+  idempotency key). `attempted` and `throttled` happen before any tenant
+  necessarily exists, and `audit_intents.tenant_id` is `NOT NULL` -- they
+  are recorded as fixed, content-free process log lines instead, exactly
+  like `open_session`'s own 409 has never had a durable audit row either.
+- **What activation still requires:** migration 0045 applied plus a
+  passing boundary verifier, the Cloud Armor edge rule authored and
+  confirmed live, a live provisioning-then-sign-in probe, and abuse
+  monitoring folded into whatever the operator already watches for the
+  other onboarding ceremonies. None of that is claimed done by this entry.

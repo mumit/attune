@@ -8,7 +8,11 @@ import pytest
 pytest.importorskip("flask")
 
 from attune.hosted.control_plane_service import create_app
-from attune.hosted.identity import IdentityRefused, VerifiedIdentity
+from attune.hosted.identity import (
+    IdentityRefused,
+    VerifiedIdentity,
+    verify_identity_platform_token,
+)
 from attune.hosted.identity_session import IdentitySession
 from attune.hosted.tenant import TenantContext
 
@@ -306,6 +310,28 @@ class ChannelSetup:
         self.states = tuple(states)
         return self.states
 
+
+class Signup:
+    def __init__(self, status="created", failure=None):
+        self.status = status
+        self.failure = failure
+        self.calls = []
+
+    def provision(self, identity):
+        self.calls.append(identity)
+        if self.failure:
+            raise self.failure
+        return type(
+            "SignupResult",
+            (),
+            {
+                "status": self.status,
+                "tenant_id": TENANT_ID,
+                "principal_id": PRINCIPAL_ID,
+            },
+        )()
+
+
 def verified(_token, project_id):
     assert project_id == PROJECT
     return VerifiedIdentity(
@@ -485,6 +511,220 @@ def test_identity_session_refuses_invalid_token_and_ambiguous_membership():
         )
         assert response.status_code == status
         assert "provider detail" not in response.get_data(as_text=True)
+
+
+IDENTITY_CLAIMS_NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def _identity_claims(**changes):
+    value = {
+        "iss": f"https://securetoken.google.com/{PROJECT}",
+        "aud": PROJECT,
+        "sub": "identity-platform-uid",
+        "auth_time": int((IDENTITY_CLAIMS_NOW - timedelta(seconds=30)).timestamp()),
+        "email_verified": True,
+        "firebase": {"sign_in_provider": "google.com"},
+    }
+    value.update(changes)
+    return value
+
+
+def test_hosted_signup_routes_do_not_exist_while_the_gate_is_off():
+    dormant = create_app(HOST).test_client()
+    assert dormant.post("/v1/signup", headers={"Host": HOST}).status_code == 404
+
+    client = identity_client()  # identity on, hosted_signup_enabled defaults False
+    assert client.post("/v1/signup", headers={"Host": HOST}).status_code == 404
+
+
+def test_hosted_signup_pins_the_unprovisioned_login_dead_end_unchanged():
+    # The 409 dead-end from ordinary login must stay byte-identical whether
+    # or not hosted signup exists on the same app instance.
+    for kwargs in ({}, {"hosted_signup_enabled": True, "hosted_signup": Signup()}):
+        client = identity_client(Sessions(opened=False), **kwargs)
+        challenge = client.get(
+            "/v1/session/bootstrap", base_url=f"https://{HOST}"
+        ).get_json()["login_challenge"]
+        response = client.post(
+            "/v1/session",
+            json={"id_token": "signed", "login_challenge": challenge},
+            headers=same_origin(),
+            base_url=f"https://{HOST}",
+        )
+        assert response.status_code == 409
+        assert response.get_json() == {"error": "identity_membership_unavailable"}
+
+
+def test_hosted_signup_requires_same_origin_and_login_binding():
+    signup = Signup()
+    client = identity_client(hosted_signup_enabled=True, hosted_signup=signup)
+    bootstrap = client.get(
+        "/v1/session/bootstrap", base_url=f"https://{HOST}"
+    ).get_json()
+    challenge = bootstrap["login_challenge"]
+
+    cross_origin = client.post(
+        "/v1/signup",
+        json={"id_token": "signed", "login_challenge": challenge},
+        base_url=f"https://{HOST}",
+    )
+    assert cross_origin.status_code == 401
+    assert cross_origin.get_json() == {"error": "invalid_sign_in"}
+
+    wrong_binding = client.post(
+        "/v1/signup",
+        json={"id_token": "signed", "login_challenge": "w" * 43},
+        headers=same_origin(),
+        base_url=f"https://{HOST}",
+    )
+    assert wrong_binding.status_code == 401
+    assert signup.calls == []
+
+
+def test_hosted_signup_rejects_any_payload_field_beyond_the_login_shape():
+    # Structural proof that no free-form field -- a display name, a
+    # requested slug -- can ever reach the provisioning service: the route
+    # accepts only the exact {id_token, login_challenge} shape, identical to
+    # POST /v1/session.
+    signup = Signup()
+    client = identity_client(hosted_signup_enabled=True, hosted_signup=signup)
+    challenge = client.get(
+        "/v1/session/bootstrap", base_url=f"https://{HOST}"
+    ).get_json()["login_challenge"]
+    response = client.post(
+        "/v1/signup",
+        json={
+            "id_token": "signed",
+            "login_challenge": challenge,
+            "display_name": "attacker; DROP TABLE tenants;",
+        },
+        headers=same_origin(),
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 401
+    assert signup.calls == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"iss": "https://attacker.example"},
+        {"aud": "another-project"},
+        {"sub": ""},
+        {"email_verified": False},
+        {"firebase": {"sign_in_provider": "password"}},
+        {"auth_time": int((IDENTITY_CLAIMS_NOW - timedelta(minutes=6)).timestamp())},
+        {"auth_time": int((IDENTITY_CLAIMS_NOW + timedelta(minutes=1)).timestamp())},
+    ],
+)
+def test_hosted_signup_reuses_the_login_verifier_and_rejects_identically(change):
+    # Both routes call the exact same attune.hosted.identity function; a
+    # token that login refuses must be refused by signup for the same
+    # reason, using the same shared token_verifier hook.
+    def low_level_verifier(_token, _project_id):
+        return _identity_claims(**change)
+
+    def shared_token_verifier(token, project_id):
+        return verify_identity_platform_token(
+            token, project_id, now=IDENTITY_CLAIMS_NOW, verifier=low_level_verifier
+        )
+
+    client = identity_client(
+        Sessions(),
+        verifier=shared_token_verifier,
+        hosted_signup_enabled=True,
+        hosted_signup=Signup(),
+    )
+    for path in ("/v1/session", "/v1/signup"):
+        challenge = client.get(
+            "/v1/session/bootstrap", base_url=f"https://{HOST}"
+        ).get_json()["login_challenge"]
+        response = client.post(
+            path,
+            json={"id_token": "signed", "login_challenge": challenge},
+            headers=same_origin(),
+            base_url=f"https://{HOST}",
+        )
+        assert response.status_code == 401
+        assert response.get_json() == {"error": "invalid_sign_in"}
+
+
+def test_hosted_signup_is_explicit_post_only_and_never_fires_on_mere_login():
+    signup = Signup()
+    client, _sessions = signed_in_client(
+        hosted_signup_enabled=True, hosted_signup=signup
+    )
+    assert signup.calls == []
+    assert client.get("/v1/signup", headers={"Host": HOST}).status_code == 405
+    assert signup.calls == []
+
+
+def test_hosted_signup_returns_created_or_already_provisioned():
+    for status, code in (("created", 201), ("already_provisioned", 200)):
+        signup = Signup(status=status)
+        client = identity_client(hosted_signup_enabled=True, hosted_signup=signup)
+        bootstrap = client.get(
+            "/v1/session/bootstrap", base_url=f"https://{HOST}"
+        ).get_json()
+        response = client.post(
+            "/v1/signup",
+            json={"id_token": "signed", "login_challenge": bootstrap["login_challenge"]},
+            headers=same_origin(),
+            base_url=f"https://{HOST}",
+        )
+        assert response.status_code == code
+        assert response.get_json() == {"status": status}
+        assert len(signup.calls) == 1
+        assert signup.calls[0].subject_hash == bytes.fromhex("11" * 32)
+        # The one-use login-challenge cookie is cleared exactly like login's.
+        cookies = "; ".join(response.headers.getlist("Set-Cookie"))
+        assert "__Host-attune_login=" in cookies
+        assert "Max-Age=0" in cookies
+
+
+def test_hosted_signup_maps_unavailable_provisioning_to_a_generic_failure():
+    signup = Signup(failure=RuntimeError("tenant conflict for slug xyz"))
+    client = identity_client(hosted_signup_enabled=True, hosted_signup=signup)
+    bootstrap = client.get(
+        "/v1/session/bootstrap", base_url=f"https://{HOST}"
+    ).get_json()
+    response = client.post(
+        "/v1/signup",
+        json={"id_token": "signed", "login_challenge": bootstrap["login_challenge"]},
+        headers=same_origin(),
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "signup_unavailable"}
+    assert "xyz" not in response.get_data(as_text=True)
+
+
+def test_hosted_signup_throttles_repeated_attempts_from_the_same_subject():
+    from attune.hosted.hosted_signup import SignupThrottle
+
+    signup = Signup()
+    throttle = SignupThrottle(limit=1, window=timedelta(minutes=5))
+    client = identity_client(
+        hosted_signup_enabled=True,
+        hosted_signup=signup,
+        hosted_signup_throttle=throttle,
+    )
+    for expected in (201, 429):
+        bootstrap = client.get(
+            "/v1/session/bootstrap", base_url=f"https://{HOST}"
+        ).get_json()
+        response = client.post(
+            "/v1/signup",
+            json={
+                "id_token": "signed",
+                "login_challenge": bootstrap["login_challenge"],
+            },
+            headers=same_origin(),
+            base_url=f"https://{HOST}",
+        )
+        assert response.status_code == expected
+    assert response.get_json() == {"error": "signup_throttled"}
+    assert len(signup.calls) == 1
 
 
 def test_session_read_and_signout_require_csrf():

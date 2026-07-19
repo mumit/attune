@@ -17,9 +17,23 @@ For a new account, Attune verifies the identity but does not infer membership
 from the email address or domain. During development, the first test sign-in
 therefore reports that membership is not provisioned. An operator binds the
 exact Identity Platform subject to one tenant; the user then signs in again and
-continues to the connector-consent journey. A production signup flow will
-replace this development ceremony with an explicit tenant creation or invitation
-step.
+continues to the connector-consent journey.
+
+A production signup path now exists behind a default-off gate,
+`ATTUNE_HOSTED_SIGNUP_ENABLED` -- implemented and tested, not activated (see
+[`hosted-signup.md`](hosted-signup.md) for the full design). When it is
+enabled, the same dead-end screen offers **Create your Attune account**: a
+second, explicit Google sign-in that verifies the identity again and, only on
+that deliberate click, creates exactly one new tenant with the caller as its
+sole principal (or reports that one already exists). Signup never mints a
+session itself -- after it succeeds, the user completes the same **Continue
+with Google** sign-in every visit uses. Membership is still never inferred
+from email or domain, the tenant identifier is always server-generated (never
+a name the user typed), and inviting a second member into an existing tenant
+remains out of scope. Until an operator completes the edge rate-limit rule
+and live-probe evidence `hosted-signup.md` requires, this path stays disabled
+and today's operator-provisioning ceremony remains how a new tenant is
+created.
 
 Connecting Google Workspace is a separate screen and OAuth client with explicit
 Workspace scopes. A user can sign in to Attune without connecting Workspace,

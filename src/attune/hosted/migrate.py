@@ -871,6 +871,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune_identity_provisioning_executor",
             ),
             (
+                "attune.provision_hosted_signup_tenant(bytea,text,text)",
+                "attune_control_plane",
+                "attune_identity_provisioning_executor",
+            ),
+            (
                 "attune.activate_hosted_read_only_policy(uuid,uuid)",
                 "attune_control_plane",
                 "attune_policy_executor",

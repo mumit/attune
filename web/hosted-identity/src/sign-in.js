@@ -10,6 +10,7 @@ import {
 } from "firebase/auth";
 
 const button = document.querySelector("#google-sign-in");
+const signupButton = document.querySelector("#hosted-signup-create");
 const workspace = document.querySelector("#workspace-connection");
 const workspaceButton = document.querySelector("#google-workspace-connect");
 const disconnectButton = document.querySelector("#google-workspace-disconnect");
@@ -108,6 +109,31 @@ async function exchange(auth, bootstrap) {
     const idToken = await getIdToken(credential.user, true);
     return await json(
       await fetch("/v1/session", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id_token: idToken,
+          login_challenge: bootstrap.login_challenge,
+        }),
+      }),
+    );
+  } finally {
+    await signOut(auth).catch(() => {});
+  }
+}
+
+async function attemptSignup(auth, bootstrap) {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  const credential = await signInWithPopup(auth, provider);
+  try {
+    const idToken = await getIdToken(credential.user, true);
+    return await json(
+      await fetch("/v1/signup", {
         method: "POST",
         credentials: "same-origin",
         headers: {
@@ -1087,9 +1113,15 @@ async function main() {
     } catch (error) {
       if (error.status === 409) {
         show(
-          "Google identity verified. Your Attune development membership is not provisioned yet.",
+          "Google identity verified. Your Attune membership is not provisioned yet.",
           "pending",
         );
+        // Offered optimistically: this page has no pre-session signal for
+        // whether hosted signup is enabled, so the signup route's own
+        // 404/429/other response is the availability signal (see
+        // docs/hosted-signup.md section 9).
+        signupButton.hidden = false;
+        signupButton.disabled = false;
       } else {
         show(safeFailure(error), "error");
       }
@@ -1099,6 +1131,41 @@ async function main() {
       } catch {
         show("Sign-in is temporarily unavailable.", "error");
       }
+    }
+  });
+
+  signupButton.addEventListener("click", async () => {
+    signupButton.disabled = true;
+    show("Waiting for Google sign-in to create your Attune account…");
+    try {
+      const result = await attemptSignup(auth, bootstrap);
+      signupButton.hidden = true;
+      show(
+        result.status === "created"
+          ? "Your Attune account was created. Continue with Google to finish signing in."
+          : "You already have an Attune account. Continue with Google to sign in.",
+        "success",
+      );
+    } catch (error) {
+      if (error.status === 404) {
+        signupButton.hidden = true;
+        show(
+          "Creating an account is not available yet. Contact your operator.",
+          "pending",
+        );
+      } else if (error.status === 429) {
+        show("Too many attempts. Please wait a minute and try again.", "pending");
+        signupButton.disabled = false;
+      } else {
+        show(safeFailure(error), "error");
+        signupButton.disabled = false;
+      }
+    }
+    try {
+      bootstrap = await prepareLoginBinding();
+      button.disabled = false;
+    } catch {
+      show("Sign-in is temporarily unavailable.", "error");
     }
   });
 }
