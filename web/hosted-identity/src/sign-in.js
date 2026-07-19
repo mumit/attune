@@ -39,6 +39,10 @@ const policyConfirm = document.querySelector("#policy-confirm");
 const customerExports = document.querySelector("#customer-exports");
 const customerExportCreate = document.querySelector("#customer-export-create");
 const customerExportList = document.querySelector("#customer-export-list");
+const accountDeletion = document.querySelector("#account-deletion");
+const accountDeletionState = document.querySelector("#account-deletion-state");
+const accountDeletionRequest = document.querySelector("#account-deletion-request");
+const accountDeletionCancel = document.querySelector("#account-deletion-cancel");
 const conversationPanel = document.querySelector("#conversation-panel");
 const conversationMessages = document.querySelector("#conversation-messages");
 const conversationIndicator = document.querySelector("#conversation-indicator");
@@ -379,6 +383,116 @@ function renderCustomerExports(payload) {
     ["requested", "running", "ready"].includes(item.state),
   );
 }
+
+function deletionStateLabel(item) {
+  if (!item || item.status === "none") return null;
+  const labels = {
+    pending: `Deletion requested. It proceeds automatically on ${
+      item.grace_expires_at ? new Date(item.grace_expires_at).toLocaleString() : "the grace date"
+    } unless cancelled.`,
+    claimed: "Deletion is in progress and can no longer be cancelled.",
+    completed: "Your account has been deleted.",
+    failed: "Deletion could not complete automatically. Contact your operator.",
+  };
+  return labels[item.status] || null;
+}
+
+async function renderAccountDeletion() {
+  // This section has no pre-session availability signal (mirrors the hosted
+  // signup button, docs/hosted-signup.md section 9): it is shown
+  // optimistically after sign-in, and a 404 from its own route is the
+  // honest signal that the gate is off.
+  let item;
+  try {
+    item = await json(
+      await fetch("/v1/account/deletion-request", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      }),
+    );
+  } catch (error) {
+    if (error.status === 404) {
+      accountDeletion.hidden = true;
+      return null;
+    }
+    return null;
+  }
+  accountDeletion.hidden = false;
+  const label = deletionStateLabel(item);
+  accountDeletionState.textContent = label || "";
+  const active = item.status === "pending" || item.status === "claimed";
+  accountDeletionRequest.hidden = active;
+  accountDeletionCancel.hidden = item.status !== "pending";
+  return item;
+}
+
+accountDeletionRequest.addEventListener("click", async () => {
+  if (
+    !window.confirm(
+      "Delete your Attune account? This begins a grace period before your content and account are permanently erased.",
+    )
+  ) return;
+  accountDeletionRequest.disabled = true;
+  show("Requesting account deletion…");
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    await json(
+      await fetch("/v1/account/deletion-requests", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({ confirmation: "delete my account" }),
+      }),
+    );
+    await renderAccountDeletion();
+    show("Account deletion requested.", "success");
+  } catch (error) {
+    accountDeletionRequest.disabled = false;
+    show(
+      error.code === "recent_authentication_required"
+        ? "Sign out and sign in again before deleting your account."
+        : "Account deletion could not be requested. Please try again.",
+      error.code === "recent_authentication_required" ? "pending" : "error",
+    );
+  }
+});
+
+accountDeletionCancel.addEventListener("click", async () => {
+  accountDeletionCancel.disabled = true;
+  show("Cancelling account deletion…");
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    await json(
+      await fetch("/v1/account/deletion-requests", {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({ confirmation: "cancel deletion" }),
+      }),
+    );
+    await renderAccountDeletion();
+    show("Account deletion cancelled.", "success");
+  } catch (error) {
+    show(
+      error.code === "recent_authentication_required"
+        ? "Sign out and sign in again before cancelling deletion."
+        : "Account deletion could not be cancelled. Please try again.",
+      error.code === "recent_authentication_required" ? "pending" : "error",
+    );
+  } finally {
+    accountDeletionCancel.disabled = false;
+  }
+});
 
 async function showCustomerExports() {
   const payload = await json(
@@ -1087,6 +1201,7 @@ async function main() {
     sessionSignOut.hidden = false;
     await showWorkspace(session);
     await showOnboarding(session);
+    await renderAccountDeletion();
     const slackMessage = slackInstallReturnMessage(slackOutcome);
     if (slackMessage) slackInstallationState.textContent = slackMessage;
     return;
@@ -1109,6 +1224,7 @@ async function main() {
       if (session) {
         await showWorkspace(session);
         await showOnboarding(session);
+        await renderAccountDeletion();
       }
     } catch (error) {
       if (error.status === 409) {
