@@ -212,6 +212,98 @@ def check_mail_send(settings) -> tuple[str, str]:
     )
 
 
+def _fail_workspace(exc: Exception, *, mcp: bool) -> tuple[str, str]:
+    """Render a workspace-check FAIL with the inline fix hint from
+    ``docs/getting-started.md``'s common-failures table (UX item #4, G20),
+    plus the 7-day Testing-token hint when the failure is an
+    ``invalid_grant`` (Deliverable B item 2)."""
+    base = f"{type(exc).__name__}: {exc}"
+    if mcp:
+        hint = (
+            "check TLS/network/token settings and ensure tools/list includes "
+            "every tool in docs/mcp-contract.md"
+        )
+    else:
+        hint = (
+            "point ATTUNE_GOOGLE_CREDENTIALS_FILE at the authorized-user JSON "
+            "produced by `attune init`, not the downloaded client JSON"
+        )
+    message = f"{base} — {hint}"
+    if "invalid_grant" in str(exc):
+        message += (
+            "; if your OAuth consent screen is in Testing mode, refresh "
+            "tokens expire after 7 days — re-run `attune init` to "
+            "re-authorize, and consider `attune init --google-setup` step 5"
+        )
+    return FAIL, message
+
+
+def _fail_read(exc: Exception, *, source: str) -> tuple[str, str]:
+    """Render a gmail-read/calendar-read FAIL with the common-failures table
+    hint, plus the 7-day Testing-token hint on ``invalid_grant``."""
+    base = f"{type(exc).__name__}: {exc}"
+    message = (
+        f"{base} — enable the {source} API, add the test user, include the "
+        "required scopes, then rerun `attune init` to authorize again"
+    )
+    if "invalid_grant" in str(exc):
+        message += (
+            "; if your OAuth consent screen is in Testing mode, refresh "
+            "tokens expire after 7 days — re-run `attune init` to "
+            "re-authorize, and consider `attune init --google-setup` step 5"
+        )
+    return FAIL, message
+
+
+def check_google_oauth_app(settings) -> tuple[str, str]:
+    """WARN about the 7-day Testing-mode refresh-token trap (UX item #2,
+    G20). ``attune init --google-setup`` records whether the OAuth consent
+    screen is Internal or External+Testing in secret-free setup state
+    (never in .env, see ``google_setup_state.py``). External+Testing
+    refresh tokens for these scopes typically expire about a week after
+    issuance — fine for a smoke test, not an always-on service. See
+    docs/getting-started.md section 4A."""
+    import os
+
+    from ..config import WorkspaceBackend
+
+    if settings.workspace_backend == WorkspaceBackend.MCP:
+        return SKIP, "workspace backend is mcp; no Google consent screen to check"
+
+    from .google_setup_state import GoogleSetupState, google_setup_state_path
+    from .setup_state import SetupStateError
+
+    data_dir = settings.data_dir or "."
+    path = google_setup_state_path(data_dir)
+    if not os.path.exists(path):
+        return SKIP, (
+            "no recorded consent-screen state (legacy setup; run "
+            "`attune init --google-setup` to record one)"
+        )
+    try:
+        state = GoogleSetupState.load_or_create(path)
+    except SetupStateError as exc:
+        return SKIP, f"could not read consent-screen state: {exc}"
+
+    if state.consent_mode != "external_testing":
+        mode = state.consent_mode or "not recorded"
+        return SKIP, f"consent screen recorded as {mode}"
+
+    age_note = ""
+    cred_file = settings.google_credentials_file
+    if cred_file and os.path.exists(cred_file):
+        import time
+
+        age_days = (time.time() - os.path.getmtime(cred_file)) / 86400
+        age_note = f"; authorized-user file is ~{age_days:.1f} day(s) old (mtime, approximate)"
+    return WARN, (
+        "OAuth consent screen is External+Testing: refresh tokens for these "
+        "scopes typically expire ~7 days after issuance" + age_note + ". Fix: "
+        "switch the consent screen to Internal (Workspace accounts) or "
+        "publish the app; see docs/getting-started.md section 4A"
+    )
+
+
 def check_audit_chain(settings) -> tuple[str, str]:
     """Verify the local JSONL audit log's hash chain (security finding F1).
 
@@ -365,14 +457,25 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         if settings.workspace_backend == WorkspaceBackend.MCP:
             from ..connectors.mcp import MCP_REQUIRED_TOOLS
             from ..connectors.mcp_client import make_mcp_caller
-            caller = make_mcp_caller(settings)
-            for server, expected in MCP_REQUIRED_TOOLS.items():
-                missing = expected - caller.list_tools(server)
-                if missing:
-                    return FAIL, f"{server} MCP server missing tools: {', '.join(sorted(missing))}"
+            try:
+                caller = make_mcp_caller(settings)
+                for server, expected in MCP_REQUIRED_TOOLS.items():
+                    missing = expected - caller.list_tools(server)
+                    if missing:
+                        return FAIL, (
+                            f"{server} MCP server missing tools: "
+                            f"{', '.join(sorted(missing))} — check TLS/network/"
+                            "token settings and ensure tools/list includes "
+                            "every tool in docs/mcp-contract.md"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                return _fail_workspace(exc, mcp=True)
             return PASS, "MCP Gmail + Calendar capabilities available"
         from ..credentials import load_google_credentials
-        load_google_credentials(settings)
+        try:
+            load_google_credentials(settings)
+        except Exception as exc:  # noqa: BLE001
+            return _fail_workspace(exc, mcp=False)
         return PASS, settings.google_credentials_file or "Application Default Credentials"
 
     def check_gmail_read() -> tuple[str, str]:
@@ -383,10 +486,13 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
 
         from ..credentials import load_google_credentials
 
-        service = build(
-            "gmail", "v1", credentials=load_google_credentials(settings)
-        )
-        profile = service.users().getProfile(userId="me").execute()
+        try:
+            service = build(
+                "gmail", "v1", credentials=load_google_credentials(settings)
+            )
+            profile = service.users().getProfile(userId="me").execute()
+        except Exception as exc:  # noqa: BLE001
+            return _fail_read(exc, source="Gmail")
         return PASS, profile.get("emailAddress", "ok")
 
     def check_calendar_read() -> tuple[str, str]:
@@ -397,16 +503,20 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
 
         from ..credentials import load_google_credentials
 
-        service = build(
-            "calendar", "v3", credentials=load_google_credentials(settings)
-        )
-        # calendar.events authorizes the runtime's events.list/insert calls but
-        # not calendars.get metadata. Test the capability we actually use.
-        service.events().list(
-            calendarId=settings.calendar_id,
-            maxResults=1,
-            singleEvents=True,
-        ).execute()
+        try:
+            service = build(
+                "calendar", "v3", credentials=load_google_credentials(settings)
+            )
+            # calendar.events authorizes the runtime's events.list/insert
+            # calls but not calendars.get metadata. Test the capability we
+            # actually use.
+            service.events().list(
+                calendarId=settings.calendar_id,
+                maxResults=1,
+                singleEvents=True,
+            ).execute()
+        except Exception as exc:  # noqa: BLE001
+            return _fail_read(exc, source="Calendar")
         return PASS, settings.calendar_id
 
     def check_qdrant() -> tuple[str, str]:
@@ -431,7 +541,13 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
             return SKIP, "SLACK_BOT_TOKEN not set"
         from slack_sdk import WebClient
 
-        resp = WebClient(token=settings.slack_bot_token).auth_test()
+        try:
+            resp = WebClient(token=settings.slack_bot_token).auth_test()
+        except Exception as exc:  # noqa: BLE001
+            return FAIL, (
+                f"{type(exc).__name__}: {exc} — add the required Slack "
+                "scopes above and reinstall the app"
+            )
         return PASS, resp.get("team", "authenticated")
 
     def check_pubsub() -> tuple[str, str]:
@@ -461,6 +577,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("data-dir", check_data_dir),
         Check("llm", check_llm),
         Check("workspace", check_workspace),
+        Check("google-oauth-app", lambda: check_google_oauth_app(settings)),
         Check("channels", lambda: check_channel_routes(settings)),
         Check("source-channels", lambda: check_source_channels(settings)),
         Check("mail-labels", lambda: check_mail_labels(settings)),
