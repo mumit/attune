@@ -1213,6 +1213,42 @@ def test_customer_export_mutations_require_recent_auth_and_exact_body():
     assert exports.calls == []
 
 
+def test_customer_export_gate_off_pins_404():
+    # customer_exports_enabled defaults to False; the routes must be absent
+    # from the routing table entirely (plain 404), the same "unregistered,
+    # not merely unauthenticated" pin every other default-off ceremony in
+    # this codebase uses (hosted signup, tenant deletion).
+    client = identity_client()
+    assert (
+        client.get("/v1/exports", base_url=f"https://{HOST}").status_code == 404
+    )
+    assert (
+        client.post(
+            "/v1/exports",
+            json={"scope": "account", "confirmation": "create export"},
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/v1/exports/{JOB_ID}/download-authorizations",
+            json={"confirmation": "download export"},
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 404
+    )
+
+
+def test_customer_exports_require_identity_when_enabled():
+    with pytest.raises(ValueError, match="export"):
+        identity_client(customer_exports_enabled=True)
+    with pytest.raises(ValueError):
+        create_app(
+            HOST, customer_exports_enabled=True, customer_exports=CustomerExports()
+        )
+
+
 def test_tenant_deletion_gate_off_pins_404():
     client = identity_client()
     assert (
