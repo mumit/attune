@@ -194,6 +194,15 @@ class DirectOAuthConnector(WorkspaceConnector):
             userId=_USER, body={"id": draft_id}
         ).execute()
 
+    def supports_sending(self) -> bool:
+        """Mirrors ``send_enabled`` directly (Phase 4 stage 2, G15) — unlike
+        ``supports_labeling``/``supports_calendar_writes``, which report
+        unconditional backend capability, this IS the enabled posture: the
+        connector was constructed with ``send_enabled=True`` (which, by the
+        class's own discipline, is only ever set alongside a real
+        gmail.send scope and an explicit autonomy grant)."""
+        return self._send_enabled
+
     def add_label(self, *, thread_id: str, label: str) -> None:
         label_id = self._resolve_label_id(label)
         self._gmail().users().threads().modify(

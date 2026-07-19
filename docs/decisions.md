@@ -2,6 +2,360 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-19 — Send becomes real, graduation cards, and demotion symmetry (Phase 4 stage 2, G13/G15)
+
+This closes out `docs/future-state.md` Phase 4 (items 2, 4, 5 and the exit
+criteria) on top of stage 1's scoped grants. Three deliverables, plus a
+pre-existing gap fixed along the way.
+
+### A — SEND_REPLY becomes real (G15)
+
+- **Every existing gate, none removed, one new one added.** `ATTUNE_MAIL_SEND_ENABLED`
+  (default off) reaches `DirectOAuthConnector` as `send_enabled` exactly the
+  way `ATTUNE_MAIL_LABELS_ENABLED`/`ATTUNE_CALENDAR_WRITES_ENABLED` already
+  reach their flags — `runtime.build_runtime` was, before this stage,
+  literally the one connector-construction flag NOT wired (its own comment
+  said "mirrors how send_enabled would be wired"). `supports_sending()`
+  (base class: `False`; `DirectOAuthConnector`: `self._send_enabled`) is
+  the new capability probe, deliberately shaped DIFFERENTLY from
+  `supports_labeling()`/`supports_calendar_writes()`: those report
+  BACKEND-structural capability independent of the deployment's opt-in
+  flag (a connector that structurally CAN label still needs a separate
+  flag before doing so); `supports_sending()` instead mirrors the enabled
+  flag directly, because sending is dangerous enough that "can this
+  backend send in principle" was never the useful question for a caller
+  deciding whether to even build a SEND_REPLY proposal.
+- **Action selection lives in the dispatcher, not a new graph.**
+  `dispatcher._send_reply_gates_pass` mirrors `_label_gates_pass` exactly:
+  `matrix.max_rung(SEND_REPLY, MAIL, priority=, tier=) >= PROPOSE` (context
+  built the identical fail-closed way the gate node builds it),
+  `connector.supports_sending()`, and the enabled flag — all three
+  independent, all three required. When they hold, `submit_gmail_thread`
+  sets `state["action"] = "send_reply"` instead of `"draft_reply"` and
+  invokes the SAME shared `app_ctx.graph` (no new compiled graph).
+  `make_connector_apply_fn`'s `apply()` gained one branch: after
+  `create_draft` (unchanged — the draft is still created first, still
+  auditable), if `state["action"] == "send_reply"` it calls
+  `connector.send_reply(draft_id=...)`. The freshness check that already
+  ran before `create_draft` covers this too — there is no separate window
+  between drafting and sending for a stale thread to slip through. This
+  also means SEND_REPLY resumes through the exact same, already-correct
+  resume path as DRAFT_REPLY (see the `_bound_resume` fix below) — no new
+  graph, no new namespace, no new place to get resume-routing wrong.
+- **Default matrix still has no SEND_REPLY entry** (the READ_ONLY floor) —
+  unaffected by this stage. Autonomous sending is earned per (action,
+  domain[, scope]) exactly like everything else, never a default.
+- **Presentation carries the "will send" fact; the draft text never
+  does.** At PROPOSE, the card's title gains `"📤 Approve to SEND this
+  reply"` (composed with the existing URGENT marker when both apply, same
+  " — "-joined shape) — the SAME rule as the Phase 1 urgent marker: this is
+  a title string built at the dispatcher, never anything injected into
+  `proposed_draft`. At ACT_NOTIFY, the auto-applied notification is a
+  plain, specific line — `"Sent reply to <sender>: <subject>"` — rather
+  than the generic "🤖 Acted autonomously (...)" template every other
+  auto-applied action shares (`_handle_auto_applied` gained an optional
+  `notify_text` override for this one case; every other caller is
+  unaffected). URGENT always still interrupts, because the urgent-interrupt
+  rule (stage 1) is evaluated inside `matrix.max_rung` before
+  `_send_reply_gates_pass` ever sees the result — a send grant that isn't
+  itself scoped to include `"urgent"` never reaches PROPOSE-or-above for an
+  urgent item, same as any other action.
+- **`attune autonomy grant send_reply` now REFUSES, not warns.** While
+  `ATTUNE_MAIL_SEND_ENABLED` is off, the CLI prints an actionable refusal
+  naming the flag and the `gmail.send` scope, exits non-zero (3), and does
+  **not** persist the grant — rule 4's "no shortcuts" now extends to not
+  even recording an inert one. Once the flag is on, granting proceeds
+  exactly as any other action does.
+- **Sent-reply captures are engagement, not hygiene, and needed no code
+  change to prove it.** `HYGIENE_ACTIONS` (`LABEL`, `DECLINE_INVITE`,
+  `RESCHEDULE`) never included `SEND_REPLY`, so the capture node's existing
+  branch (dual-write the importance profile) already applies once
+  `action="send_reply"` flows through the graph — pinned with a dedicated
+  test rather than left to an implicit "it just works."
+
+### B — graduation acceptance in the approval channel (G13)
+
+This AMENDS the "CLI is the only grant surface" posture recorded in stage
+1's entry and in `orchestrator/grants.py`'s original module docstring — not
+by removing it, but by adding one narrow, structurally-ceilinged exception.
+The compensating controls, all of which were already true of every OTHER
+approval card in this codebase:
+
+- **Allowlisted-actor card auth** (unchanged, pre-existing): the same
+  Slack/Chat allowlist and click-authentication that gates every approval
+  card gates these too — nothing new was added for this feature, nothing
+  was loosened.
+- **The suggestion is computed only from the hash-chained audit track
+  record** (`suggest_graduations`, unchanged from stage 1) — the same
+  input the CLI's `attune autonomy show` already displays as text; this
+  stage just adds a one-tap accept for it.
+- **Human approval per card, always** — a suggestion never applies itself;
+  `runtime.post_autonomy_digest` builds the card, a human resolves it.
+- **SEND_REPLY excluded, unconditionally.** `GRADUATION_CARD_EXCLUDED_ACTIONS
+  = frozenset({Action.SEND_REPLY})` — history/memory (a track record,
+  however clean) cannot unlock autonomous external sends. This is the
+  concrete, single-principal-runtime instance of the "Security
+  architecture is normative" entry's rule: SEC-411's hosted-beta language
+  targets a different (not-yet-built) product, but the underlying
+  principle — a card built from history must never buy more autonomy than
+  a human explicitly, separately, re-confirms — is exactly what this
+  constant enforces here.
+- **A rung ceiling.** `GRADUATION_CARD_MAX_RUNG = Rung.ACT_NOTIFY` — a card
+  never offers AUTONOMOUS (rare, and per `autonomy.py`'s own docstring,
+  "explicitly graduated" is meant to read as a deliberate human act, not a
+  one-tap accumulation of accepted suggestions).
+- **Both ceiling constants are enforced TWICE** — once in
+  `runtime.post_autonomy_digest` (skip building the card at all) and again
+  in `orchestrator.grants.resolve_autonomy_card` (re-checked against the
+  PERSISTED card snapshot before ever calling `grant(...)`). The second
+  check is the one that matters against a forged or stale thread_id, or a
+  card built by some future/buggy version of the digest code — defense in
+  depth, not a redundant no-op.
+- **A 30-day rejection cooldown**, `GRADUATION_REJECTION_COOLDOWN_DAYS`, in
+  a new small JSON state file (`orchestrator.grants.JsonGraduationState`,
+  `fslock`-guarded like every other multi-writer state file here) —
+  `ATTUNE_GRADUATION_STATE_PATH`, default `graduation_state.json`. The same
+  file also stores a per-thread-id CARD SNAPSHOT (action/domain/to_rung/
+  scope) written when a card is posted: a `GrantScope` (a pair of
+  frozensets) cannot round-trip through a bare thread-id string, and
+  demotion (unlike graduation) can target a SCOPED grant — the snapshot is
+  what lets `resolve_autonomy_card` re-grant the exact right thing, scope
+  included, without re-deriving it from the thread_id.
+- **Always revocable via the CLI**, unchanged: `attune autonomy revoke`
+  claws back a card-granted entry exactly like a CLI-granted one — the
+  matrix doesn't know or care which surface created a grant.
+- **Never self-initiated beyond the suggestion.** Nothing here can create a
+  card unprompted by a real, audited track record, and nothing resolves a
+  card except an authenticated human's click.
+- **Thread-id namespace and resolution mechanism.**
+  `graduation:<action>:<domain>:<to_rung>` /
+  `demotion:<action>:<domain>:<to_rung>` — there is no LangGraph workflow
+  behind either, so `runtime._bound_resume` routes by this prefix straight
+  to `orchestrator.grants.resolve_autonomy_card` instead of a graph resume.
+  Approve/edit calls `grant(...)` through the persisted store — audited,
+  exactly what the CLI would do, reusing the same function. Reject records
+  the cooldown. Ignore is unaffected — the existing pending-sweep/
+  `sweep_ignored` machinery, entirely unmodified, applies to these cards
+  the same as any other, since they're registered in the SAME
+  `PendingApprovals` registry under domain `"autonomy"`.
+- **A known, accepted limitation.** Two grants on the same (action,
+  domain, to_rung) both qualifying for a demotion in the same digest run
+  collide on the SAME thread_id (which doesn't encode scope); only the
+  first posts, the second is silently absorbed by the pending-dedupe check.
+  Rare (it requires two grants above PROPOSE on one pair simultaneously)
+  and non-harmful (no incorrect grant results — the second suggestion
+  simply doesn't get its own card this run; it will again next week if
+  still true), but worth naming rather than leaving as a silent surprise.
+
+### C — demotion symmetry (Phase 4 item 5)
+
+- **`suggest_demotions` examines every grant entry (scoped or not) above
+  PROPOSE** — deliberately different from `suggest_graduations`, which
+  only ever operates on the unscoped grant. A demotion has to be able to
+  walk back a SCOPED grant too, since that's how ACT_NOTIFY/AUTONOMOUS
+  autonomy is actually earned in practice now (a CLI grant or an accepted
+  graduation card, either one commonly scoped to a priority/tier).
+- **The trigger window is a COUNT of decisions (last 10), not a calendar
+  window** (`DEMOTION_WINDOW_DECISIONS`) — a demotion signal should react
+  to the most recent handful of decisions regardless of how long they took
+  to accumulate, unlike `track_records`' 30-day graduation window. There is
+  no per-scope audit trail, so the window is shared across every grant
+  entry on the same (action, domain) pair.
+- **Trigger: 2+ rejections in that window, OR any single rejection
+  recorded against an auto-applied effect** (`routed_to == "auto_apply"`
+  on the joining `autonomy_gate` event) — the latter deliberately requires
+  only ONE occurrence, since it's materially stronger evidence than an
+  ordinary approval-card rejection. This clause is implemented literally
+  and defensively even though the LIVE graph cannot produce this
+  combination today (an auto-applied run never reaches `human_decision` at
+  all, so there is currently no path to a "rejected" outcome for a
+  `routed_to="auto_apply"` thread) — pinned with a synthetic-audit-log
+  test constructing exactly that combination, so the day some future
+  affordance (e.g. "flag this auto-acted effect as wrong") produces it for
+  real, the demotion trigger is already waiting rather than needing to be
+  retrofitted.
+- **Demotion always targets PROPOSE, regardless of starting rung** — never
+  a gradual one-rung step (AUTONOMOUS would otherwise merely drop to
+  ACT_NOTIFY). An auto-acting grant that produced rejections should return
+  all the way to human-approval-per-item, not partway.
+- **Never auto-applied**, same as graduation — a demotion suggestion is
+  surfaced exactly like a graduation (digest text + approval card,
+  `autonomy_demotion` card kind) and only takes effect on an explicit
+  approve. No rung ceiling is needed on the resolution side (demotion only
+  ever lowers), but `resolve_autonomy_card`'s ceiling check still runs
+  unconditionally for BOTH kinds — cheap, and it means a mislabeled or
+  forged "demotion" card claiming an above-ceiling `to_rung` still refuses.
+
+### Pre-existing gap fixed during this stage: resume routed to the wrong compiled graph
+
+Found while designing SEND_REPLY's resume path, but predates Phase 4
+entirely and was already live for Phase 3's archive/decline/reschedule
+cards. `build_app` compiles THREE distinct graphs sharing one checkpointer
+(`graph`, `label_graph`, `calendar_action_graph`) specifically because
+their `apply_fn`s differ (`create_draft` vs. `label_thread` vs.
+`decline_invite`/`reschedule_event`) — but a LangGraph resume runs the
+`apply` node belonging to whichever COMPILED GRAPH OBJECT is invoked, not
+whichever one originally posted the card. `runtime.build_runtime`'s
+`_bound_resume` — the one resume function wired into BOTH `SlackChannel`
+and `GoogleChatChannel` in production — always called
+`resume_workflow(resolved_app.graph, ...)`, regardless of which graph a
+card's thread_id actually belonged to. Approving an archive/decline/
+reschedule card in production would therefore have run the SHARED draft
+graph's `apply_fn` — creating a Gmail draft instead of archiving,
+declining, or rescheduling — approving the WRONG effect, exactly the bug
+class this project's whole approval spine (freshness checks, structural
+refusals, audited applies) exists to prevent. No existing test exercised
+this path end to end (the archive/decline/reschedule tests invoke their
+graphs directly, never through `build_runtime`'s wiring), so nothing caught
+it before now.
+
+Fixed by making graph selection NAMESPACE-KEYED: a new module-level
+`runtime._graph_for_thread_id` maps `"archive:"` → `label_graph`,
+`"decline:"`/`"calendar:reschedule:"` → `calendar_action_graph`, and
+everything else → the shared `graph` (which is where SEND_REPLY/
+DRAFT_REPLY/FOLLOW_UP/CREATE_HOLD/`"gmail:"`-prefixed threads all
+correctly belong, since they share the one graph and apply_fn already).
+The selection logic itself is factored into one shared function,
+`runtime._resolve_resume`, used by BOTH real production resume paths —
+`build_runtime`'s `_bound_resume` (Slack's synchronous button click, and
+the resume_fn `GoogleChatChannel` is constructed with) AND
+`Runtime.process_chat_interaction`'s own `_resume_fn` (the actual
+production async Google Chat card-interaction path, over Pub/Sub) — which
+had the identical bug independently (it also always called
+`resume_workflow(self.app.graph, ...)`). Fixing only one would have left
+Chat's real interaction path silently broken while Slack's looked fixed.
+`graduation:`/`demotion:` threads are intercepted even earlier in the same
+shared function, straight to `resolve_autonomy_card`. Pinned with
+regression tests covering both the graph-selection fix (archive → label_
+thread, decline → decline_invite, reschedule → calendar_action_graph,
+plain "gmail:" → the shared graph — never crossed) and both call sites
+(`_resolve_resume` directly, and `process_chat_interaction` end to end).
+
+**A second, adjacent gap found while writing that regression test — also
+fixed.** The first attempt at the archive-card regression test (a REAL
+compiled `label_graph`, not the fake-graph stand-ins every other Phase 3
+label test used) failed: `make_label_apply_fn`'s apply saw `label_name`
+as `None` and skipped with `"nothing_to_materialize"`, never calling
+`label_thread` at all. Root cause: `orchestrator.state.DraftApproveState`
+(the LangGraph state TypedDict) never declared a `label_name` field — an
+undeclared key is silently dropped by LangGraph across the interrupt/
+resume boundary, since only declared fields get a channel. Every existing
+Phase 3 label test invoked either a hand-built state dict passed straight
+to a bare `apply_fn` call, or a fake graph that just echoes whatever state
+dict it's given — none of them round-tripped `label_name` through a REAL
+compiled graph's checkpoint, so nothing caught it. Net effect: the
+archive/label write path has likely never actually archived anything
+against a real deployment since Phase 3 stage 1 shipped — every approved
+archive card would have silently done nothing (an honest
+`apply_skipped`/`"nothing_to_materialize"` audit event, at least, never a
+false "success" claim, but still a materially broken feature). Fixed by
+adding `label_name: Optional[str]` to `DraftApproveState`, mirroring
+`hold_start`/`reschedule_start`/etc.'s existing precedent for one-feature
+proposal-specific fields. Pinned by the same regression test that found
+it — it no longer needs a special-cased "this doesn't really work" carve-
+out to pass.
+
+## 2026-07-19 — Signal-scoped autonomy grants and the urgent-interrupt rule (Phase 4 stage 1, G14)
+
+- **A (action, domain) pair can hold multiple grants, each an optional
+  predicate over signals the orchestrator already computes.**
+  `orchestrator.autonomy.GrantScope` is a frozen `(priorities: frozenset[str]
+  | None, tiers: frozenset[str] | None)` pair — values from `triage.Priority`
+  ("urgent"/"routine"/"noise") and `importance.ImportanceTier`
+  ("high"/"normal"/"low"). `PermissionMatrix.grants` changed shape from
+  `dict[(Action, Domain), Rung]` to `dict[(Action, Domain),
+  tuple[ScopedGrant, ...]]`; `max_rung`/`allows` gained optional
+  `priority`/`tier` keyword context, defaulting to `None`. This is what makes
+  "auto-file NOISE newsletters" and "auto-draft ROUTINE replies from known
+  senders, always interrupt for URGENT" expressible as grants, rather than
+  bespoke gates.
+- **Missing context never matches a predicate — fail-closed by
+  construction, not by a special case.** `GrantScope.matches` treats an
+  unset predicate (`None`) as "matches anything, including missing
+  context" (this is what makes an ordinary unscoped grant behave exactly as
+  before), but a predicate WITH values only matches when the context value
+  is present and a member of the set. A priority-scoped grant cannot apply
+  to an item whose priority is unknown; a tier-scoped grant cannot apply
+  without a sender or a working importance profile. Every pre-Phase-4 call
+  site calls `max_rung`/`allows` with no context at all, so only unscoped
+  grants can ever match there — the entire existing test suite's behavior
+  is byte-identical under the new data model, pinned explicitly in
+  `test_autonomy.py`.
+- **The URGENT interrupt rule is structural, not a per-grant opt-in
+  default.** In `max_rung`, when the evaluation context's priority is
+  "urgent", any matched grant's rung ABOVE `PROPOSE` is capped down to
+  `PROPOSE` — unless that grant's own scope explicitly lists "urgent" in
+  `priorities`. Capping happens per matching grant, before the max over
+  grants is taken, so one routine-scoped ACT_NOTIFY grant can never leak
+  autonomy into an urgent context just because an unscoped PROPOSE grant
+  also exists for the pair. Practical effect: an unscoped ACT_NOTIFY grant
+  on (DRAFT_REPLY, MAIL) auto-applies a ROUTINE reply but still interrupts
+  for an URGENT one — "always interrupt for URGENT" is the product's
+  default posture for every act-level grant, and auto-acting on urgent
+  items requires a human to deliberately write "urgent" into that specific
+  grant's scope. This is documented as product behavior in `autonomy.py`'s
+  module docstring (the one place the rule is stated) and pinned with
+  dedicated tests, including the explicit-override case.
+- **The gate builds its context from state, never infers it.**
+  `draft_approve.py`'s `gate` node reads `priority` straight from
+  Phase 1's `state["priority"]` (absent -> `None`) and computes `tier` as
+  `importance_profile.assess(state["sender"]).tier.value` ONLY when both an
+  `importance_profile` and a `sender` are present; a missing either, or an
+  assessment failure, leaves `tier` at `None` rather than guessing — the
+  same fail-closed matching then means a tier-scoped grant simply doesn't
+  apply. The `autonomy_gate` audit event gained a content-free
+  `scope_context` field (`{"priority", "tier", "matched_rung"}` — categorical
+  values and an int, never free text) alongside the existing `max_rung`/
+  `routed_to` fields, so a gate decision is explainable after the fact.
+  `dispatcher._handle_auto_applied` needed no change: it already reads
+  `max_rung`/`routed_to` off the audit event the gate returns, and those
+  keep their existing meaning (now context-aware).
+- **Persistence stays additive.** `JsonPermissionMatrixStore` gained an
+  optional `scope` object per grant entry and now serializes one LIST of
+  grants per `"<action>|<domain>"` key (was a bare rung int). A file written
+  by the OLD schema still loads — a bare int is read as the unscoped grant
+  — but `save()` always writes the new (list) shape, so a file only ever
+  migrates forward. `grant()`/`revoke()` (both the `PermissionMatrix`
+  methods and the `grants.py` module functions used by the CLI) gained a
+  `scope` keyword; `revoke()` uses a private `UNSET` sentinel (not `None`)
+  to distinguish "no scope argument" (claw back every grant for the pair —
+  the pre-scoping behavior) from an explicit `scope=None` (claw back only
+  the unscoped entry, leaving scoped grants for that pair untouched).
+- **`track_records`/`suggest_graduations` are unaffected, by construction
+  rather than a special case.** Both call `matrix.max_rung(action, domain)`
+  with no priority/tier context; fail-closed matching means a scoped grant
+  never matches missing context, so it simply never participates in
+  today's graduation math — verified with a test that plants a scoped
+  grant alongside the unscoped one being evaluated and checks the
+  suggestion is unaffected. Scoped suggestion generation (e.g. "this
+  ROUTINE-scoped grant has its own earned track record") is real future
+  work, not attempted here.
+- **CLI is still the only grant/revoke surface (unchanged from the
+  original CLI-only decision).** `attune autonomy grant <action> <domain>
+  <rung> [--priority urgent,routine,noise] [--tier high,normal,low]` and
+  `attune autonomy revoke <action> <domain> [--priority ...] [--tier ...]`
+  parse and validate scope values with the same strict-enum discipline as
+  action/domain/rung (a typo, or an empty set, is a hard error, never a
+  silent default); `revoke` claws back only the matching-scope grant when
+  scope flags are given, every grant for the pair otherwise. `attune
+  autonomy show` renders each grant's scope readably (e.g. `[routine; tier:
+  high,normal]`) and appends a footnote whenever an unscoped grant sits at
+  ACT_NOTIFY or above, naming the urgent-interrupt rule so the posture
+  table doesn't quietly imply more autonomy on urgent items than the system
+  actually grants. `send_reply`'s structural-gate warning is unchanged this
+  stage.
+- **Alternatives considered.** A general predicate DSL (arbitrary boolean
+  expressions over signals) was rejected as over-general for what the
+  product actually needs right now — two enumerable, bounded signals
+  (priority, tier) cover every example in the roadmap, and a DSL is a much
+  larger surface to get fail-closed matching right on. Per-sender allowlists
+  (grant autonomy for specific email addresses) were deferred: the
+  importance-tier profile (Phase 1) is already the learned, inspectable
+  abstraction over "senders I trust," and a parallel per-sender grant
+  mechanism would fork that concept rather than reuse it; tier-scoped
+  grants get the same effect without a second sender-identity surface to
+  keep in sync.
+
 ## 2026-07-18 — Brief evolution ships: since-yesterday, waiting-on ages, inline pointers (Phase 3 stage 3, G11)
 
 - **The "since yesterday" snapshot is small, bounded, and write-once-per-day

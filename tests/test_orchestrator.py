@@ -308,6 +308,107 @@ def test_autonomy_grant_skips_interrupt():
     assert out["final_text"]
 
 
+class _FakeImportanceProfileForGate:
+    """Deterministic tier lookup for gate-scope tests (Phase 4 stage 1,
+    G14) — no file I/O, no signal recording, just a fixed sender->tier map
+    (unknown senders assess to NORMAL, matching JsonImportanceProfile's own
+    "no recorded signals" default)."""
+
+    def __init__(self, tiers: dict):
+        self._tiers = tiers
+
+    def assess(self, sender):
+        from attune.orchestrator.importance import ImportanceTier, TierAssessment
+
+        tier = ImportanceTier(self._tiers.get(sender, "normal"))
+        return TierAssessment(tier, "test fixture", False)
+
+    def record_signal(self, sender, signal, *, ts=None):  # pragma: no cover
+        pass
+
+
+def test_gate_scoped_grant_auto_applies_routine_but_interrupts_urgent():
+    """The gate integration pin (Phase 4 stage 1, G14): a single scoped
+    ACT_NOTIFY grant on (DRAFT_REPLY, MAIL), narrowed to tier=high, lets a
+    ROUTINE item from a known (HIGH-tier) sender auto-apply, but the SAME
+    grant still interrupts for an URGENT item from that same sender — the
+    urgent-interrupt rule, exercised end to end through the gate node."""
+    from attune.orchestrator.autonomy import GrantScope
+
+    store = FakeStore()
+    profile = _FakeImportanceProfileForGate({"known@x.com": "high"})
+    matrix = default_matrix().grant(
+        Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY,
+        scope=GrantScope(tiers=frozenset({"high"})),
+    )
+    graph = build_draft_approve_graph(
+        client=FakeClient(), store=store, matrix=matrix, importance_profile=profile,
+    )
+
+    routine_out = graph.invoke(
+        _base_state(sender="known@x.com", priority="routine"),
+        {"configurable": {"thread_id": "t-gate-scoped-routine"}},
+    )
+    assert "__interrupt__" not in routine_out
+    assert routine_out["decision"] == "approved"
+
+    urgent_out = graph.invoke(
+        _base_state(sender="known@x.com", priority="urgent"),
+        {"configurable": {"thread_id": "t-gate-scoped-urgent"}},
+    )
+    assert "__interrupt__" in urgent_out
+
+
+def test_gate_missing_sender_or_profile_scoped_grant_does_not_apply():
+    """Fail-closed: without a sender (or without an importance_profile at
+    all), the gate can never compute a tier, so a tier-scoped grant never
+    matches — the run falls back to the unscoped floor (PROPOSE, from
+    default_matrix()) and interrupts, exactly as if the scoped grant didn't
+    exist."""
+    from attune.orchestrator.autonomy import GrantScope
+
+    store = FakeStore()
+    profile = _FakeImportanceProfileForGate({"known@x.com": "high"})
+    matrix = default_matrix().grant(
+        Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY,
+        scope=GrantScope(tiers=frozenset({"high"})),
+    )
+
+    # no sender in state at all
+    graph_with_profile = build_draft_approve_graph(
+        client=FakeClient(), store=store, matrix=matrix, importance_profile=profile,
+    )
+    out_no_sender = graph_with_profile.invoke(
+        _base_state(priority="routine"),
+        {"configurable": {"thread_id": "t-gate-no-sender"}},
+    )
+    assert "__interrupt__" in out_no_sender
+
+    # a sender is present, but no importance_profile was wired at all
+    graph_no_profile = build_draft_approve_graph(
+        client=FakeClient(), store=store, matrix=matrix,
+    )
+    out_no_profile = graph_no_profile.invoke(
+        _base_state(sender="known@x.com", priority="routine"),
+        {"configurable": {"thread_id": "t-gate-no-profile"}},
+    )
+    assert "__interrupt__" in out_no_profile
+
+
+def test_gate_audit_event_carries_scope_context():
+    store = FakeStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store)
+    out = graph.invoke(
+        _base_state(sender="x@y.com", priority="routine"),
+        {"configurable": {"thread_id": "t-gate-scope-context"}},
+    )
+    gate_events = [e for e in out["audit_events"] if e["event"] == "autonomy_gate"]
+    assert len(gate_events) == 1
+    assert gate_events[0]["scope_context"] == {
+        "priority": "routine", "tier": None, "matched_rung": int(Rung.PROPOSE),
+    }
+
+
 def test_untrusted_content_marked_in_prompt():
     store = FakeStore()
     client = FakeClient()
@@ -550,6 +651,124 @@ def test_connector_apply_fn_noop_outside_mail_or_without_ref():
     assert apply({"domain": "mail", "final_text": "hi"}) is None
     assert apply({"domain": "mail", "incoming_ref": "x"}) is None
     assert conn.drafts == []
+
+
+# ---------------------------------------------------------------------------
+# SEND_REPLY apply (Phase 4 stage 2, G15) — drafts first, then sends
+# ---------------------------------------------------------------------------
+
+
+class _SendCapableConnector(_FakeConnector):
+    """A _FakeConnector that also records send_reply calls, for the
+    SEND_REPLY apply-fn tests."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent: list[str] = []
+
+    def send_reply(self, *, draft_id):
+        self.sent.append(draft_id)
+
+
+def test_apply_fn_sends_when_action_is_send_reply():
+    conn = _SendCapableConnector()
+    apply = make_connector_apply_fn(conn)
+    ref = apply({
+        "domain": "mail", "action": "send_reply", "incoming_ref": "thr-1",
+        "final_text": "Sounds good — Thursday works.",
+    })
+
+    assert ref == "d-99"
+    assert conn.drafts[0]["body"] == "Sounds good — Thursday works."
+    assert conn.sent == ["d-99"]  # the draft it just created, then sent
+
+
+def test_apply_fn_does_not_send_for_plain_draft_reply():
+    """Contrast case: action="draft_reply" (the default) never calls
+    send_reply — rule 4's "draft, don't send" default is unaffected."""
+    conn = _SendCapableConnector()
+    apply = make_connector_apply_fn(conn)
+    ref = apply({
+        "domain": "mail", "action": "draft_reply", "incoming_ref": "thr-1",
+        "final_text": "ok",
+    })
+
+    assert ref == "d-99"
+    assert conn.sent == []
+
+
+def test_apply_fn_send_reply_propagates_send_not_permitted():
+    """Defense in depth: even if the dispatcher's own gates were somehow
+    bypassed, the connector's OWN structural refusal (SendNotPermitted,
+    rule 4) still applies here — apply() never catches it itself; the
+    graph's apply node turns it into an honest apply_failed event."""
+    from attune.connectors.base import SendNotPermitted
+
+    class _RefusingConnector(_SendCapableConnector):
+        def send_reply(self, *, draft_id):
+            raise SendNotPermitted("disabled")
+
+    conn = _RefusingConnector()
+    apply = make_connector_apply_fn(conn)
+    with pytest.raises(SendNotPermitted):
+        apply({
+            "domain": "mail", "action": "send_reply", "incoming_ref": "thr-1",
+            "final_text": "ok",
+        })
+
+
+def test_apply_confirmation_reports_sent_for_send_reply():
+    result = {
+        "domain": "mail", "action": "send_reply", "applied_ref": "d-99",
+    }
+    assert apply_confirmation("approved", result) == "✅ Approved — reply sent."
+
+
+def test_apply_confirmation_still_reports_draft_created_for_draft_reply():
+    result = {
+        "domain": "mail", "action": "draft_reply", "applied_ref": "d-99",
+    }
+    assert apply_confirmation("approved", result) == "✅ Approved — draft created in Gmail."
+
+
+def test_apply_confirmation_reports_send_failure_honestly():
+    result = {
+        "domain": "mail", "action": "send_reply", "apply_error": "SendNotPermitted",
+    }
+    out = apply_confirmation("approved", result)
+    assert "sending" in out
+    assert "SendNotPermitted" in out
+
+
+def test_apply_confirmation_rejected_send_reply_says_not_sent():
+    assert apply_confirmation("rejected", {"action": "send_reply"}) == (
+        "🗑️ Rejected — reply not sent."
+    )
+
+
+def test_send_reply_capture_dual_writes_importance_profile_like_draft_reply():
+    """Deliverable A.4's pin: an approved SEND_REPLY capture feeds the
+    importance profile exactly like an approved DRAFT_REPLY does —
+    SEND_REPLY is engagement, not hygiene. HYGIENE_ACTIONS never listed it
+    (see test_hygiene_actions_set_contains_all_three_stage_actions), so
+    this needed no code change to be true; this test pins it explicitly."""
+    store = FakeStore()
+    profile = _FakeImportanceProfileForCapture()
+    graph = build_draft_approve_graph(
+        client=FakeClient(), store=store, importance_profile=profile,
+    )
+    cfg = {"configurable": {"thread_id": "t-send-capture"}}
+    graph.invoke(_base_state(action="send_reply", sender="vendor@acme.com"), cfg)
+    graph.invoke(Command(resume={"decision": "approved"}), cfg)
+
+    assert profile.calls == [("vendor@acme.com", ActionSignal.APPROVED)]
+
+
+def test_send_reply_not_in_hygiene_actions():
+    from attune.orchestrator.autonomy import Action
+    from attune.orchestrator.draft_approve import HYGIENE_ACTIONS
+
+    assert Action.SEND_REPLY.value not in HYGIENE_ACTIONS
 
 
 # ---------------------------------------------------------------------------

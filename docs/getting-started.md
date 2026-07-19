@@ -161,14 +161,25 @@ The downloaded file is an OAuth client secret, not the account credential that
 Attune uses at runtime. The consent flow below creates the authorized-user JSON.
 
 `gmail.compose` is a Google restricted scope and technically permits draft
-management and sending. Attune's connector only creates drafts; it does not
-send mail. `calendar.events` is needed because approving a conflict proposal
-can create a tentative hold.
+management and sending. Attune's connector creates drafts with it; sending
+requires the separate `gmail.send` scope below AND an explicit autonomy
+grant — by default, with neither, Attune only ever drafts and the human
+sends from Gmail. `calendar.events` is needed because approving a conflict
+proposal can create a tentative hold.
 
 Add `https://www.googleapis.com/auth/gmail.modify` only if you intend to set
 `ATTUNE_MAIL_LABELS_ENABLED=1` (Phase 3 stage 1's archive-proposal write
 path, disabled by default). Without it, Attune only reads and drafts;
 `attune doctor` reports whether the enabled flag and the connector agree.
+
+Add `https://www.googleapis.com/auth/gmail.send` only if you intend to set
+`ATTUNE_MAIL_SEND_ENABLED=1` (Phase 4 stage 2's SEND_REPLY write path,
+disabled by default) AND plan to `attune autonomy grant send_reply ...`
+yourself — the CLI refuses that grant outright while the flag is off, and
+without the scope `send_reply` still structurally refuses even with a
+grant in place (rule 4: no shortcuts). `attune doctor` reports whether the
+enabled flag and the connector agree, the same way it does for
+`ATTUNE_MAIL_LABELS_ENABLED`.
 
 `ATTUNE_CALENDAR_WRITES_ENABLED=1` (Phase 3 stage 2's decline-invite/
 reschedule write path, also disabled by default) needs no additional scope

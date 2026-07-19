@@ -164,24 +164,33 @@ def _handle_auto_applied(
     user_id: str,
     notify: Callable[[str], None] | None,
     audit_log: AuditLog | None,
+    notify_text: str | None = None,
 ) -> None:
     """Real rung semantics (prompt 19): an auto-applied run posts NO
     approval card and registers NOTHING pending. ACT_NOTIFY notifies after
-    the fact; AUTONOMOUS is silent. Both are audited either way."""
+    the fact; AUTONOMOUS is silent. Both are audited either way.
+
+    ``notify_text`` (Phase 4 stage 2, G15), when given, is used verbatim in
+    place of the generic "🤖 Acted autonomously (...)" template — SEND_REPLY
+    wants a plain, specific line ("Sent reply to X: subject") rather than
+    the generic wording every other auto-applied action shares."""
     from .orchestrator.autonomy import Rung
 
     silent = rung >= int(Rung.AUTONOMOUS)
     if not silent and notify is not None:
-        outcome = (
-            "done" if result.get("applied_ref")
-            else f"decision recorded ({result.get('apply_error') or 'nothing to materialize'})"
-        )
-        notify(
-            f"🤖 Acted autonomously ({action} on {domain}, act-notify "
-            f"grant): {describe} — {outcome}. Review grants with "
-            f"`attune autonomy show`; revoke with "
-            f"`attune autonomy revoke {action} {domain}`."
-        )
+        if notify_text is not None:
+            notify(notify_text)
+        else:
+            outcome = (
+                "done" if result.get("applied_ref")
+                else f"decision recorded ({result.get('apply_error') or 'nothing to materialize'})"
+            )
+            notify(
+                f"🤖 Acted autonomously ({action} on {domain}, act-notify "
+                f"grant): {describe} — {outcome}. Review grants with "
+                f"`attune autonomy show`; revoke with "
+                f"`attune autonomy revoke {action} {domain}`."
+            )
     if audit_log is not None:
         audit_log.record(
             thread_id=lg_tid,
@@ -213,6 +222,7 @@ def handle_gmail_notification(
     notify: Callable[[str], None] | None = None,
     retry_queue: Any = None,
     mail_labels_enabled: bool = False,
+    mail_send_enabled: bool = False,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -322,6 +332,7 @@ def handle_gmail_notification(
                 thread_id_prefix=thread_id_prefix, audit_log=audit_log,
                 triage_fn=triage_fn, pending=pending, notify=notify,
                 connector=connector, mail_labels_enabled=mail_labels_enabled,
+                mail_send_enabled=mail_send_enabled,
                 label_offerable=label_offerable,
             )
         except Exception as exc:  # noqa: BLE001 — cursor already advanced
@@ -382,6 +393,7 @@ def submit_gmail_thread(
     notify: Callable[[str], None] | None = None,
     connector: Any = None,
     mail_labels_enabled: bool = False,
+    mail_send_enabled: bool = False,
     label_offerable: list | None = None,
 ) -> str | None:
     """Process one already-fetched thread, including durable retry replays.
@@ -394,6 +406,13 @@ def submit_gmail_thread(
     single-item retry-drain/poll-mode call sites in ``runtime.py``, which
     have nothing to rank against), a cleared NOISE thread is offered right
     away, mirroring ``submit_calendar_event``'s single-item behavior.
+
+    ``mail_send_enabled`` (Phase 4 stage 2, G15): for a non-NOISE thread,
+    ``_send_reply_gates_pass`` decides whether this run's ``action`` is
+    ``send_reply`` instead of ``draft_reply`` — the SAME shared graph runs
+    either way (``make_connector_apply_fn`` branches on ``state["action"]``
+    at apply time), so a SEND_REPLY workflow resumes exactly like a
+    DRAFT_REPLY one (no separate graph, no separate resume-routing case).
     """
     triage_fn = triage_fn or _default_triage
     lg_tid = f"{thread_id_prefix}:{gmail_tid}:{history_id}"
@@ -431,6 +450,13 @@ def submit_gmail_thread(
                 )
         return None
 
+    action = "draft_reply"
+    if connector is not None and _send_reply_gates_pass(
+        app_ctx, connector, priority=triage.priority.value,
+        sender=thread.from_addr, mail_send_enabled=mail_send_enabled,
+    ):
+        action = "send_reply"
+
     state: dict[str, Any] = {
         "incoming_summary": incoming_summary,
         "incoming_ref": gmail_tid,
@@ -441,7 +467,7 @@ def submit_gmail_thread(
             thread.last_message_at.isoformat()
             if getattr(thread, "last_message_at", None) is not None else None
         ),
-        "user_id": user_id, "action": "draft_reply", "domain": "mail",
+        "user_id": user_id, "action": action, "domain": "mail",
         "iteration_count": 0, "audit_events": [],
     }
     result = app_ctx.graph.invoke(
@@ -460,10 +486,24 @@ def submit_gmail_thread(
         )
     rung = _auto_rung(result)
     if rung is not None:
+        notify_text = None
+        if action == "send_reply" and result.get("applied_ref"):
+            # The exit criterion's own words ("sends routine acknowledgments
+            # with notification"): a plain, specific line, not the generic
+            # "Acted autonomously (...)" template every other auto-applied
+            # action uses — SEND_REPLY is consequential enough to name
+            # exactly what happened. Falls back to the generic template
+            # below when the send didn't actually produce a ref (skipped or
+            # failed) so that outcome is still reported honestly.
+            notify_text = f"Sent reply to {thread.from_addr}: {thread.subject}"
         _handle_auto_applied(
-            result, rung, action="draft_reply", domain="mail",
-            describe=f'drafted a reply to "{thread.subject}"', lg_tid=lg_tid,
-            user_id=user_id, notify=notify, audit_log=audit_log,
+            result, rung, action=action, domain="mail",
+            describe=(
+                f'sent a reply to "{thread.subject}"' if action == "send_reply"
+                else f'drafted a reply to "{thread.subject}"'
+            ),
+            lg_tid=lg_tid, user_id=user_id, notify=notify, audit_log=audit_log,
+            notify_text=notify_text,
         )
         return lg_tid
 
@@ -471,12 +511,22 @@ def submit_gmail_thread(
     # card itself carries a marker + the model's own reason, and — separately
     # from the card — a short heads-up goes to the notification route so an
     # urgent thread doesn't wait on the recipient noticing a new card. Both
-    # are presentation only: the graph above never branched on priority, and
-    # nothing here grants autonomy (rule 3) — priority-based autonomy gating
-    # is explicitly Phase 4, out of scope.
-    title = None
+    # are presentation only: the graph above never branches its DRAFTING
+    # behavior on priority, and nothing here grants autonomy (rule 3) — the
+    # matrix/gate above already decided ``action``, and the urgent-interrupt
+    # rule (autonomy.py, Phase 4 stage 1) is what actually routed an URGENT
+    # item here instead of auto-applying, independent of this title.
+    #
+    # SEND_REPLY at PROPOSE (Phase 4 stage 2, G15) additionally marks the
+    # card with a title that SAYS it will send — presentation only, never in
+    # the body text, same rule as the urgent marker: the proposed draft text
+    # itself never changes based on what the card's title says.
+    title_parts = []
+    if action == "send_reply":
+        title_parts.append("📤 Approve to SEND this reply")
     if triage.priority == Priority.URGENT:
-        title = f"🔴 URGENT — needs same-day response: {triage.reason}"
+        title_parts.append(f"🔴 URGENT — needs same-day response: {triage.reason}")
+    title = " — ".join(title_parts) if title_parts else None
     kwargs: dict[str, Any] = {}
     if title and _accepts_keyword(post_approval, "title"):
         kwargs["title"] = title
@@ -493,6 +543,40 @@ def submit_gmail_thread(
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
         )
     return lg_tid
+
+
+def _send_reply_gates_pass(
+    app_ctx: AppContext, connector: Any, *, priority: str | None,
+    sender: str | None, mail_send_enabled: bool,
+) -> bool:
+    """The three-gate structure for SEND_REPLY (Phase 4 stage 2, G15),
+    mirroring ``_label_gates_pass`` exactly: an explicit matrix grant at
+    PROPOSE or above for THIS priority/tier context, a connector that
+    structurally supports sending, and the deployment's own opt-in flag.
+    All three are independent and all three must hold; any one absent means
+    the mail path falls back to DRAFT_REPLY, never a silent send.
+
+    Tier is computed the SAME fail-closed way the gate node
+    (``draft_approve.gate``) computes it: only when both an
+    ``importance_profile`` and a ``sender`` are available, and an
+    assessment failure is swallowed rather than surfaced — a scoped grant
+    that needs a signal we don't have simply never matches here either.
+    """
+    if not mail_send_enabled:
+        return False
+    if not getattr(connector, "supports_sending", lambda: False)():
+        return False
+    tier: str | None = None
+    if app_ctx.importance_profile is not None and sender:
+        try:
+            tier = app_ctx.importance_profile.assess(sender).tier.value
+        except Exception:  # noqa: BLE001 — fail-closed, mirrors the gate node
+            tier = None
+    matrix = app_ctx.current_matrix()
+    return (
+        matrix.max_rung(Action.SEND_REPLY, Domain.MAIL, priority=priority, tier=tier)
+        >= Rung.PROPOSE
+    )
 
 
 def _label_gates_pass(

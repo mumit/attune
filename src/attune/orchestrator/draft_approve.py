@@ -153,12 +153,37 @@ def build_draft_approve_graph(
         """Autonomy gate: decide whether a human must approve before sending.
 
         Routes to 'approve' unless an explicit grant permits autonomous action
-        on this (action, domain). This is the one place that authorizes skipping
-        human review, and it fails safe."""
+        on this (action, domain, context). This is the one place that
+        authorizes skipping human review, and it fails safe.
+
+        The evaluation context (Phase 4 stage 1, G14) is built from state,
+        never inferred: ``priority`` is whatever Phase 1 triage put there
+        (absent -> None), and ``tier`` is
+        ``importance_profile.assess(sender).tier.value`` -- but ONLY when
+        both an ``importance_profile`` and a ``sender`` are actually
+        available; missing either leaves ``tier`` at None rather than
+        guessing, and an assessment failure is swallowed the same way
+        (fail-closed: a scoped grant that needs a signal we don't have never
+        matches, so the gate falls back to whatever unscoped grant exists, or
+        the READ_ONLY floor). The matrix does the actual scope-matching and
+        urgent-interrupt work (autonomy.PermissionMatrix.max_rung) -- this
+        node only assembles the context and reports it."""
         action = _as_action(state["action"])
         domain = _as_domain(state["domain"])
         current = matrix_provider()  # live policy: re-evaluated per gate
-        autonomous_ok = current.allows(action, domain, Rung.ACT_NOTIFY)
+        priority = state.get("priority")
+        sender = state.get("sender")
+        tier: str | None = None
+        if importance_profile is not None and sender:
+            try:
+                tier = importance_profile.assess(sender).tier.value
+            except Exception:  # noqa: BLE001 — an assessment failure must
+                # never surface as a crash here; it just means this context
+                # can't be enriched, and fail-closed scope matching already
+                # treats a missing tier as "no scoped grant applies."
+                tier = None
+        matched_rung = current.max_rung(action, domain, priority=priority, tier=tier)
+        autonomous_ok = Rung.ACT_NOTIFY <= matched_rung
         target = "auto_apply" if autonomous_ok else "approve"
         return Command(
             goto=target,
@@ -168,8 +193,13 @@ def build_draft_approve_graph(
                         "autonomy_gate",
                         action=action.value,
                         domain=domain.value,
-                        max_rung=int(current.max_rung(action, domain)),
+                        max_rung=int(matched_rung),
                         routed_to=target,
+                        scope_context={
+                            "priority": priority,
+                            "tier": tier,
+                            "matched_rung": int(matched_rung),
+                        },
                     )
                 ]
             },
@@ -430,6 +460,18 @@ def make_connector_apply_fn(
     ``last_from_addr``, then ``from_addr``. A recipient that is empty or is
     the owner refuses to materialize: the assistant never drafts to its own
     principal.
+
+    SEND_REPLY (Phase 4 stage 2, G15): when ``state["action"] ==
+    Action.SEND_REPLY.value``, the draft is created exactly as above and
+    THEN immediately sent via ``connector.send_reply(draft_id=...)`` — the
+    freshness check above already covers this apply call (there is no
+    separate window between drafting and sending for a stale thread to
+    slip through). ``connector.send_reply`` is itself structurally gated
+    (rule 4: ``send_enabled`` + a real gmail.send scope); this call site
+    adds no shortcut around that — a connector built without send actually
+    enabled still raises ``SendNotPermitted`` here, which the ``apply``
+    node's exception handling turns into an honest ``apply_failed`` event
+    rather than a silent send.
     """
 
     def apply(state: dict[str, Any]) -> str | None:
@@ -459,7 +501,10 @@ def make_connector_apply_fn(
             body=final_text,
             thread_id=thread_ref,
         )
-        return getattr(ref, "draft_id", None)
+        draft_id = getattr(ref, "draft_id", None)
+        if state.get("action") == Action.SEND_REPLY.value and draft_id:
+            connector.send_reply(draft_id=draft_id)
+        return draft_id
 
     return apply
 
@@ -665,20 +710,28 @@ def _noop_apply_fn(state: dict[str, Any]) -> str | None:
 def apply_confirmation(decision: str, result: Any = None) -> str:
     """The honest post-decision confirmation, shared by every channel.
 
-    ``result`` is whatever ``resume_workflow`` returned (the final graph
-    state). The text states only what actually happened: a created Gmail
-    draft is announced, an apply failure is admitted, and nothing ever claims
-    to be "sending" — nothing here can send (rule 4).
+    ``result`` is whatever ``resume_workflow`` (or, for a graduation/
+    demotion card, ``orchestrator.grants.resolve_autonomy_card`` — Phase 4
+    stage 2, G13) returned. The text states only what actually happened: a
+    created Gmail draft is announced, an apply failure is admitted, a SENT
+    reply is announced as sent (never claimed for anything that wasn't
+    actually granted+enabled — rule 4), and an autonomy card's resolution
+    (granted/rejected/refused) gets its own honest rendering.
     """
+    state = result if isinstance(result, dict) else {}
+    if state.get("card_kind") == "autonomy":
+        return _autonomy_card_confirmation(decision, state)
+
+    is_send = state.get("action") == Action.SEND_REPLY.value
+
     if decision == "rejected":
-        return "🗑️ Rejected — nothing sent."
+        return "🗑️ Rejected — nothing sent." if not is_send else "🗑️ Rejected — reply not sent."
 
     prefix = "✏️ Edited" if decision == "edited" else "✅ Approved"
-    state = result if isinstance(result, dict) else {}
     if state.get("approval_already_handled"):
         return "This approval was already handled; no second action was taken."
     is_calendar = state.get("domain") == "calendar"
-    thing = "tentative calendar hold" if is_calendar else "Gmail draft"
+    thing = "reply" if is_send else ("tentative calendar hold" if is_calendar else "Gmail draft")
     if state.get("apply_error") == "source_changed":
         source = "meeting" if is_calendar else "thread"
         return (
@@ -686,17 +739,52 @@ def apply_confirmation(decision: str, result: Any = None) -> str:
             f"posted, so nothing was created. Please re-review."
         )
     if state.get("apply_error"):
+        verb = "sending" if is_send else "creating"
         return (
-            f"{prefix} — your decision was recorded, but creating the "
+            f"{prefix} — your decision was recorded, but {verb} the "
             f"{thing} failed ({state['apply_error']})."
         )
     if state.get("applied_ref"):
+        if is_send:
+            return f"{prefix} — reply sent."
         return (
             f"{prefix} — tentative hold created on your calendar."
             if is_calendar
             else f"{prefix} — draft created in Gmail."
         )
     return f"{prefix}."
+
+
+def _autonomy_card_confirmation(decision: str, state: dict[str, Any]) -> str:
+    """The honest post-decision confirmation for a graduation/demotion
+    approval card (Phase 4 stage 2, G13) — the counterpart to the rest of
+    ``apply_confirmation`` for cards that resolve through
+    ``orchestrator.grants.resolve_autonomy_card`` rather than a LangGraph
+    resume. Every branch states exactly what did or didn't happen; nothing
+    here can claim a grant took effect when the ceiling refused it."""
+    resolution = state.get("resolution")
+    if resolution == "already_handled":
+        return "This approval was already handled; no second action was taken."
+    if resolution == "unknown_card":
+        return "🗑️ This suggestion has expired or was already resolved — nothing changed."
+    if resolution == "refused_ceiling":
+        return (
+            "⛔ Refused — this suggestion exceeds what a card may ever grant "
+            "(sending, or autonomy above act-notify, is CLI-only). Nothing "
+            "changed; use `attune autonomy grant` if this is truly wanted."
+        )
+    if resolution == "granted":
+        return (
+            f"✅ Granted — {state.get('action')} on {state.get('domain')} at "
+            f"{state.get('to_rung')} (persisted; revoke any time with "
+            f"`attune autonomy revoke {state.get('action')} {state.get('domain')}`)."
+        )
+    if resolution == "rejected":
+        return (
+            f"🗑️ Rejected — {state.get('action')} on {state.get('domain')} "
+            "stays as-is; this suggestion won't reappear for 30 days."
+        )
+    return "Handled."
 
 
 def _default_draft_fn(

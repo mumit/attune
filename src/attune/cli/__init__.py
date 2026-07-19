@@ -138,14 +138,36 @@ def build_parser() -> argparse.ArgumentParser:
     autonomy_sub = p_autonomy.add_subparsers(dest="autonomy_command")
     a_show = autonomy_sub.add_parser("show", help="current grants + suggestions")
     a_show.set_defaults(func=_cmd_autonomy_show)
-    a_grant = autonomy_sub.add_parser("grant", help="grant (action, domain) a rung")
+    a_grant = autonomy_sub.add_parser(
+        "grant",
+        help="grant (action, domain) a rung, optionally scoped to a priority/tier",
+    )
     a_grant.add_argument("action")
     a_grant.add_argument("domain")
     a_grant.add_argument("rung", help="e.g. propose, act_notify, or 3")
+    a_grant.add_argument(
+        "--priority", default=None,
+        help="comma-separated scope: urgent,routine,noise (default: unscoped)",
+    )
+    a_grant.add_argument(
+        "--tier", default=None,
+        help="comma-separated scope: high,normal,low (default: unscoped)",
+    )
     a_grant.set_defaults(func=_cmd_autonomy_grant)
-    a_revoke = autonomy_sub.add_parser("revoke", help="claw a grant back")
+    a_revoke = autonomy_sub.add_parser(
+        "revoke",
+        help="claw a grant back (every grant for the pair, or one scope with --priority/--tier)",
+    )
     a_revoke.add_argument("action")
     a_revoke.add_argument("domain")
+    a_revoke.add_argument(
+        "--priority", default=None,
+        help="revoke only the grant scoped to this priority set (comma-separated)",
+    )
+    a_revoke.add_argument(
+        "--tier", default=None,
+        help="revoke only the grant scoped to this tier set (comma-separated)",
+    )
     a_revoke.set_defaults(func=_cmd_autonomy_revoke)
     a_record = autonomy_sub.add_parser(
         "record", help="track record of human decisions per (action, domain)"
@@ -285,13 +307,18 @@ def _cmd_autonomy_show(args: Any) -> int:
 def _cmd_autonomy_grant(args: Any) -> int:
     from .autonomy_cmd import run_autonomy_grant
 
-    return run_autonomy_grant(args.action, args.domain, args.rung)
+    return run_autonomy_grant(
+        args.action, args.domain, args.rung,
+        priority=args.priority, tier=args.tier,
+    )
 
 
 def _cmd_autonomy_revoke(args: Any) -> int:
     from .autonomy_cmd import run_autonomy_revoke
 
-    return run_autonomy_revoke(args.action, args.domain)
+    return run_autonomy_revoke(
+        args.action, args.domain, priority=args.priority, tier=args.tier,
+    )
 
 
 def _cmd_autonomy_record(args: Any) -> int:
