@@ -58,6 +58,18 @@ class SqliteRetryQueue:
                 )
                 """
             )
+        # Security finding F5 (Low): the retry queue holds source_ref/payload
+        # for in-flight mail/calendar/chat work — chmod the db file (and its
+        # WAL/SHM sidecars, if the journal mode created them) to owner-only
+        # rather than trust the process's umask, same posture as the JSON
+        # state stores elsewhere in this codebase.
+        for suffix in ("", "-wal", "-shm"):
+            candidate = self._path + suffix
+            if os.path.exists(candidate):
+                try:
+                    os.chmod(candidate, 0o600)
+                except OSError:
+                    pass
 
     def enqueue(
         self, kind: str, source_ref: str, payload: dict[str, Any], *, error: str

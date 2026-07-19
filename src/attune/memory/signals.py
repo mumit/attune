@@ -56,6 +56,48 @@ def _short_diff(before: str, after: str, max_lines: int = 40) -> str:
     return "\n".join(lines)
 
 
+#: Security finding F6 (SEC-605, Info): correction-derived memories touched
+#: untrusted content (the diff is computed from a draft whose input was an
+#: attacker-controlled email/chat body) and explicit teaching did not. At
+#: RETRIEVAL time — the draft ``retrieve`` node, triage's past-reactions
+#: garnish, and the conversational fallback — nothing previously
+#: distinguished the two, so a memory whose provenance traced back to a
+#: successful prompt-injection-into-a-draft would read exactly like a fact
+#: the principal deliberately taught (pinned by
+#: ``tests/test_signals.py::test_adversarial_two_stage_correction_provenance``).
+#: These suffixes are PRESENTATION-LEVEL framing appended to a memory's text
+#: right before it
+#: enters a prompt — they never filter, drop, or reweight what's retrieved;
+#: search/ranking/consolidation are unchanged. A human (or the model)
+#: reading the annotation is meant to hold correction-derived preferences
+#: more loosely than something the principal stated outright — the same
+#: "provenance, not deletion" posture already used for untrusted mail/chat
+#: content elsewhere in the prompt stack.
+CORRECTION_ANNOTATION = " (learned from an edit — lower confidence than explicit teaching)"
+EXPLICIT_ANNOTATION = " (explicitly taught)"
+
+
+def frame_memory_text(text: str, metadata: dict[str, Any] | None) -> str:
+    """Annotate one retrieved memory's text with its provenance, if known.
+
+    Driven entirely by the ``signal`` key ``capture_correction``/
+    ``remember_fact`` already stamp onto stored metadata — no new storage,
+    no new field. Records that predate this metadata (or whose ``signal``
+    is anything else — ``"action"``, ``"consolidated"``, missing) render
+    byte-identical to before: this is additive framing, not a schema
+    requirement. Call this at every site that turns a retrieved
+    ``MemoryRecord`` into prompt text, not once centrally, because each site
+    already has its own trust framing (untrusted-mail block, trusted
+    past-reactions block, etc.) that this annotation must sit inside of.
+    """
+    signal = (metadata or {}).get("signal")
+    if signal == "correction":
+        return text + CORRECTION_ANNOTATION
+    if signal == "explicit":
+        return text + EXPLICIT_ANNOTATION
+    return text
+
+
 def capture_correction(
     store: MemoryStore,
     *,

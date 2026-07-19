@@ -741,6 +741,10 @@ class JsonGraduationState:
         temp = f"{self._path}.tmp"
         with open(temp, "w") as fh:
             json.dump(data, fh)
+        # Security finding F5 (Low): explicit chmod, defense in depth
+        # against a permissive process umask — same fix as
+        # orchestrator/pending.py's JsonPendingApprovals._save.
+        os.chmod(temp, 0o600)
         os.replace(temp, self._path)
 
 

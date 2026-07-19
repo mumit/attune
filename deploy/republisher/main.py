@@ -40,7 +40,20 @@ project number; that value is only used in the alternative "Project Number"
 audience mode, a different JWT-based verification path not implemented
 here), and whose ``email`` claim — not ``iss`` — identifies the caller as
 ``chat@system.gserviceaccount.com``. Confirmed against current docs;
-**not yet exercised against a live Chat app**.
+**not yet exercised against a live Chat app** — that remains operator work
+(deploy, point a real Chat app's Connection settings at this service, and
+confirm a genuine interaction round-trips), no amount of offline testing
+substitutes for it.
+
+Security finding F4 (Low, docs/current-state.md's 2026-07-18 review): what
+offline testing CAN do, and now does, is pin the negative space —
+``test_main.py`` carries an explicit matrix over missing token, malformed
+token, wrong audience, wrong email claim, and expired token (each via the
+injected ``verify_fn`` seam, since the real check is
+``google.auth``/``id_token.verify_oauth2_token``, not something this module
+reimplements), alongside the positive correct-token-accepted case. That
+matrix is complete as of this writing; the live exercise above is the one
+thing it cannot stand in for.
 """
 
 from __future__ import annotations

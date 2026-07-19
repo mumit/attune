@@ -162,6 +162,19 @@ Times use 24-hour `HH:MM` notation in `ATTUNE_TIMEZONE`.
 | `ATTUNE_LOG_LEVEL` | `INFO` | Python log level. Use `DEBUG` temporarily for diagnosis; `INFO` is recommended in normal operation. |
 | `ATTUNE_LOG_JSON` | blank | Set to `1` for one JSON object per log line, recommended for journald/Cloud Logging ingestion; leave blank for human-readable local logs. |
 
+## Local rate ceilings
+
+Security finding F9 (docs/current-state.md's 2026-07-18 review): two
+bounded, deterministic ceilings, no model calls, process-local state
+(resets on restart, no cross-process coordination). Both are the one
+exception to "avoid new variables" — a ceiling that can't be tuned for a
+deployment's real traffic isn't usable.
+
+| Variable | Default | Purpose and suggested value |
+|---|---|---|
+| `ATTUNE_INBOUND_RATE_LIMIT` | `20` | Max inbound Slack/Chat DMs per (channel, user) per 5-minute sliding window before a fixed "please wait" refusal (see `dispatcher.py`'s `InboundRateLimiter`). Raise it if a legitimate power user hits it in normal use. |
+| `ATTUNE_TRIAGE_BATCH_LIMIT` | `25` | Max Gmail threads drafted per notification batch in `handle_gmail_notification`; anything beyond this is enqueued onto the existing durable retry queue (`ingestion/retry_queue.py`), never dropped. Raise it only if backlog notifications after downtime are routinely larger than this. |
+
 ## Google Pub/Sub transport
 
 These advanced settings apply only to direct Google OAuth with

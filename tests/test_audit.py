@@ -29,6 +29,29 @@ def test_record_creates_file_and_parent_dirs(tmp_path):
     assert path.exists()
 
 
+def test_record_chmods_file_owner_only(tmp_path):
+    """Security finding F5 (Low): the audit log is append-mode, so the file
+    is created under whatever umask the process has; re-assert 0600 after
+    every append rather than trust it."""
+    import os
+
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    log.record(
+        thread_id="t1", workflow="draft_approve",
+        events=[{"event": "retrieved", "ts": "2026-07-10T00:00:00+00:00"}],
+    )
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+
+    # A second append must not regress permissions (e.g. by not touching
+    # them at all).
+    log.record(
+        thread_id="t1", workflow="draft_approve",
+        events=[{"event": "drafted", "ts": "2026-07-10T00:00:01+00:00"}],
+    )
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+
+
 def test_record_writes_one_line_per_event(tmp_path):
     path = tmp_path / "audit.log.jsonl"
     log = JsonlAuditLog(str(path))

@@ -82,6 +82,7 @@ from enum import Enum
 from typing import Any
 
 from ..llm import Task, create_chat_completion, model_for
+from ..memory.signals import frame_memory_text
 from .importance import ImportanceTier
 
 logger = logging.getLogger(__name__)
@@ -196,7 +197,15 @@ def triage_thread(
 
 def _past_reactions(store: Any, sender: str | None, user_id: str) -> str:
     """Up to three short reaction lines for this sender, or "". Retrieval
-    failures are silently empty — memory garnish must never break triage."""
+    failures are silently empty — memory garnish must never break triage.
+
+    Each line is provenance-framed (security finding F6, SEC-605) before it
+    joins the trusted PAST REACTIONS block above: a reaction captured from
+    an edited-then-approved draft is annotated as lower-confidence than
+    explicit teaching, same as everywhere else memory reaches a prompt. The
+    annotation travels WITH the line inside the trusted block — it does not
+    move the line out of it; the block's own trust framing (the user's own
+    captured behavior) is unchanged."""
     if store is None or not sender:
         return ""
     try:
@@ -205,7 +214,10 @@ def _past_reactions(store: Any, sender: str | None, user_id: str) -> str:
         )
     except Exception:  # noqa: BLE001
         return ""
-    return "\n".join(f"- {r.text[:160]}" for r in records[:3])
+    return "\n".join(
+        f"- {frame_memory_text(r.text[:160], getattr(r, 'metadata', None))}"
+        for r in records[:3]
+    )
 
 
 def _apply_importance_adjustment(

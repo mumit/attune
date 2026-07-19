@@ -54,13 +54,36 @@ no credential details — both are injected by the caller.
 
 All collaborators (graph, connector, gmail_service, watch_state, store) are
 injected so the dispatcher is testable offline with fakes.
+
+Security finding F9 (Info, docs/current-state.md's 2026-07-18 review): two
+bounded, deterministic ceilings, neither of which makes a model call:
+
+1. **Per-(channel, user) inbound message rate** (:class:`InboundRateLimiter`,
+   checked at the top of ``_respond_to_message``) — a sliding-window counter
+   over the trailing :data:`RATE_LIMIT_WINDOW_SECONDS`, default
+   :data:`DEFAULT_INBOUND_RATE_LIMIT` messages, overridable via
+   ``ATTUNE_INBOUND_RATE_LIMIT``. Beyond the ceiling, a fixed refusal
+   message is sent and the event is audited WITHOUT the message content
+   (rule 6). State is in-memory and PROCESS-LOCAL — it resets on restart
+   and does not coordinate across multiple runtime processes; that's an
+   accepted limitation for a courtesy ceiling on volume from a sender the
+   actor allowlists (``SlackChannel``/``GoogleChatChannel``, finding F8)
+   have ALREADY authorized, not a replacement for authentication.
+
+2. **Per-run triage/draft ceiling** (``handle_gmail_notification``) — at
+   most :data:`DEFAULT_TRIAGE_BATCH_LIMIT` threads (overridable via
+   ``ATTUNE_TRIAGE_BATCH_LIMIT``) are drafted per notification batch;
+   anything beyond that is enqueued onto the existing durable retry queue
+   (the same cursor-then-retry machinery ``Runtime.drain_source_retries``
+   already replays fetch failures through — see ``ingestion/retry_queue.py``)
+   rather than dropped, and the overflow is audited.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .app import AppContext
@@ -75,6 +98,7 @@ from .ingestion.gmail_watch import WatchState
 from .ingestion.sources import SourceMessage
 from .interaction import InteractionIntent, InteractionPlan, plan_interaction
 from .llm import Task, create_chat_completion, model_for
+from .memory.signals import frame_memory_text
 from .orchestrator.attention import AttentionItem
 from .orchestrator.autonomy import Action, Domain, Rung
 from .orchestrator.draft_approve import apply_confirmation
@@ -83,6 +107,73 @@ from .orchestrator.scheduling import ConflictResult, detect_conflict, propose_fr
 from .orchestrator.triage import Priority, TriageResult, triage_thread
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Security finding F9 (Info): per-(channel, user) inbound message rate
+# ceiling. See the module docstring's "Security finding F9" section for the
+# full rationale; this is deliberately the simplest thing that bounds a
+# noisy or malicious peer without a model call.
+# ---------------------------------------------------------------------------
+
+RATE_LIMIT_WINDOW_SECONDS = 300  # 5 minutes; not independently configurable
+DEFAULT_INBOUND_RATE_LIMIT = 20  # messages per window; ATTUNE_INBOUND_RATE_LIMIT overrides
+
+# Security finding F9 (Info): per-run triage/draft ceiling for
+# handle_gmail_notification — see that function's docstring. Mirrors
+# DEFAULT_INBOUND_RATE_LIMIT above: the module constant documents the
+# default; Settings.triage_batch_limit (ATTUNE_TRIAGE_BATCH_LIMIT) is the
+# live, per-deployment value actually consulted.
+DEFAULT_TRIAGE_BATCH_LIMIT = 25
+
+_RATE_LIMIT_REFUSAL = (
+    "You've sent a lot of messages in a short time — please wait a few "
+    "minutes and try again."
+)
+
+
+class InboundRateLimiter:
+    """Sliding-window counter of inbound message timestamps per
+    (channel, user_id).
+
+    PROCESS-LOCAL by design (an in-memory dict, same convention as
+    ``_MEMORY_UI_STATE`` below): a restart resets every window, and nothing
+    here coordinates across multiple runtime processes. That's an accepted
+    limitation for a courtesy ceiling, not a security boundary — it bounds
+    *volume* from a sender the actor allowlists (finding F8) already
+    authorized, it does not authenticate anyone.
+
+    Sliding window, not fixed buckets, so a burst straddling a bucket
+    boundary can't double the effective rate. ``max_messages`` is passed
+    per call (not fixed at construction) so it can track live
+    ``Settings.inbound_rate_limit`` without needing to rebuild the limiter.
+    """
+
+    def __init__(self, *, window_seconds: float = RATE_LIMIT_WINDOW_SECONDS):
+        self._window = timedelta(seconds=window_seconds)
+        self._timestamps: dict[tuple[str, str], list[datetime]] = {}
+
+    def allow(
+        self, channel: str, user_id: str, *, max_messages: int, now: datetime | None = None
+    ) -> bool:
+        """True and records this message if the (channel, user) is under
+        the ceiling; False (and NOT recorded) if it's already at the limit."""
+        now = now or datetime.now(timezone.utc)
+        key = (channel, user_id)
+        cutoff = now - self._window
+        history = [ts for ts in self._timestamps.get(key, []) if ts >= cutoff]
+        allowed = len(history) < max_messages
+        if allowed:
+            history.append(now)
+        self._timestamps[key] = history
+        return allowed
+
+
+# Shared across all channels in this process — same rationale as
+# _MEMORY_UI_STATE below. Tests inject their own instance via the
+# rate_limiter kwarg threaded through handle_chat_message/
+# handle_slack_message/_respond_to_message, exactly like memory_ui.
+_INBOUND_RATE_LIMITER = InboundRateLimiter()
 
 
 # Sentinel marking "use the real memory-informed triage": callers that inject
@@ -267,9 +358,48 @@ def handle_gmail_notification(
     proposals offered for threads that were).  Raises
     :class:`~ingestion.HistoryExpired` when the stored historyId has expired;
     the caller must re-baseline the watch.
+
+    Security finding F9: at most ``app_ctx.settings.triage_batch_limit``
+    threads (default :data:`DEFAULT_TRIAGE_BATCH_LIMIT`, overridable via
+    ``ATTUNE_TRIAGE_BATCH_LIMIT``) are processed from one notification's
+    ``changes.thread_ids`` — a batch larger than that (a backlog after
+    downtime, or a deliberately abusive notification) enqueues the
+    overflow onto ``retry_queue`` with the same ``"gmail_thread"`` shape
+    the fetch-failure path below already uses, so
+    ``Runtime.drain_source_retries`` picks it up on its own schedule
+    instead of it being silently dropped or blocking this run indefinitely.
+    Audited (without ``retry_queue`` present, overflow is still audited but
+    cannot be enqueued — the same accepted limitation the fetch-failure
+    path already has).
     """
     triage_fn = triage_fn or _default_triage
     changes = process_notification(gmail_service, watch_state, notification)
+
+    batch_limit = app_ctx.settings.triage_batch_limit
+    batch_thread_ids = changes.thread_ids[:batch_limit]
+    overflow_thread_ids = changes.thread_ids[batch_limit:]
+    for gmail_tid in overflow_thread_ids:
+        if retry_queue is not None:
+            retry_queue.enqueue(
+                "gmail_thread",
+                gmail_tid,
+                {"history_id": changes.new_history_id},
+                error="triage_batch_limit_exceeded",
+            )
+        if audit_log is not None:
+            audit_log.record(
+                thread_id=f"gmail:{gmail_tid}:{changes.new_history_id}",
+                workflow="ops",
+                events=[{
+                    "event": "batch_overflow_enqueued",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "gmail_thread_id": gmail_tid,
+                    "batch_limit": batch_limit,
+                    "enqueued": retry_queue is not None,
+                }],
+                domain="ops",
+                user_id=user_id,
+            )
 
     submitted: list[str] = []
     # NOISE threads that cleared all three label gates, collected across the
@@ -277,7 +407,7 @@ def handle_gmail_notification(
     # candidate before MAX_LABEL_PROPOSALS_PER_RUN binds — same two-phase
     # shape as the calendar conflict offers below.
     label_offerable: list[tuple[Any, TriageResult]] = []
-    for gmail_tid in changes.thread_ids:
+    for gmail_tid in batch_thread_ids:
         if pending is not None:
             existing = pending.get_pending_for_source(gmail_tid)
             if existing is not None:
@@ -1719,6 +1849,8 @@ def handle_chat_message(
     allowed_senders: frozenset[str] | set[str] | None = None,
     workspace: WorkspaceConnector | None = None,
     plan_fn: Callable[..., InteractionPlan] | None = None,
+    rate_limiter: InboundRateLimiter | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Process a decoded Chat space event.
 
@@ -1769,6 +1901,8 @@ def handle_chat_message(
         audit_log=audit_log,
         workspace=workspace,
         plan_fn=plan_fn,
+        rate_limiter=rate_limiter,
+        now=now,
     )
 
 
@@ -1784,6 +1918,8 @@ def handle_slack_message(
     audit_log: AuditLog | None = None,
     workspace: WorkspaceConnector | None = None,
     plan_fn: Callable[..., InteractionPlan] | None = None,
+    rate_limiter: InboundRateLimiter | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Route one already-decoded Slack DM through the shared interaction layer.
 
@@ -1802,6 +1938,8 @@ def handle_slack_message(
         audit_log=audit_log,
         workspace=workspace,
         plan_fn=plan_fn,
+        rate_limiter=rate_limiter,
+        now=now,
     )
 
 
@@ -1825,6 +1963,8 @@ def _respond_to_message(
     audit_log: Any = None,
     workspace: WorkspaceConnector | None = None,
     plan_fn: Callable[..., InteractionPlan] | None = None,
+    rate_limiter: InboundRateLimiter | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Shared routing for both chat channels.
 
@@ -1840,7 +1980,40 @@ def _respond_to_message(
     Every exchange — brief requests included — is recorded into the
     conversation window, so "expand on the second item" works right after a
     brief the same way it works after a Q&A answer.
+
+    Security finding F9: the per-(channel, user) rate ceiling is checked
+    FIRST, before any memory/autonomy/planner/model work — a message beyond
+    the ceiling gets a fixed refusal and a content-free audit event, never
+    reaching drafting or the conversational model call. ``rate_limiter``
+    defaults to the shared process-local :data:`_INBOUND_RATE_LIMITER`;
+    tests inject their own instance the same way they inject ``memory_ui``.
     """
+    limiter = rate_limiter if rate_limiter is not None else _INBOUND_RATE_LIMITER
+    max_messages = app_ctx.settings.inbound_rate_limit
+    if not limiter.allow(channel, user_id, max_messages=max_messages, now=now):
+        logger.warning(
+            "%s: inbound rate limit hit for user=%s (max=%d/%ds)",
+            channel, user_id, max_messages, RATE_LIMIT_WINDOW_SECONDS,
+        )
+        post_text(_RATE_LIMIT_REFUSAL)
+        if audit_log is not None:
+            # Content-free (rule 6): no message text, just the fact that
+            # this (channel, user) hit the ceiling.
+            audit_log.record(
+                thread_id=f"ops:{channel}",
+                workflow="ops",
+                events=[{
+                    "event": "inbound_rate_limited",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "channel": channel,
+                    "max_messages": max_messages,
+                    "window_seconds": RATE_LIMIT_WINDOW_SECONDS,
+                }],
+                domain="ops",
+                user_id=user_id,
+            )
+        return
+
     response = _autonomy_status(app_ctx, text, audit_log=audit_log)
     if response is None:
         response = _try_memory_command(
@@ -2265,7 +2438,14 @@ def _converse(
     turns only — history is never promoted into system content.
     """
     mems = app_ctx.store.search(text, user_id=user_id, limit=5)
-    mem_block = "\n".join(f"- {m.text}" for m in mems) or "(no prior context)"
+    # Security finding F6 (SEC-605): provenance-frame each retrieved memory
+    # before it joins the prompt — a correction-derived memory touched
+    # whatever the original mail/chat said, so it's marked lower-confidence
+    # than something explicitly taught. Presentation only; see
+    # memory.signals.frame_memory_text.
+    mem_block = "\n".join(
+        f"- {frame_memory_text(m.text, getattr(m, 'metadata', None))}" for m in mems
+    ) or "(no prior context)"
 
     system = (
         "You are the user's workspace assistant. Answer concisely.\n"

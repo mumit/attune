@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from attune.cli import build_parser, main
 from attune.cli.brief_cmd import run_brief
 from attune.cli.doctor import (
@@ -18,6 +20,7 @@ from attune.cli.doctor import (
     _qdrant_ready_url,
     check_audit_chain,
     check_channel_routes,
+    check_data_dir,
     check_google_oauth_app,
     check_source_channels,
     run_doctor,
@@ -769,6 +772,81 @@ def test_audit_chain_fails_with_line_number_on_tamper(tmp_path):
     status, detail = check_audit_chain(settings)
     assert status == FAIL
     assert "line 2" in detail
+
+
+# ---------------------------------------------------------------------------
+# data-dir (security finding F5): fatal check, fail closed on unset
+# ATTUNE_DATA_DIR
+# ---------------------------------------------------------------------------
+
+
+def test_data_dir_fails_when_unset():
+    from attune.config import Settings
+
+    settings = Settings.from_env({})
+    assert settings.data_dir is None  # sanity: this is the unset case
+
+    status, detail = check_data_dir(settings)
+    assert status == FAIL
+    assert "ATTUNE_DATA_DIR" in detail
+
+
+def test_data_dir_passes_and_corrects_permissions(tmp_path):
+    from attune.config import Settings
+
+    target = tmp_path / "attune-data"
+    settings = Settings.from_env({"ATTUNE_DATA_DIR": str(target)})
+
+    status, detail = check_data_dir(settings)
+
+    assert status == PASS
+    assert str(target) in detail
+    assert os.path.isdir(target)
+    assert (os.stat(target).st_mode & 0o777) == 0o700
+
+
+def test_data_dir_corrects_overly_permissive_existing_directory(tmp_path):
+    from attune.config import Settings
+
+    target = tmp_path / "attune-data"
+    target.mkdir()
+    os.chmod(target, 0o777)
+
+    settings = Settings.from_env({"ATTUNE_DATA_DIR": str(target)})
+    status, _ = check_data_dir(settings)
+
+    assert status == PASS
+    assert (os.stat(target).st_mode & 0o777) == 0o700
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permission checks",
+)
+def test_data_dir_fails_when_not_writable(tmp_path):
+    from attune.config import Settings
+
+    parent = tmp_path / "readonly-parent"
+    parent.mkdir(mode=0o500)
+    target = parent / "attune-data"
+    settings = Settings.from_env({"ATTUNE_DATA_DIR": str(target)})
+
+    try:
+        status, detail = check_data_dir(settings)
+        assert status == FAIL
+        assert "ATTUNE_DATA_DIR" in detail
+    finally:
+        os.chmod(parent, 0o700)  # allow tmp_path cleanup
+
+
+def test_data_dir_is_in_fatal_checks():
+    """attune run's preflight (run_cmd.run_run -> run_doctor(fatal_only=True))
+    only re-runs checks named in FATAL_CHECKS — confirm data-dir is one of
+    them, which is what makes an unset ATTUNE_DATA_DIR actually block
+    `attune run` rather than merely warn in the full battery."""
+    from attune.cli.doctor import FATAL_CHECKS
+
+    assert "data-dir" in FATAL_CHECKS
 
 
 # ---------------------------------------------------------------------------

@@ -186,6 +186,32 @@ Findings, prioritized (all in the local runtime unless noted):
 | F8 | Low | `GoogleChatChannel.handle_interaction` has no in-class actor guard (authorization lives one layer up in the dispatcher), unlike `SlackChannel`. |
 | F9 | Info | No local rate/volume ceilings on model calls or channel messages; hosted has Cloud Armor and DB-level leasing, local has nothing analogous. |
 
+> **Status addendum (2026-07-19, does not alter the review above — see
+> `docs/decisions.md`'s dated entry for full detail):** F1/F2 shipped
+> earlier (hash-chained audit log, `fslock`). F7 was satisfied by the
+> hosted memory design. F3, F4, F5, F6, F8, and F9 shipped in this pass:
+> F3 — `RedactionFilter` in `logging_setup.py` (paired defense, not a
+> replacement for the discipline). F4 — `deploy/republisher/test_main.py`'s
+> OIDC negative matrix is complete (missing/malformed/wrong-audience/
+> wrong-email/expired token, plus correct-token acceptance); the live
+> Chat-app exercise the docstring still flags remains operator work. F5 —
+> Doctor's `data-dir` check now FAILs fast on unset `ATTUNE_DATA_DIR`
+> (`attune run`'s preflight inherits this via the existing fatal-check
+> gate); the audit log, pending approvals, retry queue, and graduation
+> state now chmod `0600` explicitly. F6 — `memory.signals.frame_memory_text`
+> provenance-frames correction-derived memories at every retrieval site
+> (`draft_approve.retrieve`, `triage._past_reactions`,
+> `dispatcher._converse`); the SEC-605 adversarial test in
+> `tests/test_signals.py` pins the provenance plumbing, not model
+> behavior. F8 — `GoogleChatChannel` gained an in-class actor guard
+> mirroring `SlackChannel._authorized`'s exact deny-by-default rule; the
+> dispatcher-level check is unchanged (defense in depth). F9 —
+> `InboundRateLimiter` (process-local, per-(channel,user) sliding window)
+> and `handle_gmail_notification`'s per-run batch ceiling
+> (overflow enqueued to the durable retry queue, never dropped), both
+> configurable via new `ATTUNE_INBOUND_RATE_LIMIT`/
+> `ATTUNE_TRIAGE_BATCH_LIMIT` variables.
+
 ## User experience
 
 **Self-hosted.** Time-to-first-value is dominated by manual Google Cloud

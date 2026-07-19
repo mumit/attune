@@ -304,6 +304,49 @@ def check_google_oauth_app(settings) -> tuple[str, str]:
     )
 
 
+def check_data_dir(settings) -> tuple[str, str]:
+    """Fatal check for security finding F5 (Low, docs/current-state.md's
+    2026-07-18 review): with ``ATTUNE_DATA_DIR`` unset, ``config._path``
+    falls back to ``./{filename}`` under whatever umask the process happens
+    to run with — the conversation-state JSONL, the audit log, and every
+    other state file would land in the current working directory,
+    potentially world-readable. FAIL fast rather than let a deployment
+    silently write sensitive state somewhere unexpected; PASS only once a
+    real directory is configured, and (mirroring ``attune init``'s own
+    behavior) verify/correct its permissions to 0700 — owner-only, since
+    this directory holds credentials, memory, and audit data.
+
+    This is one of :data:`FATAL_CHECKS`, so ``attune run``'s preflight
+    (``run_cmd.run_run`` calling ``run_doctor(fatal_only=True)``) inherits
+    the same fail-closed behavior without any additional wiring."""
+    import os
+
+    if not settings.data_dir:
+        return FAIL, (
+            "ATTUNE_DATA_DIR is not set — state files (conversation text, "
+            "audit log, credentials) would fall back to the current "
+            "working directory with the process's default umask; set "
+            "ATTUNE_DATA_DIR to an owner-only directory (`attune init` "
+            "prompts for one and creates it with 0700)"
+        )
+    target = settings.data_dir
+    probe = os.path.join(target, ".attune-doctor-probe")
+    try:
+        os.makedirs(target, mode=0o700, exist_ok=True)
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.remove(probe)
+    except OSError as exc:
+        return FAIL, f"{target} not writable ({exc}) — set ATTUNE_DATA_DIR"
+    try:
+        os.chmod(target, 0o700)
+    except OSError:
+        # Windows and unusual filesystems may not support POSIX modes —
+        # same tolerance as init_cmd.py's identical chmod.
+        pass
+    return PASS, f"{target} (permissions verified/corrected to 0700)"
+
+
 def check_audit_chain(settings) -> tuple[str, str]:
     """Verify the local JSONL audit log's hash chain (security finding F1).
 
@@ -417,18 +460,6 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
     def check_env() -> tuple[str, str]:
         settings.validate()
         return PASS, f"workspace={settings.workspace_backend.value}, ingestion={settings.ingestion_mode.value}"
-
-    def check_data_dir() -> tuple[str, str]:
-        target = settings.data_dir or "."
-        probe = os.path.join(target, ".attune-doctor-probe")
-        try:
-            os.makedirs(target, exist_ok=True)
-            with open(probe, "w") as fh:
-                fh.write("ok")
-            os.remove(probe)
-        except OSError as exc:
-            return FAIL, f"{target} not writable ({exc}) — set ATTUNE_DATA_DIR"
-        return PASS, target
 
     def check_llm() -> tuple[str, str]:
         if not settings.llm_api_key:
@@ -574,7 +605,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("installation", check_installation),
         Check("python", check_python),
         Check("env", check_env),
-        Check("data-dir", check_data_dir),
+        Check("data-dir", lambda: check_data_dir(settings)),
         Check("llm", check_llm),
         Check("workspace", check_workspace),
         Check("google-oauth-app", lambda: check_google_oauth_app(settings)),
