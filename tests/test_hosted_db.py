@@ -7,7 +7,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -102,6 +102,8 @@ from attune.orchestrator.importance import (
 from attune.orchestrator.triage import Priority
 from attune.memory.signals import ActionSignal
 from attune.hosted.tenant import TenantContext, tenant_transaction
+from attune.hosted.tenant_deletion import PostgresTenantDeletionRequests
+from attune.hosted.tenant_deletion_executor import erasable_relations_in_order
 from attune.hosted.vault import (
     PostgresCredentialIntentRepository,
     PostgresSecretBrokerRepository,
@@ -142,6 +144,8 @@ ROLE_BINDINGS = {
     "attune_export": "attune_test_export",
     "attune_export_cleanup": "attune_test_export_cleanup",
     "attune_export_download": "attune_test_export_download",
+    "attune_content_retention": "attune_test_content_retention",
+    "attune_deletion": "attune_test_deletion",
 }
 
 
@@ -152,7 +156,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0045_hosted_signup.sql"
+    assert migrations[-1].name == "0046_tenant_content_lifecycle.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -550,7 +554,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 45
+    assert apply_migrations(admin) == 46
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -5086,3 +5090,442 @@ def test_importance_and_attention_are_isolated_per_tenant_under_rls(
         direct.rollback()
     finally:
         direct.close()
+
+
+def _seed_deletion_owner(connection, tenant_id, principal_id, session_id):
+    """Insert a tenant/principal/recent-session triple for deletion tests."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) VALUES (%s, %s, 'test')",
+            (tenant_id, "tn-" + tenant_id.hex),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test')
+            """,
+            (tenant_id, principal_id, hashlib.sha256(tenant_id.bytes).digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.identity_sessions
+                (tenant_id, id, principal_id, token_hash, csrf_hash, expires_at)
+            VALUES (%s, %s, %s, %s, %s, clock_timestamp() + interval '8 hours')
+            """,
+            (
+                tenant_id,
+                session_id,
+                principal_id,
+                hashlib.sha256(session_id.bytes + b"token").digest(),
+                hashlib.sha256(session_id.bytes + b"csrf").digest(),
+            ),
+        )
+    connection.commit()
+
+
+def test_tenant_deletion_request_cancel_and_rls_isolation(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    tenant_a, principal_a, session_a = uuid4(), uuid4(), uuid4()
+    tenant_b, principal_b, session_b = uuid4(), uuid4(), uuid4()
+    _reset_role(initialized_database)
+    _seed_deletion_owner(initialized_database, tenant_a, principal_a, session_a)
+    _seed_deletion_owner(initialized_database, tenant_b, principal_b, session_b)
+
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    requests = PostgresTenantDeletionRequests(control_factory)
+    context_a = TenantContext(tenant_a)
+    context_b = TenantContext(tenant_b)
+
+    assert requests.read(context_a, principal_id=principal_a) is None
+
+    first = requests.request(context_a, principal_id=principal_a, session_id=session_a)
+    assert first.created is True
+    assert first.status == "pending"
+    repeat = requests.request(context_a, principal_id=principal_a, session_id=session_a)
+    assert repeat.created is False
+    assert repeat.id == first.id
+
+    # RLS: tenant B's own context (an ordinary, non-superuser role connection
+    # -- the admin fixture connection bypasses RLS entirely) sees none of
+    # tenant A's request row.
+    isolation_probe = control_factory()
+    try:
+        with tenant_transaction(isolation_probe, context_b) as cursor:
+            cursor.execute("SELECT id FROM attune.deletion_requests")
+            assert cursor.fetchall() == []
+        b_request = requests.request(
+            context_b, principal_id=principal_b, session_id=session_b
+        )
+        with tenant_transaction(isolation_probe, context_b) as cursor:
+            cursor.execute("SELECT id FROM attune.deletion_requests")
+            assert cursor.fetchall() == [(b_request.id,)]
+    finally:
+        isolation_probe.close()
+
+    cancelled = requests.cancel(context_a, principal_id=principal_a, session_id=session_a)
+    assert cancelled.cancelled is True
+    assert cancelled.status == "cancelled"
+    already = requests.cancel(context_a, principal_id=principal_a, session_id=session_a)
+    assert already.cancelled is False
+    assert already.status == "cancelled"
+
+    # Only the SECURITY DEFINER functions may mutate the table; the ordinary
+    # control-plane role has SELECT only.
+    control = control_factory()
+    try:
+        with control.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('attune.tenant_id', %s, true)", (str(tenant_a),)
+            )
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "UPDATE attune.deletion_requests SET status = 'completed'"
+                )
+        control.rollback()
+    finally:
+        control.close()
+
+    # A stale (non-recent) session is refused even for an otherwise-valid
+    # cancel/request call.
+    with tenant_transaction(initialized_database, context_b) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions "
+            "SET created_at = clock_timestamp() - interval '11 minutes' "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant_b, session_b),
+        )
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        requests.cancel(context_b, principal_id=principal_b, session_id=session_b)
+
+
+def test_claim_tenant_deletion_is_one_use_and_resumable(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    tenant_c, principal_c, session_c = uuid4(), uuid4(), uuid4()
+    _reset_role(initialized_database)
+    _seed_deletion_owner(initialized_database, tenant_c, principal_c, session_c)
+
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    requests = PostgresTenantDeletionRequests(control_factory)
+    context_c = TenantContext(tenant_c)
+    requested = requests.request(
+        context_c, principal_id=principal_c, session_id=session_c
+    )
+
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "UPDATE attune.deletion_requests SET grace_expires_at = clock_timestamp() "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant_c, requested.id),
+        )
+    initialized_database.commit()
+
+    deletion = _role_connection_factory(database_url, ROLE_BINDINGS["attune_deletion"])()
+    try:
+        run_1 = uuid4()
+        with deletion.cursor() as cursor:
+            cursor.execute("SELECT * FROM attune.claim_tenant_deletion(%s)", (run_1,))
+            claimed = cursor.fetchone()
+        deletion.commit()
+        assert claimed[0] == tenant_c
+        assert claimed[3] == run_1
+        assert claimed[4] is False
+
+        # A second, fresh run id does not steal or duplicate the claim: the
+        # already-claimed row resumes with its ORIGINAL run id.
+        run_2 = uuid4()
+        with deletion.cursor() as cursor:
+            cursor.execute("SELECT * FROM attune.claim_tenant_deletion(%s)", (run_2,))
+            resumed = cursor.fetchone()
+        deletion.commit()
+        assert resumed[0] == tenant_c
+        assert resumed[3] == run_1
+        assert resumed[4] is True
+
+        # Erasing with the wrong (unclaimed) run id is refused.
+        with deletion.cursor() as cursor:
+            with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
+                cursor.execute(
+                    "SELECT attune.erase_tenant_deletion_relation(%s, %s, %s, %s, %s)",
+                    (run_2, uuid4(), tenant_c, "memories", 500),
+                )
+        deletion.rollback()
+
+        with deletion.cursor() as cursor:
+            cursor.execute(
+                "SELECT attune.erase_tenant_deletion_relation(%s, %s, %s, %s, %s)",
+                (run_1, uuid4(), tenant_c, "memories", 500),
+            )
+            assert cursor.fetchone() == (0,)
+        deletion.commit()
+
+        with deletion.cursor() as cursor:
+            cursor.execute(
+                "SELECT attune.complete_tenant_deletion(%s, %s, %s)",
+                (run_1, uuid4(), tenant_c),
+            )
+            assert cursor.fetchone() == ("completed",)
+        deletion.commit()
+
+        with deletion.cursor() as cursor:
+            with pytest.raises(psycopg.errors.NoDataFound):
+                cursor.execute(
+                    "SELECT attune.complete_tenant_deletion(%s, %s, %s)",
+                    (run_1, uuid4(), tenant_c),
+                )
+        deletion.rollback()
+    finally:
+        deletion.close()
+
+
+def test_tenant_deletion_end_to_end_erases_one_tenant_and_isolates_the_other(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    tenant_a, principal_a, session_a = uuid4(), uuid4(), uuid4()
+    tenant_b, principal_b, session_b = uuid4(), uuid4(), uuid4()
+    _reset_role(initialized_database)
+    _seed_deletion_owner(initialized_database, tenant_a, principal_a, session_a)
+    _seed_deletion_owner(initialized_database, tenant_b, principal_b, session_b)
+
+    memory_a, memory_b = uuid4(), uuid4()
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO attune.memories
+                (tenant_id, id, principal_id, content, provenance,
+                 source_class, confidence)
+            VALUES (%s, %s, %s, 'tenant a secret', '{}', 'user_taught', 1),
+                   (%s, %s, %s, 'tenant b secret', '{}', 'user_taught', 1)
+            """,
+            (tenant_a, memory_a, principal_a, tenant_b, memory_b, principal_b),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.memory_embeddings
+                (tenant_id, memory_id, model, dimensions, embedding)
+            VALUES (%s, %s, 'test', 3, '[1,0,0]'), (%s, %s, 'test', 3, '[1,0,0]')
+            """,
+            (tenant_a, memory_a, tenant_b, memory_b),
+        )
+    initialized_database.commit()
+
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    requests = PostgresTenantDeletionRequests(control_factory)
+    requested = requests.request(
+        TenantContext(tenant_a), principal_id=principal_a, session_id=session_a
+    )
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "UPDATE attune.deletion_requests SET grace_expires_at = clock_timestamp() "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant_a, requested.id),
+        )
+    initialized_database.commit()
+
+    deletion = _role_connection_factory(database_url, ROLE_BINDINGS["attune_deletion"])()
+    try:
+        run_id = uuid4()
+        with deletion.cursor() as cursor:
+            cursor.execute("SELECT * FROM attune.claim_tenant_deletion(%s)", (run_id,))
+            claimed = cursor.fetchone()
+        deletion.commit()
+        assert claimed[0] == tenant_a
+
+        # Mirror tenant_deletion_executor.run_tenant_deletion_once's own
+        # foreign-key deferral loop: the registry does not hand-order
+        # relations, so a relation whose dependents have not been erased yet
+        # is retried after a later pass clears them.
+        pending = list(erasable_relations_in_order())
+        for _pass in range(len(pending) + 1):
+            if not pending:
+                break
+            next_pending = []
+            for relation in pending:
+                try:
+                    with deletion.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT attune.erase_tenant_deletion_relation("
+                            "%s, %s, %s, %s, %s)",
+                            (run_id, uuid4(), tenant_a, relation, 500),
+                        )
+                        cursor.fetchone()
+                    deletion.commit()
+                except psycopg.errors.ForeignKeyViolation:
+                    deletion.rollback()
+                    next_pending.append(relation)
+            pending = next_pending
+        assert pending == []
+
+        with deletion.cursor() as cursor:
+            cursor.execute(
+                "SELECT attune.complete_tenant_deletion(%s, %s, %s)",
+                (run_id, uuid4(), tenant_a),
+            )
+            assert cursor.fetchone() == ("completed",)
+        deletion.commit()
+    finally:
+        deletion.close()
+
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "SELECT status FROM attune.tenants WHERE id IN (%s, %s) ORDER BY id",
+            (tenant_a, tenant_b) if tenant_a < tenant_b else (tenant_b, tenant_a),
+        )
+        statuses = dict(
+            zip(
+                sorted([tenant_a, tenant_b]),
+                (row[0] for row in cursor.fetchall()),
+            )
+        )
+        assert statuses[tenant_a] == "deleted"
+        assert statuses[tenant_b] == "active"
+
+        cursor.execute(
+            "SELECT status FROM attune.principals WHERE tenant_id = %s", (tenant_a,)
+        )
+        assert cursor.fetchone() == ("deleted",)
+
+        cursor.execute(
+            "SELECT count(*) FROM attune.memories WHERE tenant_id = %s", (tenant_a,)
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT content FROM attune.memories WHERE tenant_id = %s", (tenant_b,)
+        )
+        assert cursor.fetchone() == ("tenant b secret",)
+
+        # The content-free deletion evidence survives the tenant's own
+        # content erasure -- audit_intents rows are never a target of the
+        # walk (SECURITY_AUDIT/DEIDENTIFY is not an erase rule) -- proof the
+        # ceremony happened, not just that content is gone.
+        cursor.execute(
+            "SELECT count(*) FROM attune.audit_intents WHERE tenant_id = %s "
+            "AND action = 'hosted.deletion.relation.erased'",
+            (tenant_a,),
+        )
+        assert cursor.fetchone()[0] >= len(erasable_relations_in_order())
+        cursor.execute(
+            "SELECT status FROM attune.deletion_requests WHERE tenant_id = %s "
+            "AND id = %s",
+            (tenant_a, requested.id),
+        )
+        assert cursor.fetchone() == ("completed",)
+    initialized_database.commit()
+
+
+def test_content_retention_prunes_only_out_of_window_conversations(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    tenant_id, principal_id, installation_id = uuid4(), uuid4(), uuid4()
+    stale_conversation, fresh_conversation = uuid4(), uuid4()
+    _reset_role(initialized_database)
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) VALUES (%s, %s, 'test')",
+            (tenant_id, "tn-" + tenant_id.hex),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test')
+            """,
+            (tenant_id, principal_id, hashlib.sha256(tenant_id.bytes).digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.installations
+                (tenant_id, id, provider, kind, external_ref_hash)
+            VALUES (%s, %s, 'google', 'workspace', %s)
+            """,
+            (tenant_id, installation_id, hashlib.sha256(tenant_id.bytes).digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.conversations
+                (tenant_id, id, principal_id, installation_id, surface,
+                 external_ref_hash, created_at)
+            VALUES
+                (%s, %s, %s, %s, 'web', %s,
+                 clock_timestamp() - interval '40 days'),
+                (%s, %s, %s, %s, 'web', %s,
+                 clock_timestamp() - interval '40 days')
+            """,
+            (
+                tenant_id, stale_conversation, principal_id, installation_id,
+                hashlib.sha256(b"stale-conversation").digest(),
+                tenant_id, fresh_conversation, principal_id, installation_id,
+                hashlib.sha256(b"fresh-conversation").digest(),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.conversation_turns
+                (tenant_id, conversation_id, sequence, actor_type, content,
+                 created_at)
+            VALUES
+                (%s, %s, 1, 'user', 'stale turn',
+                 clock_timestamp() - interval '40 days'),
+                (%s, %s, 1, 'user', 'fresh turn',
+                 clock_timestamp() - interval '1 day')
+            """,
+            (tenant_id, stale_conversation, tenant_id, fresh_conversation),
+        )
+    initialized_database.commit()
+
+    content_retention = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_content_retention"]
+    )()
+    try:
+        with content_retention.cursor() as cursor:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute("SELECT sequence FROM attune.conversation_turns")
+        content_retention.rollback()
+        with content_retention.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.prune_expired_customer_content(%s, %s)",
+                (uuid4(), 500),
+            )
+            counts = cursor.fetchone()
+        content_retention.commit()
+        assert counts[0] >= 1
+        assert counts[1] >= 1
+    finally:
+        content_retention.close()
+
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "SELECT id FROM attune.conversations WHERE tenant_id = %s "
+            "AND id IN (%s, %s) ORDER BY id",
+            (tenant_id, stale_conversation, fresh_conversation),
+        )
+        assert cursor.fetchall() == [(fresh_conversation,)]
+        cursor.execute(
+            "SELECT content FROM attune.conversation_turns WHERE tenant_id = %s",
+            (tenant_id,),
+        )
+        assert cursor.fetchall() == [("fresh turn",)]
+        cursor.execute(
+            "SELECT producer_kind, action, metadata FROM attune.audit_intents "
+            "WHERE tenant_id = %s "
+            "AND action = 'content_retention.conversation_turns.pruned'",
+            (tenant_id,),
+        )
+        audit = cursor.fetchone()
+        assert audit[0:2] == (
+            "content_retention",
+            "content_retention.conversation_turns.pruned",
+        )
+        assert audit[2]["records"] >= 1
+    initialized_database.commit()

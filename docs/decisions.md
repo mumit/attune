@@ -2196,3 +2196,129 @@ implemented and tested, not deployed. Full design record:
   confirmed live, a live provisioning-then-sign-in probe, and abuse
   monitoring folded into whatever the operator already watches for the
   other onboarding ceremonies. None of that is claimed done by this entry.
+
+## 2026-07-19 — Customer content retention and owner-initiated tenant deletion (Phase 6 "hosted operations", G19, hosted review gap #4)
+
+Migration 0046 adds a bounded content-retention executor and an
+owner-initiated, right-to-be-forgotten tenant deletion ceremony. Full design
+is in `docs/data-lifecycle.md`'s "Content retention and tenant deletion
+design" section; this entry records the choices and their rationale.
+
+- **Content-retention window: the contract's own 30 days, not invented.**
+  "Conversation turns and derived summaries: 30 days after last activity" is
+  already fixed in `docs/data-lifecycle.md`'s policy table. This slice
+  interprets "last activity" at the conversation level (a conversation with
+  any turn inside the window keeps every one of its older turns) and applies
+  the same window to `hosted_brief_deliveries` as the same contract row's
+  "derived summaries". The owner-selectable 1–365 day range the contract
+  also mentions is not implemented yet -- the executor always uses the fixed
+  default until a per-tenant override column and product surface exist.
+  `memories`/`memory_embeddings` and `importance_signals`/`attention_items`
+  are untouched, per the contract's "until the owner deletes it" language
+  for memory and the existing self-bounding write-time prune already
+  documented for the other two.
+- **Deletion grace period: 14 days, chosen.** The contract does not fix a
+  ceremony grace length. 14 days is long enough for an owner acting under
+  stress to notice and cancel (roughly double a common 7-day comparable),
+  short enough that "right to be forgotten" is not indefinitely deferred.
+  It is a database constant in migration 0046, not an `ATTUNE_*` variable --
+  changing it is a reviewed migration, the same "operator-configurable via
+  infrastructure, not env sprawl" posture the content-retention window
+  above uses, and the same "policy migration" bar
+  `docs/data-lifecycle.md`'s "Initial operated-service policy" section
+  already sets for any default change.
+- **Registry-driven, never hand-listed -- and tested as such.** The
+  executor (`tenant_deletion_executor.erasable_relations_in_order`) reads
+  `attune.hosted.data_lifecycle.RELATIONAL_ASSETS` on every call and raises
+  if it encounters a DataClass/DeletionRule combination it does not
+  recognize, rather than silently omitting the relation. `test_tenant_deletion_executor.py`
+  pins this by monkeypatching the registry with a fake relation twice: once
+  with a recognized ERASE rule (asserted present in the walk) and once with
+  an unrecognized combination (asserted to raise, naming the relation). The
+  database function's own relation-name allowlist
+  (`erase_tenant_deletion_relation`) is a defense-in-depth identifier check
+  for the dynamic SQL beneath it, not a second policy surface -- the
+  registry is the only place "which relations get erased" is decided.
+- **`tenants`/`principals` are a status flip, not a physical delete, within
+  the same ERASE rule.** Both tables already had `'deleted'` as a legal
+  `status` value since migration 0001 -- unused until now. Physically
+  deleting either row would break every surviving tenant-scoped foreign key,
+  including the deletion ledger itself (see below); flipping status does
+  not, and neither column retains reversible content once terminal
+  (`subject_hash`/`issuer` are already opaque hashes, `slug` is generated).
+  They are processed last in the walk so a crash never leaves a tenant
+  marked terminal while content still exists elsewhere.
+- **`deletion_requests` is tenant-scoped and RLS-forced, not the
+  restore-suppression ledger.** It is classified `DataClass.DELETION_LEDGER`
+  / `DeletionRule.RETAIN_TOMBSTONE` -- the same triple as the existing
+  `deletion_markers` -- specifically so it is never a target of its own
+  tenant's erase walk and can prove the ceremony happened after content is
+  gone. This is deliberately *not* the independent, cross-tenant
+  restore-suppression ledger `docs/data-lifecycle.md`'s "Account deletion
+  and restore suppression" section already describes (that ledger stays
+  unbuilt; it needs its own memberless owner and append-only rules outside
+  the deletable tenant graph entirely). `deletion_requests` is this
+  tenant's own principal-facing ceremony evidence, not a security-audit
+  authority.
+- **What the hash-chained audit retains.** `audit_heads`/`audit_events`/
+  `audit_intents` (`DataClass.SECURITY_AUDIT` / `DeletionRule.DEIDENTIFY`)
+  are never touched by the walk. They already hold only hashed
+  actor/action/outcome metadata by construction -- every audit intent in
+  this codebase has always been written content-free -- so there is no
+  further field to strip at deletion time, and `audit_events`' append-only
+  triggers would refuse an `UPDATE`/`DELETE` regardless. Deletion of content
+  is not deletion of the audit trail: every `deletion.*` and
+  `content_retention.*` intent recorded during the walk itself survives,
+  same as every other tenant's audit history.
+- **Foreign-key order is discovered, not hand-derived.** Rather than
+  encoding the ~36-relation dependency graph, the executor attempts every
+  pending relation each pass, defers one that fails with SQLSTATE `23503`
+  (foreign-key violation, detected the same way under psycopg or pg8000) to
+  the next pass, and fails closed with a fixed `executor_ambiguous` reason if
+  a full pass makes no progress at all -- a genuine, unresolvable cycle,
+  not a silently-skipped relation.
+- **Resumable by construction, not by special-casing.** A crash leaves the
+  request `claimed` with its original `claim_run_id`; the next invocation's
+  `claim_tenant_deletion` call finds that same row and returns the *same*
+  run id rather than minting a new one, so the whole walk can safely repeat
+  from the top -- every per-relation erase call is independently idempotent
+  (a relation already at zero rows for the tenant just returns zero).
+- **Ambiguity handling mirrors `docs/reconciliation.md`'s posture exactly.**
+  A caught, non-foreign-key error (or an exhausted pass budget) calls
+  `attune.fail_tenant_deletion` with one of four fixed, content-free reason
+  codes (`pre_effect_audit`, `executor_ambiguous`, `post_effect_audit`,
+  `completion_unconfirmed` -- deliberately the same shape as
+  `job_reconciliations`' own four intake reasons) and leaves the tenant in
+  `deleting` as a stop signal. It is not auto-retried; only a bare process
+  crash (nothing raised, nothing to catch) resumes automatically via the
+  claim path's resume branch. Resolving a genuinely `failed` request is
+  explicit future operator work, matching reconciliation's own
+  "remaining gate" language.
+- **Connector revocation reuses the existing broker path, best-effort.**
+  Before the generic crypto-erase `DELETE` on `connector_credentials`, the
+  executor calls the *same* `GoogleConnectorRevocation.disconnect` service
+  `DELETE /v1/connectors/google` already uses, for the tenant's owner
+  principal, and tolerates its failure -- the row deletion that follows
+  destroys the wrapped key and ciphertext regardless, which alone satisfies
+  cryptographic erasure. A live Slack/Google Chat channel-credential
+  upstream revocation call is not implemented in this slice (stated as
+  out of scope below), consistent with the contract's "Attune deletion does
+  not delete source mail, events, or channel messages unless a separate
+  explicit provider action is approved."
+- **Gates: `ATTUNE_ENABLE_CONTENT_RETENTION` and
+  `ATTUNE_HOSTED_DELETION_ENABLED`, both default off.** The control-plane
+  deletion routes are unregistered (plain 404, not merely 401) when the gate
+  is off, the same "absent from the routing table" pin every other
+  default-off ceremony in this codebase uses. The sign-in page's "Delete
+  account" affordance is shown optimistically after sign-in and hides
+  itself the moment its own status route responds 404 -- the same
+  pre-signal-free approach hosted signup's button already uses for its own
+  gate. Both executors' job entry points independently refuse to open a
+  database connection at all when their gate is off.
+- **What activation still requires:** migration 0046 applied plus a passing
+  boundary verifier (both done in this change against a real PostgreSQL
+  instance); the paused-first authenticated-scheduler-path, paging,
+  IAM-isolation, and empty-plan evidence the protocol-retention executor
+  already passed, repeated for both new executors; their Cloud Run jobs are
+  not yet deployed; and the independent, cross-tenant restore-suppression
+  ledger remains unbuilt. None of that is claimed done by this entry.

@@ -116,6 +116,14 @@ class CustomerExports(Protocol):
     def authorize_download(self, context, **kwargs): ...
 
 
+class TenantDeletion(Protocol):
+    def request(self, context, **kwargs): ...
+
+    def cancel(self, context, **kwargs): ...
+
+    def status(self, context, **kwargs): ...
+
+
 class WebConversation(Protocol):
     def send(self, context, **kwargs): ...
 
@@ -158,6 +166,8 @@ def create_app(
     slack_client_id: str | None = None,
     customer_exports_enabled: bool = False,
     customer_exports: CustomerExports | None = None,
+    hosted_deletion_enabled: bool = False,
+    hosted_deletion: TenantDeletion | None = None,
     hosted_web_conversation_enabled: bool = False,
     web_conversation: WebConversation | None = None,
     hosted_brief_enabled: bool = False,
@@ -248,6 +258,10 @@ def create_app(
     ):
         raise ValueError(
             "enabled customer exports require identity and an export service"
+        )
+    if hosted_deletion_enabled and (not identity_enabled or hosted_deletion is None):
+        raise ValueError(
+            "enabled hosted deletion requires identity and an audited service"
         )
     if hosted_web_conversation_enabled and (
         not identity_enabled or web_conversation is None
@@ -885,6 +899,110 @@ def create_app(
                     }
                 ), 201
 
+        if hosted_deletion_enabled:
+
+            @app.get("/v1/account/deletion-request")
+            def read_tenant_deletion_request():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    state = hosted_deletion.status(  # type: ignore[union-attr]
+                        session.context, principal_id=session.principal_id
+                    )
+                except Exception:
+                    return jsonify({"error": "deletion_unavailable"}), 503
+                return jsonify(_public_deletion_request(state))
+
+            @app.post("/v1/account/deletion-requests")
+            def request_tenant_deletion_route():
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if not isinstance(payload, dict) or payload != {
+                    "confirmation": "delete my account"
+                }:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify(
+                            {"error": "recent_authentication_required"}
+                        ), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    result = hosted_deletion.request(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                    )
+                except Exception:
+                    return jsonify({"error": "deletion_unavailable"}), 503
+                return (
+                    jsonify(
+                        {
+                            "schema_version": 1,
+                            "deletion_request": {
+                                "id": str(result.id),
+                                "status": result.status,
+                                "requested_at": result.requested_at.isoformat(),
+                                "grace_expires_at": (
+                                    result.grace_expires_at.isoformat()
+                                ),
+                            },
+                        }
+                    ),
+                    201 if result.created else 200,
+                )
+
+            @app.delete("/v1/account/deletion-requests")
+            def cancel_tenant_deletion_route():
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if not isinstance(payload, dict) or payload != {
+                    "confirmation": "cancel deletion"
+                }:
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request,
+                    expected_origin,
+                    sessions,  # type: ignore[arg-type]
+                    recent=True,
+                )
+                if session is None:
+                    current = _authorize_mutation(
+                        request,
+                        expected_origin,
+                        sessions,  # type: ignore[arg-type]
+                    )
+                    if current is not None:
+                        return jsonify(
+                            {"error": "recent_authentication_required"}
+                        ), 409
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    result = hosted_deletion.cancel(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                    )
+                except Exception:
+                    return jsonify({"error": "deletion_unavailable"}), 503
+                if not result.cancelled:
+                    return jsonify({"error": "deletion_not_cancellable"}), 409
+                return jsonify({"schema_version": 1, "status": result.status})
+
         if hosted_web_conversation_enabled:
 
             @app.post("/v1/conversation/messages")
@@ -1496,6 +1614,30 @@ def _public_channels(preferences, status: str) -> dict:
             {"id": "slack", "label": "Slack"},
         ],
         "installation": "required",
+    }
+
+
+def _public_deletion_request(item) -> dict:
+    if item is None:
+        return {"schema_version": 1, "status": "none"}
+    (
+        request_id,
+        status,
+        requested_at,
+        grace_expires_at,
+        cancelled_at,
+        completed_at,
+        failure_code,
+    ) = item
+    return {
+        "schema_version": 1,
+        "id": str(request_id),
+        "status": status,
+        "requested_at": requested_at.isoformat(),
+        "grace_expires_at": grace_expires_at.isoformat(),
+        "cancelled_at": cancelled_at.isoformat() if cancelled_at else None,
+        "completed_at": completed_at.isoformat() if completed_at else None,
+        "failure_code": failure_code,
     }
 
 

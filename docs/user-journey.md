@@ -389,6 +389,40 @@ ATTUNE_INTERACTION_CHANNELS=slack,google_chat
 Delivery routes remain independent. Briefs can go to both channels while
 approvals use one channel, avoiding duplicate decisions.
 
+## 6. Delete your Attune account
+
+This ceremony is dormant behind `ATTUNE_HOSTED_DELETION_ENABLED` until its own
+development activation evidence is recorded; the affordance below only
+appears once that gate and the owner's own sign-in gate are both on.
+
+1. From the signed-in page, choose **Delete account** and confirm the
+   destructive dialog. Attune requires the same recent-session bar as
+   disconnecting Google Workspace; a session older than ten minutes is asked
+   to sign out and sign back in before the confirmation succeeds. The
+   browser sends only a fixed confirmation phrase, never a tenant,
+   principal, or account identifier.
+2. Attune records a durable deletion request and shows its status: pending,
+   with the date deletion will proceed automatically. Nothing is erased yet.
+3. At any point before that date, choose **Cancel deletion** (same recent
+   session bar) to keep the account exactly as it was. Once the grace period
+   elapses and the executor claims the request, cancellation is no longer
+   offered — the erasure walk may already be under way.
+4. After the grace period, a bounded background executor erases every
+   Attune-held customer-content and account row for the tenant, revokes the
+   Google Workspace connector through the same broker path **Disconnect
+   Google Workspace** uses, and cryptographically erases the connector
+   credential regardless of whether that upstream call succeeds. The
+   account and every active session become permanently unusable.
+5. This does not delete Google or Slack source data — mail, calendar events,
+   or channel messages Attune never retained are not Attune's to delete. It
+   also does not remove any upstream Google OAuth grant; removing that
+   separately still requires the Google Account's own third-party
+   connections page, exactly as Workspace disconnect already documents.
+6. The security audit trail is not part of what gets deleted: Attune's
+   hash-chained record that the ceremony happened (content-free by
+   construction) survives the account it describes, the same as any other
+   tenant's audit history.
+
 ## What the natural-language layer can do
 
 | Request | Behavior |
