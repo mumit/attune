@@ -115,10 +115,21 @@ are verified. Its failure and backlog incidents now page through the verified
 development channel. A separate, non-database scheduler identity now invokes
 only that job; its daily development schedule was activated after paused-first
 authenticated-path, paging, verifier, IAM, and convergence evidence. New
-environments remain paused by default. Customer content retention and controls
-are not active yet. Export/deletion, support repair, customer-visible audit,
-adversarial assurance, and external security review remain later independent
-slices.
+environments remain paused by default. Customer content retention and an
+owner-initiated tenant deletion ceremony are now designed and implemented
+(migration 0046; see `docs/data-lifecycle.md`'s "Content retention and
+tenant deletion design" section and the matching decisions.md entry) but not
+yet active: both remain behind independent default-off gates
+(`ATTUNE_ENABLE_CONTENT_RETENTION`, `ATTUNE_HOSTED_DELETION_ENABLED`), a
+registry-driven executor walks every classified relation for the
+right-to-be-forgotten path behind a 14-day grace period, and the gated
+real-PostgreSQL suite proves per-tenant isolation, RLS, one-use claims, and
+an end-to-end multi-tenant deletion -- but neither executor's Cloud Run job
+is deployed yet, neither has passed the paused-first activation ceremony the
+protocol-retention executor already did, and the independent cross-tenant
+restore-suppression ledger this design depends on for backup/PITR recovery
+remains unbuilt. Support repair, customer-visible audit, adversarial
+assurance, and external security review remain later independent slices.
 
 The Slack half of the channel-installation design is now implemented and
 tested but not deployed: migration 0038 adds the one-use OAuth-state claim
