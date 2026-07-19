@@ -278,6 +278,45 @@ admission/approval-decision steps themselves (distinct from the job's own
 claim/execute audit, which is unchanged) are genuine remaining gates before
 this capability's activation gate can pass.
 
+Stage 4 of the same effort — the hosted proactive brief job
+(`docs/future-state.md` Phase 5 item 4; `docs/gap-analysis.md` G12), closing
+out Phase 5 — is implemented and tested behind a default-off gate,
+`ATTUNE_ENABLE_HOSTED_BRIEF`, and not deployed. The worker executor
+(`channel.brief.deliver`) assembles a proactive "what matters now" spine by
+importing `brief.build_spine` directly (the exact pure ranking/rendering
+function local triage and briefs already use, renamed from a private helper
+with no logic change), fed by bounded Gmail/Calendar reads through the
+existing secret-broker routes and stage 1's tenant-scoped
+`PostgresImportanceProfile`/`PostgresAttentionStore` (the attention store is
+empty in production today — no executor writes to it yet — the seam is
+wired regardless, matching stage 1's own documented posture). A new
+migration (0044) adds `attune.hosted_brief_deliveries`, keyed
+`(tenant_id, job_id, destination_id)` so one job can fan out to every ACTIVE
+destination whose stored preference includes briefs, and Google Chat/Slack
+delivery claim/complete function pairs mirroring the existing conversation-
+reply delivery functions exactly, except sourcing rendered brief text from
+this new table (never a live worker parameter) and matching
+`brief_channels` rather than `interaction_channels`. An owner-facing
+control-plane route, `POST /v1/brief/run`, requires the same ordinary
+session/CSRF bar as `POST /v1/conversation/messages` (not the destructive-
+ceremony recency gate) and is idempotent per tenant per principal per UTC
+hour by construction (the dispatch idempotency key folds in the current
+hour) — recurring scheduling without an owner click remains future operator
+work, mirroring the retention job's own separate-scheduler-identity
+pattern. The draft-and-approve capability's approve/reject decisions now
+also record an importance signal (keyed on the hashed thread reference,
+since no Gmail read in that flow ever resolves a real sender) and a raw
+action-signal hosted-memory write when the memory gate is on, closing the
+signal-capture loop stage 3 left open; a pre-existing gap in
+`build_turn_provenance` (a draft-capability provenance key it should have
+allowed since stage 3, never caught because no stage-3 test exercised the
+real repository) was fixed alongside it. Hosted nudges and hygiene-action
+proposals (the local product's Phase 3 breadth) remain explicitly out of
+scope for this phase — Phase 5's brief/nudge item closes with briefs only.
+The dated design record, including what was and wasn't reused from
+`brief.py`, is in [`decisions.md`](decisions.md); the delivery flow and its
+gates are also described in [`hosted-channels.md`](hosted-channels.md).
+
 ## Later
 
 - richer calendar negotiation and follow-up workflows

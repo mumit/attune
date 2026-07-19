@@ -6,6 +6,14 @@ import os
 
 from .audit import PostgresAuditProducerRepository
 from .audit_client import AuditWriterClient
+from .brief_delivery import HostedBriefExecutor, PostgresHostedBriefRepository
+from .channel_broker import decode_channel_reference_key
+from .intelligence import (
+    IntelligenceReferenceHasher,
+    PostgresAttentionStore,
+    PostgresImportanceProfile,
+    PostgresImportanceSignalCapture,
+)
 from .capability_admission import (
     CapabilityAdmissionProducer,
     PostgresCapabilityAdmissionRepository,
@@ -46,6 +54,28 @@ from .worker_audit import WorkerAudit, WorkerMemoryAudit
 from .worker_dispatch import WorkerDispatcher
 from .worker_routes import registered_routes
 from .worker_service import create_app
+
+
+def _secret(secret_resource: str) -> bytes:
+    from google.cloud import secretmanager
+
+    response = secretmanager.SecretManagerServiceClient().access_secret_version(
+        request={"name": f"{secret_resource}/versions/latest"}
+    )
+    return response.payload.data
+
+
+def _intelligence_reference_hasher() -> IntelligenceReferenceHasher:
+    """Reuses the channel broker's own base64 HMAC-key decoder (a plain
+    utility, not Google-Chat-specific) for the separate, domain-separated
+    intelligence reference key (docs/future-state.md Phase 5 item 1's
+    stage-1 note: "no HMAC key is provisioned outside tests" -- signal
+    capture and the hosted brief job are this key's first production
+    consumers, Phase 5 stage 4)."""
+    key = decode_channel_reference_key(
+        _secret(os.environ["ATTUNE_INTELLIGENCE_HMAC_SECRET"])
+    )
+    return IntelligenceReferenceHasher(key)
 
 
 def create_production_app():
@@ -93,6 +123,7 @@ def create_production_app():
     google_gmail_draft_create = None
     capability_gateway = None
     capability_admissions = None
+    importance_signals = None
     draft_capability_enabled = os.environ.get(
         "ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY", "false"
     )
@@ -128,6 +159,12 @@ def create_production_app():
                 os.environ["ATTUNE_DISPATCH_BROKER_URL"],
                 os.environ["ATTUNE_DISPATCH_BROKER_AUDIENCE"],
             ),
+        )
+        # Signal capture closes the loop (Phase 5 stage 4, G12): an
+        # approve/reject decision on this capability now feeds stage 1's
+        # importance profile, keyed on the hashed thread reference.
+        importance_signals = PostgresImportanceSignalCapture(
+            iam_connection, _intelligence_reference_hasher(),
         )
 
     hosted_memory_enabled = os.environ.get("ATTUNE_ENABLE_HOSTED_MEMORY", "false")
@@ -225,7 +262,41 @@ def create_production_app():
             memory_audit=memory_audit,
             capability_gateway=capability_gateway,
             capability_admissions=capability_admissions,
+            importance_signals=importance_signals,
         )
+
+    hosted_brief = None
+    hosted_brief_enabled = os.environ.get("ATTUNE_ENABLE_HOSTED_BRIEF", "false")
+    if hosted_brief_enabled not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_HOSTED_BRIEF must be true or false")
+    if hosted_brief_enabled == "true":
+        brief_hasher = _intelligence_reference_hasher()
+        hosted_brief = HostedBriefExecutor(
+            PostgresHostedBriefRepository(iam_connection),
+            PostgresCredentialIntentRepository(
+                iam_connection, producer_kind="worker",
+            ),
+            SecretBrokerClient(
+                os.environ["ATTUNE_SECRET_BROKER_URL"],
+                os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
+            ),
+            ChannelBrokerClient(
+                os.environ["ATTUNE_CHANNEL_BROKER_URL"],
+                os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
+            ),
+            lambda context, principal_id: PostgresImportanceProfile(
+                iam_connection, context, principal_id, reference_hasher=brief_hasher,
+            ),
+            lambda context, principal_id: PostgresAttentionStore(
+                iam_connection, context, principal_id, reference_hasher=brief_hasher,
+            ),
+            timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
+            audit=WorkerMemoryAudit(
+                PostgresAuditProducerRepository(iam_connection, producer_kind="worker"),
+                AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
+            ),
+        )
+
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),
         audit=audit,
@@ -237,6 +308,7 @@ def create_production_app():
             google_chat_conversation=google_chat_conversation,
             slack_conversation=slack_conversation,
             web_conversation=web_conversation,
+            hosted_brief=hosted_brief,
         ),
         expected_audience=os.environ["ATTUNE_EXPECTED_AUDIENCE"],
         expected_service_account=os.environ[

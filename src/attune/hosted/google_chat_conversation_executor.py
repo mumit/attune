@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from contextlib import closing
 from dataclasses import dataclass
@@ -12,13 +13,17 @@ from typing import Callable, Protocol, Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..memory.signals import ActionSignal
 from .capability_gateway import CapabilityDenied
 from .durable import HostedTurn
+from .intelligence import ImportanceSignalRecorder
 from .model_gateway_client import ModelGatewayClient
 from .repositories import ConnectionFactory, HostedJob, HostedMemory
 from .secret_broker_client import SecretBrokerClient
 from .tenant import TenantContext, tenant_transaction
 from .vault import CredentialIntent, PostgresCredentialIntentRepository
+
+LOG = logging.getLogger(__name__)
 
 PURPOSE = "channel.google_chat.converse"
 CAPABILITY = "assistant.conversation.read"
@@ -356,6 +361,7 @@ class GoogleChatConversationExecutor:
         memory_audit: MemoryAuditSink | None = None,
         capability_gateway: DraftCapabilityGateway | None = None,
         capability_admissions: DraftCapabilityAdmissions | None = None,
+        importance_signals: ImportanceSignalRecorder | None = None,
     ):
         self._work = work
         self._intents = intents
@@ -364,6 +370,7 @@ class GoogleChatConversationExecutor:
         self._replies = replies
         self._capability_gateway = capability_gateway
         self._capability_admissions = capability_admissions
+        self._importance_signals = importance_signals
         self._reply_method = reply_method
         self._intent_key_prefix = intent_key_prefix
         self._memory = memory
@@ -568,7 +575,15 @@ class GoogleChatConversationExecutor:
             "Reply “approve draft” to create it in Gmail, or "
             "“reject draft” to discard it."
         )
-        return answer, {"pending_draft_approval_id": str(recorded.approval_id)}
+        return answer, {
+            "pending_draft_approval_id": str(recorded.approval_id),
+            # Phase 5 stage 4 (G12) -- the only sender-shaped reference
+            # available anywhere in this flow (no Gmail read ever resolves
+            # the thread's real counterpart); carried the same way
+            # ``pending_forget_memory_id`` carries turn-scoped state, so
+            # ``_draft_decide`` can capture a signal without a second lookup.
+            "pending_draft_thread_ref": thread_ref,
+        }
 
     def _draft_decide(
         self, context: TenantContext, authority, decision: str,
@@ -584,6 +599,7 @@ class GoogleChatConversationExecutor:
         if approval_id is None:
             verb = "approve" if decision == "approve" else "reject"
             return f"There's no pending draft to {verb}.", {}
+        thread_ref = previous_provenance.get("pending_draft_thread_ref")
         try:
             status = self._capability_admissions.decide(
                 context, approval_id=approval_id,
@@ -597,10 +613,74 @@ class GoogleChatConversationExecutor:
                 {},
             )
         if status == "rejected":
+            self._capture_draft_signal(
+                context, authority, thread_ref, ActionSignal.REJECTED,
+            )
             return "Okay, I discarded that draft.", {}
         if status == "consumed":
+            self._capture_draft_signal(
+                context, authority, thread_ref, ActionSignal.APPROVED,
+            )
             return "Approved — I'm creating that draft in Gmail now.", {}
         return "That draft approval is no longer available.", {}
+
+    def _capture_draft_signal(
+        self, context: TenantContext, authority, thread_ref: object, signal: ActionSignal,
+    ) -> None:
+        """Signal capture closes the loop (Phase 5 stage 4, ``docs/future-
+        state.md`` Phase 5 item 4; G12): an approve/reject decision on the
+        draft capability is ENGAGEMENT with the thread's counterpart -- the
+        same rule ``orchestrator/draft_approve.py``'s ``capture`` node
+        states for local ``DRAFT_REPLY``/``FOLLOW_UP`` approvals, and
+        deliberately NOT the hygiene-action exception that rule also
+        documents: there is no hosted hygiene action (LABEL/DECLINE_INVITE/
+        RESCHEDULE) today, so approving or rejecting a Gmail draft here
+        always means "the assistant's judgment about replying to this
+        thread was right (or wrong)", never "this sender is noise" -- the
+        asymmetry the local docstring warns an approved hygiene action would
+        otherwise invert never arises on this path. ``thread_ref`` is
+        whatever ``_draft_create_propose`` stashed in turn provenance; a
+        missing or malformed reference (e.g. a decision reached via some
+        future ceremony that never proposed a draft in THIS conversation)
+        skips capture rather than guessing.
+
+        Records into stage 1's ``PostgresImportanceProfile`` (hashed-
+        reference keying -- see :class:`~attune.hosted.intelligence.PostgresImportanceSignalCapture`)
+        when ``importance_signals`` was injected, and a raw action-signal
+        hosted-memory write (mirrors local ``capture_action_signal``'s
+        verbatim, ``infer=False`` raw write) when the memory gate is on.
+        Both are best-effort: a failure here must never break the decision
+        path the human is waiting on (log + continue, exactly like the
+        local dual-write's own ``# noqa: BLE001`` posture)."""
+        if not isinstance(thread_ref, str) or not thread_ref:
+            return
+        if self._importance_signals is not None:
+            try:
+                self._importance_signals.record(
+                    context, principal_id=authority.principal_id,
+                    reference=thread_ref, signal=signal,
+                )
+            except Exception:
+                LOG.warning(
+                    "hosted draft importance signal capture failed (%s)",
+                    signal.value, exc_info=True,
+                )
+        if self._memory is not None:
+            try:
+                text = f"[{signal.value}] gmail_write: draft decision for thread {thread_ref}"
+                vector = self._models.embed(text=text)
+                self._memory.add(
+                    context, principal_id=authority.principal_id, creator_id=None,
+                    content=text,
+                    provenance={"schema_version": 1, "source": "capability_decision"},
+                    source_class="assistant_derived", confidence=1.0,
+                    model=HOSTED_MEMORY_EMBED_LABEL, embedding=vector,
+                )
+            except Exception:
+                LOG.warning(
+                    "hosted draft memory signal capture failed (%s)",
+                    signal.value, exc_info=True,
+                )
 
     # -- Hosted conversational memory (docs/hosted-memory.md) --------------
     # Dormant unless ``memory`` was injected (ATTUNE_ENABLE_HOSTED_MEMORY).
@@ -826,16 +906,32 @@ def build_turn_provenance(
     job_id: UUID, extra_provenance: dict[str, object] | None
 ) -> dict[str, object]:
     """The stored assistant turn's provenance: the fixed job-attribution
-    fields every turn carries, plus (only for memory-command replies) the
-    turn-scoped memory state documented in docs/hosted-memory.md ("Turn-
-    scoped state without shared worker memory") -- never shown in the
-    rendered text, never memory content, just an id or a short id list."""
+    fields every turn carries, plus (only for memory-command or draft-
+    capability replies) the turn-scoped state documented in
+    docs/hosted-memory.md ("Turn-scoped state without shared worker memory")
+    and docs/capability-gateway.md -- never shown in the rendered text,
+    never memory content, just an id, a short id list, or (the draft
+    capability's own turn-scoped state) a caller-typed thread reference.
+
+    Pre-existing gap fixed here (Phase 5 stage 4, found while wiring signal
+    capture): ``pending_draft_approval_id`` -- the exact key
+    ``_draft_create_propose`` has stored since stage 3 -- was never added to
+    this allowed set, so the REAL ``PostgresGoogleChatConversationWorkRepository
+    .append_assistant``/``PostgresWebConversationWorkRepository.append_assistant``
+    would have raised ``unsupported provenance extension`` the first time a
+    draft was ever proposed against a real database; every existing stage-3
+    test exercised only a fake ``Work.append_assistant`` that records
+    whatever it's given, so nothing caught it. ``pending_draft_thread_ref``
+    is the one new key this stage adds."""
     provenance: dict[str, object] = {"schema_version": 1, "job_id": str(job_id)}
     if extra_provenance:
         if not isinstance(extra_provenance, dict):
             raise ValueError("extra provenance must be an object")
         for key, value in extra_provenance.items():
-            if key not in {"memory_listing_ids", "pending_forget_memory_id"}:
+            if key not in {
+                "memory_listing_ids", "pending_forget_memory_id",
+                "pending_draft_approval_id", "pending_draft_thread_ref",
+            }:
                 raise ValueError("unsupported provenance extension")
         provenance.update(extra_provenance)
     return provenance

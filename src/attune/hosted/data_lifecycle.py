@@ -72,9 +72,15 @@ RELATIONAL_ASSETS = (
     # a bespoke "derived" bucket. attention_items is recorded chat/Slack
     # signal content with its own retention window (RETENTION_DAYS,
     # attune.hosted.intelligence), matching conversation_turns.
+    # hosted_brief_deliveries (docs/future-state.md Phase 5 item 4) stores the
+    # bounded rendered brief text delivered to the owner directly -- unlike
+    # hosted_channel_deliveries, which only tracks delivery state and reads
+    # its content from conversation_turns -- so it gets the same class/rule/
+    # export triple as conversation_turns/memories, not the OPERATIONAL
+    # bucket the delivery-claim tables below otherwise share.
     *_assets(
         "memories memory_embeddings conversations conversation_turns "
-        "importance_signals attention_items",
+        "importance_signals attention_items hosted_brief_deliveries",
         DataClass.CUSTOMER_CONTENT,
         DeletionRule.ERASE,
         customer_export=True,
