@@ -214,8 +214,32 @@ implemented and deployed: the reserved writer has encrypt/create/delete but no
 decrypt/read/list authority, inherited bucket readers are removed, the bucket
 is empty, and an object-free policy-administrator path keeps Terraform
 manageable. An exact-claim, idempotent encrypted-object completion transition
-is deployed and live-verified in development. No writer can invoke it yet.
-Cleanup, download, and UI remain.
+is deployed and live-verified in development. The private writer now invokes
+that exact transition through the same `attune_export` grant migration 0031
+already issued to the executor role -- no additional migration was required.
+Wired end to end and offline- and real-PostgreSQL-tested behind
+`ATTUNE_CUSTOMER_EXPORTS_ENABLED` (control plane) and the writer/download/
+cleanup services' own missing-secret dormancy: claim, project, build, encrypt,
+upload, and complete, with each failure point leaving the documented
+resumable or terminal-failed state and a content-free audit row. The download
+ceremony is also implemented and tested: the control plane mints a 90-second
+random one-time secret returned once in the response body, a same-origin
+POST-only gateway with get-and-decrypt-only authority authenticates it,
+decrypts, and atomically consumes the one-use grant before streaming the
+archive with no-store headers, and consumed or expired objects become
+exact-generation cleanup candidates -- never a signed or long-lived URL. The
+bounded cleanup executor deletes those candidates by exact generation in
+capped batches and is invoked only by its own fourth scheduler identity,
+paused by default in Terraform (`enable_export_cleanup_schedule`), mirroring
+the protocol/content-retention executors' style and alert names. The
+setup-page UI requests the alpha's fixed `account` scope, polls status,
+performs the download as a same-origin POST carrying the one-time secret in
+its body (never a URL), and clears to the expired/consumed labels once the
+object is gone. Storage bucket and Cloud Run/Scheduler activation
+(`enable_export_writer`, `deploy_customer_export_download`,
+`enable_export_cleanup_schedule`) remain paused-by-default operator work; no
+production customer export is authorized until the independent review and
+recovery gates in `customer-export.md` pass.
 
 The first platform mapping is [`hosted-gcp.md`](hosted-gcp.md), and the initial
 declarative substrate is `deploy/gcp/foundation`. Applying that foundation does
