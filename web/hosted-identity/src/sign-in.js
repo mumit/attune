@@ -39,6 +39,11 @@ const policyConfirm = document.querySelector("#policy-confirm");
 const customerExports = document.querySelector("#customer-exports");
 const customerExportCreate = document.querySelector("#customer-export-create");
 const customerExportList = document.querySelector("#customer-export-list");
+const modelProfile = document.querySelector("#model-profile");
+const modelProfileSelect = document.querySelector("#model-profile-select");
+const modelProfileSave = document.querySelector("#model-profile-save");
+const modelProfileState = document.querySelector("#model-profile-state");
+const modelUsage = document.querySelector("#model-usage");
 const accountDeletion = document.querySelector("#account-deletion");
 const accountDeletionState = document.querySelector("#account-deletion-state");
 const accountDeletionRequest = document.querySelector("#account-deletion-request");
@@ -396,6 +401,89 @@ function deletionStateLabel(item) {
   };
   return labels[item.status] || null;
 }
+
+async function renderModelUsage() {
+  try {
+    const usage = await json(
+      await fetch("/v1/usage", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      }),
+    );
+    if (!usage.items.length) {
+      modelUsage.textContent = `No model usage recorded in the last ${usage.window_days} days.`;
+      return;
+    }
+    const totals = usage.items.reduce(
+      (acc, item) => ({
+        requests: acc.requests + item.request_count,
+        input: acc.input + item.input_tokens,
+        output: acc.output + item.output_tokens,
+      }),
+      { requests: 0, input: 0, output: 0 },
+    );
+    modelUsage.textContent =
+      `${totals.requests} requests, ${totals.input} input tokens, ` +
+      `${totals.output} output tokens in the last ${usage.window_days} days.`;
+  } catch {
+    modelUsage.textContent = "";
+  }
+}
+
+async function renderModelProfile() {
+  // This section has no pre-session availability signal (mirrors the
+  // account-deletion section immediately below): it is shown optimistically
+  // after sign-in, and a 404 from its own route is the honest signal that
+  // the ATTUNE_ENABLE_TENANT_MODEL_PROFILES gate is off.
+  let current;
+  try {
+    current = await json(
+      await fetch("/v1/model-profile", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      }),
+    );
+  } catch (error) {
+    if (error.status === 404) {
+      modelProfile.hidden = true;
+      return null;
+    }
+    return null;
+  }
+  modelProfile.hidden = false;
+  modelProfileSelect.value = current.profile;
+  await renderModelUsage();
+  return current;
+}
+
+modelProfileSave.addEventListener("click", async () => {
+  modelProfileSave.disabled = true;
+  modelProfileState.textContent = "Saving…";
+  try {
+    const csrf = cookie("__Host-attune_csrf");
+    if (!csrf) throw new Error("missing session binding");
+    await json(
+      await fetch("/v1/model-profile", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Attune-CSRF": csrf,
+        },
+        body: JSON.stringify({
+          schema_version: 1,
+          profile: modelProfileSelect.value,
+        }),
+      }),
+    );
+    modelProfileState.textContent = "Model profile saved.";
+    await renderModelUsage();
+  } catch {
+    modelProfileState.textContent = "Model profile could not be saved. Please try again.";
+  }
+  modelProfileSave.disabled = false;
+});
 
 async function renderAccountDeletion() {
   // This section has no pre-session availability signal (mirrors the hosted
@@ -1201,6 +1289,7 @@ async function main() {
     sessionSignOut.hidden = false;
     await showWorkspace(session);
     await showOnboarding(session);
+    await renderModelProfile();
     await renderAccountDeletion();
     const slackMessage = slackInstallReturnMessage(slackOutcome);
     if (slackMessage) slackInstallationState.textContent = slackMessage;

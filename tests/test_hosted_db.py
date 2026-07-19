@@ -105,6 +105,11 @@ from attune.memory.signals import ActionSignal
 from attune.hosted.tenant import TenantContext, tenant_transaction
 from attune.hosted.tenant_deletion import PostgresTenantDeletionRequests
 from attune.hosted.tenant_deletion_executor import erasable_relations_in_order
+from attune.hosted.model_profile import PostgresTenantModelProfileRepository
+from attune.hosted.model_usage import (
+    PostgresModelUsageMeterRepository,
+    PostgresModelUsageQueryRepository,
+)
 from attune.hosted.vault import (
     PostgresCredentialIntentRepository,
     PostgresSecretBrokerRepository,
@@ -157,7 +162,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0046_tenant_content_lifecycle.sql"
+    assert migrations[-1].name == "0047_tenant_model_profiles.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -555,7 +560,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 46
+    assert apply_migrations(admin) == 47
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -5644,3 +5649,239 @@ def test_content_retention_prunes_only_out_of_window_conversations(
         )
         assert audit[2]["records"] >= 1
     initialized_database.commit()
+
+
+# ---------------------------------------------------------------------------
+# Migration 0047: per-tenant model configuration and usage metering
+# (docs/future-state.md Phase 6 "hosted operations"; hosted review gaps
+# #1/#2).
+# ---------------------------------------------------------------------------
+
+
+def test_tenant_model_profile_preference_roundtrip_rls_and_ordinary_bar(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    tenant_a, principal_a, session_a = uuid4(), uuid4(), uuid4()
+    tenant_b, principal_b, session_b = uuid4(), uuid4(), uuid4()
+    _reset_role(initialized_database)
+    _seed_deletion_owner(initialized_database, tenant_a, principal_a, session_a)
+    _seed_deletion_owner(initialized_database, tenant_b, principal_b, session_b)
+
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    profiles = PostgresTenantModelProfileRepository(control_factory)
+    context_a = TenantContext(tenant_a)
+    context_b = TenantContext(tenant_b)
+
+    assert profiles.read(context_a) is None
+
+    first = profiles.set(
+        context_a, principal_id=principal_a, session_id=session_a, profile="premium",
+    )
+    assert first.profile == "premium"
+    assert first.revision == 1
+    assert profiles.read(context_a) == first
+
+    # Idempotent same-value set leaves the revision unchanged; a genuine
+    # change advances it -- mirrors configure_hosted_channels exactly.
+    repeated = profiles.set(
+        context_a, principal_id=principal_a, session_id=session_a, profile="premium",
+    )
+    assert repeated.revision == 1
+    changed = profiles.set(
+        context_a, principal_id=principal_a, session_id=session_a, profile="standard",
+    )
+    assert changed.profile == "standard"
+    assert changed.revision == 2
+
+    # RLS: tenant B never sees tenant A's row, even with no preference of
+    # its own recorded yet.
+    assert profiles.read(context_b) is None
+
+    # Only the SECURITY DEFINER function may mutate the table directly.
+    control = control_factory()
+    try:
+        with control.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('attune.tenant_id', %s, true)", (str(tenant_a),)
+            )
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "INSERT INTO attune.tenant_model_preferences (tenant_id, profile) "
+                    "VALUES (%s, 'premium')",
+                    (tenant_a,),
+                )
+        control.rollback()
+    finally:
+        control.close()
+
+    # An out-of-vocabulary profile fails closed at the function boundary,
+    # not merely in the Python wrapper (defense in depth).
+    control = control_factory()
+    try:
+        with pytest.raises(psycopg.errors.InvalidParameterValue):
+            with tenant_transaction(control, context_a) as cursor:
+                cursor.execute(
+                    "SELECT * FROM attune.set_tenant_model_profile(%s, %s, %s)",
+                    (principal_a, session_a, "enterprise"),
+                )
+    finally:
+        control.rollback()
+        control.close()
+
+    # Ordinary bar, not the ten-minute recency window: an 11-minute-old
+    # session still succeeds here (unlike the channel ceremony's own
+    # recency-bound test above).
+    with tenant_transaction(initialized_database, context_a) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions "
+            "SET created_at = clock_timestamp() - interval '11 minutes' "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant_a, session_a),
+        )
+    still_ok = profiles.set(
+        context_a, principal_id=principal_a, session_id=session_a, profile="premium",
+    )
+    assert still_ok.profile == "premium"
+
+    # A revoked session is refused (the ordinary bar this ceremony DOES
+    # enforce).
+    with tenant_transaction(initialized_database, context_a) as cursor:
+        cursor.execute(
+            "UPDATE attune.identity_sessions SET revoked_at = clock_timestamp() "
+            "WHERE tenant_id = %s AND id = %s",
+            (tenant_a, session_a),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        profiles.set(
+            context_a, principal_id=principal_a, session_id=session_a, profile="standard",
+        )
+
+
+def test_model_usage_accumulate_upsert_math_rls_window_and_no_direct_mutation(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    tenant_a, principal_a, session_a = uuid4(), uuid4(), uuid4()
+    tenant_b, principal_b, session_b = uuid4(), uuid4(), uuid4()
+    _reset_role(initialized_database)
+    _seed_deletion_owner(initialized_database, tenant_a, principal_a, session_a)
+    _seed_deletion_owner(initialized_database, tenant_b, principal_b, session_b)
+
+    worker_factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    meter = PostgresModelUsageMeterRepository(worker_factory)
+    usage = PostgresModelUsageQueryRepository(control_factory)
+    context_a = TenantContext(tenant_a)
+    context_b = TenantContext(tenant_b)
+
+    meter.accumulate(
+        context_a, task="classify", profile="standard", success=True,
+        input_tokens=10, output_tokens=5,
+    )
+    meter.accumulate(
+        context_a, task="classify", profile="standard", success=True,
+        input_tokens=7, output_tokens=3,
+    )
+    meter.accumulate(
+        context_a, task="classify", profile="standard", success=False,
+        input_tokens=0, output_tokens=0,
+    )
+    # A distinct (task, profile) key accumulates independently.
+    meter.accumulate(
+        context_a, task="embed", profile="premium", success=True,
+        input_tokens=1, output_tokens=0,
+    )
+
+    rows = {(row.task, row.profile): row for row in usage.recent(context_a)}
+    classify = rows[("classify", "standard")]
+    assert classify.request_count == 3
+    assert classify.input_tokens == 17
+    assert classify.output_tokens == 8
+    assert classify.failure_count == 1
+    embed = rows[("embed", "premium")]
+    assert embed.request_count == 1
+    assert embed.failure_count == 0
+
+    # RLS: tenant B sees none of tenant A's usage.
+    assert usage.recent(context_b) == []
+
+    # The worker holds no direct table access -- every mutation goes through
+    # the accumulate function (see the migration's own comment: a bare
+    # UPDATE grant would let a compromised worker rewrite billing history).
+    worker_probe = worker_factory()
+    try:
+        with worker_probe.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('attune.tenant_id', %s, true)", (str(tenant_a),)
+            )
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cursor.execute(
+                    "UPDATE attune.model_usage_daily SET request_count = 999999 "
+                    "WHERE tenant_id = %s",
+                    (tenant_a,),
+                )
+        worker_probe.rollback()
+    finally:
+        worker_probe.close()
+
+    # The 30-day bounded window: a stale row (inserted directly, bypassing
+    # RLS as the admin connection) never appears in a recent() read.
+    _reset_role(initialized_database)
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.model_usage_daily "
+            "(tenant_id, usage_date, task, profile, request_count) "
+            "VALUES (%s, (clock_timestamp() - interval '45 days')::date, "
+            "'converse', 'standard', 9)",
+            (tenant_a,),
+        )
+    initialized_database.commit()
+    assert ("converse", "standard") not in {
+        (row.task, row.profile) for row in usage.recent(context_a)
+    }
+
+
+def test_model_usage_accumulate_is_race_safe_under_concurrent_writers(
+    initialized_database, database_url
+):
+    """Two concurrent writers accumulating the SAME (tenant, task, profile,
+    day) key must never lose an update -- the atomic ``ON CONFLICT ...
+    DO UPDATE SET request_count = request_count + 1`` upsert is what makes
+    this safe, mirroring how the export-download claim race test proves its
+    own exactly-once property."""
+    tenant_a, principal_a, session_a = uuid4(), uuid4(), uuid4()
+    _reset_role(initialized_database)
+    _seed_deletion_owner(initialized_database, tenant_a, principal_a, session_a)
+    context = TenantContext(tenant_a)
+    calls_per_worker = 25
+
+    def accumulate_many(_marker: int) -> None:
+        meter = PostgresModelUsageMeterRepository(
+            _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+        )
+        for _ in range(calls_per_worker):
+            meter.accumulate(
+                context, task="converse", profile="standard", success=True,
+                input_tokens=1, output_tokens=1,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(accumulate_many, range(2)))
+
+    control_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    usage = PostgresModelUsageQueryRepository(control_factory)
+    [row] = [
+        item for item in usage.recent(context)
+        if (item.task, item.profile) == ("converse", "standard")
+    ]
+    assert row.request_count == 2 * calls_per_worker
+    assert row.input_tokens == 2 * calls_per_worker
+    assert row.output_tokens == 2 * calls_per_worker
+    assert row.failure_count == 0

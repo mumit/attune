@@ -27,6 +27,9 @@ from .onboarding import PostgresHostedOnboardingRepository
 from .hosted_policy import PostgresHostedPolicyRepository
 from .hosted_policy_service import HostedPolicyService
 from .hosted_signup import HostedSignupService, PostgresHostedSignupRepository
+from .model_profile import PostgresTenantModelProfileRepository
+from .model_profile_service import HostedModelProfileService
+from .model_usage import PostgresModelUsageQueryRepository
 from .repositories import PostgresJobRepository
 from .secret_broker_mutation_client import SecretBrokerMutationClient
 from .customer_export import PostgresCustomerExportRequests
@@ -118,6 +121,22 @@ def create_production_app():
     hosted_brief_enabled = hosted_brief_enabled_value == "true"
     if hosted_brief_enabled and not identity_enabled:
         raise ValueError("hosted brief requires identity")
+    model_profile_enabled_value = os.environ.get(
+        "ATTUNE_ENABLE_TENANT_MODEL_PROFILES", "false"
+    )
+    if model_profile_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_TENANT_MODEL_PROFILES must be true or false")
+    model_profile_enabled = model_profile_enabled_value == "true"
+    if model_profile_enabled and not identity_enabled:
+        raise ValueError("hosted model profile requires identity")
+    usage_enabled_value = os.environ.get(
+        "ATTUNE_ENABLE_MODEL_USAGE_METERING", "false"
+    )
+    if usage_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_MODEL_USAGE_METERING must be true or false")
+    usage_enabled = usage_enabled_value == "true"
+    if usage_enabled and not identity_enabled:
+        raise ValueError("hosted usage requires identity")
     signup_enabled_value = os.environ.get("ATTUNE_HOSTED_SIGNUP_ENABLED", "false")
     if signup_enabled_value not in {"true", "false"}:
         raise ValueError("ATTUNE_HOSTED_SIGNUP_ENABLED must be true or false")
@@ -162,6 +181,7 @@ def create_production_app():
         or channel_setup_enabled
         or signup_enabled
         or deletion_enabled
+        or model_profile_enabled
         else None
     )
     audit_writer = (
@@ -171,6 +191,7 @@ def create_production_app():
         or channel_setup_enabled
         or signup_enabled
         or deletion_enabled
+        or model_profile_enabled
         else None
     )
     return create_app(
@@ -293,6 +314,22 @@ def create_production_app():
                 ),
             )
             if hosted_brief_enabled
+            else None
+        ),
+        hosted_model_profile_enabled=model_profile_enabled,
+        hosted_model_profile=(
+            HostedModelProfileService(
+                PostgresTenantModelProfileRepository(iam_connection),
+                audit,
+                audit_writer,
+            )
+            if model_profile_enabled
+            else None
+        ),
+        hosted_usage_enabled=usage_enabled,
+        hosted_usage=(
+            PostgresModelUsageQueryRepository(iam_connection)
+            if usage_enabled
             else None
         ),
         hosted_signup_enabled=signup_enabled,
