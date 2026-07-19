@@ -34,3 +34,12 @@ def test_default_posture_is_conservative():
     for action in Action:
         for domain in Domain:
             assert m.max_rung(action, domain) < Rung.ACT_NOTIFY
+
+
+def test_label_mail_granted_propose_by_default():
+    """Phase 3 stage 1, G9: LABEL ships with a default PROPOSE grant, same
+    posture as DRAFT_REPLY — proposing an archive is safe because a human
+    still has to approve the card before anything is archived."""
+    m = default_matrix()
+    assert m.allows(Action.LABEL, Domain.MAIL, Rung.PROPOSE)
+    assert not m.allows(Action.LABEL, Domain.MAIL, Rung.ACT_NOTIFY)

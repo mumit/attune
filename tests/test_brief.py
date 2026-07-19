@@ -575,3 +575,299 @@ def test_spine_store_less_backward_compatible():
     assert brief.spine  # still leads with something sensible
     joined = "\n".join(brief.spine)
     assert "Contract redline" in joined or "Falcon sync" in joined
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 stage 3 (docs/future-state.md Phase 3, item 4; G11): "what changed
+# since yesterday" (Deliverable A), waiting-on ages/ordering (Deliverable B),
+# and inline pending-approval pointers (Deliverable C).
+# ---------------------------------------------------------------------------
+
+from attune.brief import BriefSnapshot, JsonBriefSnapshot  # noqa: E402
+
+
+class _RecordingPending:
+    """Minimal PendingApprovals-shaped fake keyed by source_ref, for pointer
+    and tally assertions."""
+
+    def __init__(self, source_refs=()):
+        self._refs = set(source_refs)
+
+    def get_pending_for_source(self, source_ref):
+        return object() if source_ref in self._refs else None
+
+    def pending(self):
+        return [object() for _ in self._refs]
+
+
+class _RaisingPending:
+    """A pending registry whose every method raises — lookups/tallies must
+    degrade to "no pointer"/"no tally", never break the brief."""
+
+    def get_pending_for_source(self, source_ref):
+        raise RuntimeError("pending boom")
+
+    def pending(self):
+        raise RuntimeError("pending boom")
+
+
+# --- Deliverable A: the "since yesterday" snapshot ------------------------
+
+
+def test_first_run_has_no_since_yesterday_but_writes_a_snapshot(tmp_path):
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    conn = FakeConnector(
+        threads=[_thread(thread_id="t1", subject="Contract redline")],
+        events=[_event(summary="Falcon sync")],
+    )
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    assert brief.since_yesterday == []
+    written = store.load()
+    assert written is not None
+    assert written.unread == [{"id": "t1", "text": "Contract redline"}]
+    assert written.events[0]["id"] == "e1"
+    assert written.ts == NOW
+
+
+def test_since_yesterday_reports_new_and_resolved_and_new_events(tmp_path):
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    store.save(BriefSnapshot(
+        unread=[{"id": "old1", "text": "Stale thread"}],
+        events=[{"id": "old-e1", "text": "Yesterday's meeting"}],
+        quiet_thread_ids=["q1"],
+        ts=NOW - timedelta(hours=20),
+    ))
+    conn = FakeConnector(
+        threads=[_thread(thread_id="new1", subject="Brand new thread")],
+        events=[_event(summary="Today's meeting")],
+    )
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    joined = "\n".join(brief.since_yesterday)
+    assert "New unread (1): Brand new thread" in joined
+    assert "Resolved (1): Stale thread" in joined
+    assert "New events (1): Today's meeting" in joined
+    assert "Still waiting: 0 (-1 vs yesterday)" in joined
+    # rendered right after the spine in the untrusted block fed to the model
+    content = client.calls[0]["messages"][-1]["content"]
+    assert content.index("SINCE YESTERDAY") > content.index("WHAT MATTERS NOW")
+    assert content.index("UNREAD MAIL") > content.index("SINCE YESTERDAY")
+
+
+def test_since_yesterday_list_capped_with_more_suffix(tmp_path):
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    store.save(BriefSnapshot(unread=[], events=[], quiet_thread_ids=[], ts=NOW))
+    threads = [
+        _thread(thread_id=f"t{i}", subject=f"Subject {i}") for i in range(7)
+    ]
+    conn = FakeConnector(threads=threads)
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    line = next(
+        candidate for candidate in brief.since_yesterday
+        if candidate.startswith("New unread")
+    )
+    assert line.startswith("New unread (7): ")
+    assert line.endswith(", +2 more")
+
+
+def test_stale_snapshot_older_than_48h_is_ignored(tmp_path):
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    store.save(BriefSnapshot(
+        unread=[{"id": "old1", "text": "Stale thread"}],
+        events=[], quiet_thread_ids=[],
+        ts=NOW - timedelta(hours=48),  # exactly at the boundary: stale
+    ))
+    conn = FakeConnector(threads=[_thread(thread_id="new1")])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    assert brief.since_yesterday == []
+
+
+def test_snapshot_read_failure_never_breaks_the_brief():
+    class _RaisingSnapshotStore:
+        def load(self):
+            raise RuntimeError("disk boom")
+
+        def save(self, snapshot):
+            raise RuntimeError("disk boom")
+
+    conn = FakeConnector(threads=[_thread()])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=_RaisingSnapshotStore())
+
+    assert brief.since_yesterday == []
+    assert brief.summary
+
+
+def test_no_snapshot_store_means_no_since_yesterday_and_no_file(tmp_path):
+    """The CLI's plain preview path (no ``snapshot_store``): no section, and
+    — since nothing was even constructed — no state file as a side effect."""
+    conn = FakeConnector(threads=[_thread()])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW)
+
+    assert brief.since_yesterday == []
+    assert not (tmp_path / "snap.json").exists()
+
+
+# --- Deliverable B: waiting-on ordered by tier, then age ------------------
+
+
+def test_waiting_on_ordered_by_tier_then_age_longest_first():
+    high_recent = _thread(
+        thread_id="w-high", subject="High recent", from_addr="vip@x.com",
+        last_from="me@example.com", last_at=NOW - timedelta(days=1),
+    )
+    high_old = _thread(
+        thread_id="w-high-old", subject="High old", from_addr="vip@x.com",
+        last_from="me@example.com", last_at=NOW - timedelta(days=6),
+    )
+    normal_old = _thread(
+        thread_id="w-normal", subject="Normal old", from_addr="normal@x.com",
+        last_from="me@example.com", last_at=NOW - timedelta(days=10),
+    )
+    conn = FakeConnector(sent=[normal_old, high_recent, high_old])
+    profile = FakeImportanceProfile({"vip@x.com": ImportanceTier.HIGH})
+    client = FakeClient()
+
+    brief = assemble_brief(
+        conn, client, user_email="me@example.com", now=NOW,
+        importance_profile=profile, quiet_min_age_days=0,
+    )
+
+    assert [t.subject for t in brief.waiting_on] == [
+        "High old", "High recent", "Normal old",
+    ]
+
+
+def test_waiting_on_order_unchanged_without_a_profile_ages_only():
+    newer = _thread(
+        thread_id="w1", subject="Newer", last_from="me@example.com",
+        last_at=NOW - timedelta(days=3),
+    )
+    older = _thread(
+        thread_id="w2", subject="Older", last_from="me@example.com",
+        last_at=NOW - timedelta(days=8),
+    )
+    conn = FakeConnector(sent=[newer, older])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, user_email="me@example.com", now=NOW)
+
+    assert [t.subject for t in brief.waiting_on] == ["Older", "Newer"]
+
+
+# --- Deliverable C: inline pending-approval pointers + bottom-of-spine tally
+
+
+def test_spine_entry_gets_pointer_when_underlying_thread_is_pending():
+    mail = _thread(thread_id="t-pending", subject="Contract redline", snippet="")
+    conn = FakeConnector(threads=[mail], events=[])
+    pending = _RecordingPending(source_refs={"t-pending"})
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, pending=pending)
+
+    assert any("Contract redline" in line and "approval card pending" in line
+               for line in brief.spine)
+
+
+def test_unread_mail_line_gets_pointer_for_pending_thread():
+    mail = _thread(thread_id="t-pending", subject="Newsletter", snippet="")
+    conn = FakeConnector(threads=[mail])
+    pending = _RecordingPending(source_refs={"t-pending"})
+    client = FakeClient()
+
+    assemble_brief(conn, client, now=NOW, pending=pending)
+    content = client.calls[0]["messages"][-1]["content"]
+    mail_line = next(
+        line for line in content.splitlines() if line.startswith("- from")
+    )
+
+    assert "Newsletter" in mail_line
+    assert mail_line.endswith("approval card pending")
+
+
+def test_event_line_gets_pointer_for_pending_event():
+    event = _event(summary="1:1 with boss")
+    conn = FakeConnector(events=[event])
+    pending = _RecordingPending(source_refs={"e1"})
+    client = FakeClient()
+
+    assemble_brief(conn, client, now=NOW, pending=pending)
+    content = client.calls[0]["messages"][-1]["content"]
+
+    assert "1:1 with boss → approval card pending" in content
+
+
+def test_waiting_on_line_gets_pointer_for_pending_followup():
+    quiet = _thread(
+        thread_id="t-quiet", subject="Waiting", last_from="me@example.com",
+        last_at=NOW - timedelta(days=5),
+    )
+    conn = FakeConnector(sent=[quiet])
+    pending = _RecordingPending(source_refs={"t-quiet"})
+    client = FakeClient()
+
+    assemble_brief(conn, client, user_email="me@example.com", now=NOW, pending=pending)
+    content = client.calls[0]["messages"][-1]["content"]
+    waiting_line = next(
+        line for line in content.splitlines() if line.startswith("- Waiting")
+    )
+
+    assert waiting_line.endswith("approval card pending")
+
+
+def test_pending_tally_rendered_when_cards_pending_generic_fallback():
+    conn = FakeConnector(threads=[_thread()])
+    pending = _RecordingPending(source_refs={"t1", "t2"})
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, pending=pending)
+
+    assert brief.pending_tally == "2 proposals awaiting your decision in your approval channel"
+    assert brief.pending_tally in "\n".join(client.calls[0]["messages"][-1]["content"].splitlines())
+
+
+def test_pending_tally_uses_channel_name_when_supplied():
+    conn = FakeConnector(threads=[_thread()])
+    pending = _RecordingPending(source_refs={"t1"})
+    client = FakeClient()
+
+    brief = assemble_brief(
+        conn, client, now=NOW, pending=pending, approval_channel_name="#approvals",
+    )
+
+    assert brief.pending_tally == "1 proposal awaiting your decision in #approvals"
+
+
+def test_no_pending_registry_means_no_pointers_and_no_tally():
+    conn = FakeConnector(threads=[_thread(subject="Contract redline")])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW)
+
+    assert brief.pending_tally is None
+    assert all("approval card pending" not in line for line in brief.spine)
+
+
+def test_pending_lookup_failure_never_breaks_the_brief():
+    conn = FakeConnector(threads=[_thread(subject="Contract redline")])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, pending=_RaisingPending())
+
+    assert brief.pending_tally is None
+    assert brief.summary

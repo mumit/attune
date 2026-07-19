@@ -376,6 +376,104 @@ def test_source_channels_is_a_fatal_check():
 
 
 # ---------------------------------------------------------------------------
+# mail-labels (Phase 3 stage 1, docs/future-state.md; G9)
+# ---------------------------------------------------------------------------
+
+
+def test_mail_labels_skip_when_disabled():
+    from attune.cli.doctor import check_mail_labels
+    from attune.config import Settings
+
+    settings = Settings.from_env({})
+    status, detail = check_mail_labels(settings)
+    assert status == SKIP
+    assert "ATTUNE_MAIL_LABELS_ENABLED" in detail
+
+
+def test_mail_labels_fail_on_mcp_backend():
+    from attune.cli.doctor import check_mail_labels
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_MAIL_LABELS_ENABLED": "1",
+        "ATTUNE_WORKSPACE_BACKEND": "mcp",
+        "ATTUNE_MCP_URL": "https://mcp.example/mcp",
+    })
+    status, detail = check_mail_labels(settings)
+    assert status == FAIL
+    assert "MCP" in detail
+    assert "contract v1" in detail
+
+
+def test_mail_labels_pass_on_google_oauth_backend():
+    from attune.cli.doctor import check_mail_labels
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_MAIL_LABELS_ENABLED": "1",
+        "ATTUNE_WORKSPACE_BACKEND": "google_oauth",
+    })
+    status, detail = check_mail_labels(settings)
+    assert status == PASS
+    assert "gmail.modify" in detail
+
+
+def test_mail_labels_is_a_fatal_check():
+    from attune.cli.doctor import FATAL_CHECKS
+
+    assert "mail-labels" in FATAL_CHECKS
+
+
+# ---------------------------------------------------------------------------
+# calendar-writes (Phase 3 stage 2)
+# ---------------------------------------------------------------------------
+
+
+def test_calendar_writes_skip_when_disabled():
+    from attune.cli.doctor import check_calendar_writes
+    from attune.config import Settings
+
+    settings = Settings.from_env({})
+    status, detail = check_calendar_writes(settings)
+    assert status == SKIP
+    assert "ATTUNE_CALENDAR_WRITES_ENABLED" in detail
+
+
+def test_calendar_writes_fail_on_mcp_backend():
+    from attune.cli.doctor import check_calendar_writes
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_CALENDAR_WRITES_ENABLED": "1",
+        "ATTUNE_WORKSPACE_BACKEND": "mcp",
+        "ATTUNE_MCP_URL": "https://mcp.example/mcp",
+    })
+    status, detail = check_calendar_writes(settings)
+    assert status == FAIL
+    assert "MCP" in detail
+    assert "contract v1" in detail
+
+
+def test_calendar_writes_pass_on_google_oauth_backend():
+    from attune.cli.doctor import check_calendar_writes
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_CALENDAR_WRITES_ENABLED": "1",
+        "ATTUNE_WORKSPACE_BACKEND": "google_oauth",
+    })
+    status, detail = check_calendar_writes(settings)
+    assert status == PASS
+    assert "calendar.events" in detail
+
+
+def test_calendar_writes_is_a_fatal_check():
+    from attune.cli.doctor import FATAL_CHECKS
+
+    assert "calendar-writes" in FATAL_CHECKS
+
+
+# ---------------------------------------------------------------------------
 # audit-chain (security finding F1)
 # ---------------------------------------------------------------------------
 

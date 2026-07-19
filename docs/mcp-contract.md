@@ -1,6 +1,11 @@
 # Attune Workspace MCP contract
 
-Contract version: **1**
+Contract version: **1.1**
+
+Version history: **1.0** — the original six required tools and envelopes.
+**1.1** — adds three OPTIONAL calendar event result fields (below); required
+tools, arguments, and all other envelope fields are unchanged, so every
+conformant 1.0 server remains conformant under 1.1.
 
 Attune can use any MCP package or remote server that exposes this tool contract.
 The server owns provider credentials, consent, provider-specific API calls, and
@@ -104,13 +109,27 @@ Result:
 Arguments: `{"event_id": "string"}`. Result: one event object using the shape
 above, without the outer `events` array.
 
+### Optional event fields (contract 1.1)
+
+An event object may also include `organizer` (string email), `organizer_is_self`
+(bool — true when the PRINCIPAL organizes this event), and `response_status`
+(string — the principal's own attendee responseStatus, e.g. `"needsAction"`).
+All three are OPTIONAL: a server that omits them gets Attune's safe defaults
+(`""`/`False`/`""`), under which neither the decline-invite nor the
+reschedule proposal path can ever fire. Contract 1.1 still has no
+decline-invite or reschedule-event tool regardless of what these fields
+report — `supports_calendar_writes()` stays `False` for the MCP connector
+(see `docs/decisions.md`).
+
 ## Capability check and compatibility
 
 `attune doctor` calls MCP `tools/list` on the configured logical Gmail and
 Calendar servers and fails if a version-1 tool is absent. Adding optional tools
 is backward compatible. Removing or renaming a required tool, changing its
 argument meaning, or changing these result envelopes requires a new contract
-version and a corresponding Attune adapter.
+version and a corresponding Attune adapter. Purely additive OPTIONAL result
+fields take a minor version (1.x, e.g. the 1.1 event fields above); anything
+a 1.0 server or adapter could observe as a behavior change takes a major one.
 
 The offline connector suite is the reference conformance fixture:
 

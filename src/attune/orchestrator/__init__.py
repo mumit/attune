@@ -31,10 +31,15 @@ from .correlation import (
 )
 from .state import DraftApproveState
 from .draft_approve import (
+    HYGIENE_ACTIONS,
     MAX_ITERATIONS,
     apply_confirmation,
+    archive_draft_fn,
     build_draft_approve_graph,
+    calendar_action_draft_fn,
+    make_calendar_action_apply_fn,
     make_connector_apply_fn,
+    make_label_apply_fn,
     resume_workflow,
 )
 from .followup import (
@@ -75,9 +80,14 @@ __all__ = [
     "default_matrix",
     "DraftApproveState",
     "apply_confirmation",
+    "archive_draft_fn",
     "build_draft_approve_graph",
+    "calendar_action_draft_fn",
+    "make_calendar_action_apply_fn",
     "make_connector_apply_fn",
+    "make_label_apply_fn",
     "resume_workflow",
+    "HYGIENE_ACTIONS",
     "MAX_ITERATIONS",
     "JsonNudgeState",
     "find_nudge_candidates",
