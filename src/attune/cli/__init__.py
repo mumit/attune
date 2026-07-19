@@ -51,6 +51,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="apply the displayed deterministic deployment plan without prompting",
     )
+    p_init.add_argument(
+        "--google-setup",
+        action="store_true",
+        help="run the guided, resumable Google Cloud setup checklist and exit",
+    )
+    p_init.add_argument(
+        "--quick",
+        action="store_true",
+        help="ask only the essential questions; default everything else",
+    )
+    p_init.add_argument(
+        "--recommended",
+        action="store_true",
+        help="fill ATTUNE_MODEL_* overrides and embedding dims from the "
+        "documented mixed-provider starting point (usable with --quick)",
+    )
     p_init.set_defaults(func=_cmd_init)
 
     p_doctor = sub.add_parser(
@@ -177,6 +193,16 @@ def build_parser() -> argparse.ArgumentParser:
     a_record.set_defaults(func=_cmd_autonomy_record)
     p_autonomy.set_defaults(func=_cmd_autonomy_help, parser=p_autonomy)
 
+    p_slack = sub.add_parser(
+        "slack", help="Slack app helpers (manifest generation)"
+    )
+    slack_sub = p_slack.add_subparsers(dest="slack_command")
+    s_manifest = slack_sub.add_parser(
+        "manifest", help="print a ready-to-paste Slack app manifest"
+    )
+    s_manifest.set_defaults(func=_cmd_slack_manifest)
+    p_slack.set_defaults(func=_cmd_slack_help, parser=p_slack)
+
     return parser
 
 
@@ -206,6 +232,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _cmd_init(args: Any) -> int:
+    if args.google_setup:
+        from .google_setup_cmd import run_google_setup_command
+
+        return run_google_setup_command(env_file=args.env_file)
+
     from .init_cmd import run_init
 
     return run_init(
@@ -213,6 +244,8 @@ def _cmd_init(args: Any) -> int:
         fresh=args.fresh,
         target=args.target,
         yes=args.yes,
+        quick=args.quick,
+        recommended=args.recommended,
     )
 
 
@@ -328,5 +361,16 @@ def _cmd_autonomy_record(args: Any) -> int:
 
 
 def _cmd_autonomy_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
+
+
+def _cmd_slack_manifest(args: Any) -> int:
+    from .slack_manifest_cmd import run_slack_manifest
+
+    return run_slack_manifest()
+
+
+def _cmd_slack_help(args: Any) -> int:
     args.parser.print_help()
     return 1

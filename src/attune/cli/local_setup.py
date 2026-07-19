@@ -82,6 +82,25 @@ def render_local_plan(plan: LocalPlan) -> list[str]:
     ]
 
 
+#: Non-ATTUNE-prefixed variables that still carry Attune-held credentials —
+#: scrubbed from child processes alongside every ``ATTUNE_*`` value.
+_SECRET_ENV_NAMES = frozenset({"SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"})
+
+
+def scrubbed_subprocess_env() -> dict[str, str]:
+    """The environment external tool subprocesses (docker compose, gcloud)
+    receive: the parent environment minus every ``ATTUNE_``-prefixed value
+    and known credential-bearing names. The tools need their own config
+    (PATH, HOME, DOCKER_*/CLOUDSDK_*) to work, so this is a denylist of what
+    Attune holds, not an allowlist — the decision log's "receives no Attune
+    environment or credential" made literal rather than aspirational."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("ATTUNE_") and key not in _SECRET_ENV_NAMES
+    }
+
+
 def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
@@ -89,6 +108,7 @@ def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         shell=False,
+        env=scrubbed_subprocess_env(),
     )
 
 
