@@ -8,12 +8,47 @@ untrusted input. Autonomy is *earned per (action, domain)*, never global.
 Nothing here executes anything. It's the gate other modules consult before
 acting: "am I allowed to *send* a reply on the *personal-mail* domain right now,
 or only *draft* it?" The orchestrator asks; this answers.
+
+Scoped grants (Phase 4 stage 1, G14) — signal-scoped autonomy
+---------------------------------------------------------------
+
+A (action, domain) pair can now hold MULTIPLE grants, each optionally scoped
+to a :class:`GrantScope` predicate over the two signals the orchestrator
+already computes: triage ``priority`` ("urgent"/"routine"/"noise") and the
+sender's importance ``tier`` ("high"/"normal"/"low"). This is what makes
+"auto-file NOISE newsletters" and "auto-draft ROUTINE replies from known
+senders, always interrupt for URGENT" expressible as grants, rather than
+requiring a new gate for every such rule.
+
+Two rules make this fail-closed rather than merely convenient:
+
+1. **Missing context never matches a predicate.** A grant scoped to
+   ``priorities={"routine"}`` does not apply to an item whose priority is
+   unknown (e.g. no importance profile, no sender) — it falls back to
+   whatever unscoped grant exists, or the READ_ONLY floor. A predicate that
+   is ``None`` (unset) matches anything, including missing context — this is
+   what makes an ordinary unscoped grant behave exactly as it always has.
+
+2. **The URGENT interrupt rule.** Regardless of scope matching, when the
+   evaluation context's priority is "urgent", any matched rung ABOVE PROPOSE
+   is capped down to PROPOSE — UNLESS that grant's own scope explicitly lists
+   "urgent" in its ``priorities`` set. Practically: an unscoped ACT_NOTIFY
+   grant on (DRAFT_REPLY, MAIL) will auto-apply a ROUTINE reply but still
+   interrupt for an URGENT one, because "always interrupt for URGENT" is the
+   product's default posture. Auto-acting on urgent items is not the default
+   for any grant — it requires a human to deliberately write "urgent" into
+   that grant's scope, an explicit, reviewable choice rather than something
+   that falls out of granting a rung.
+
+Grant/revoke stay CLI-only and additive/subtractive per (action, domain,
+scope) triple — see ``grants.py`` and ``cli/autonomy_cmd.py``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum, Enum
+from typing import Any
 
 
 class Rung(IntEnum):
@@ -48,34 +83,188 @@ class Action(str, Enum):
     FOLLOW_UP = "follow_up"
 
 
-@dataclass(frozen=True)
-class PermissionMatrix:
-    """Maps (Action, Domain) -> the max Rung currently granted.
+class _Unset:
+    """Sentinel distinguishing "no scope argument given" from an explicit
+    ``scope=None`` (which targets the unscoped grant specifically) —
+    :meth:`PermissionMatrix.revoke`'s default has to tell those apart:
+    omitting the argument entirely revokes every scope for the pair (the
+    pre-scoping behavior), while ``scope=None`` revokes only the unscoped
+    entry, leaving any scoped grants for that pair untouched."""
 
-    Anything not present defaults to READ_ONLY: the safe floor. Grants are added
-    deliberately as trust is built, and can be clawed back by removing them.
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid only
+        return "UNSET"
+
+
+UNSET: Any = _Unset()
+
+
+@dataclass(frozen=True)
+class GrantScope:
+    """An optional predicate narrowing a grant to a context.
+
+    ``priorities``/``tiers`` are ``None`` (no predicate — matches any value,
+    including missing context) or a non-empty ``frozenset`` of the
+    corresponding enum's string values (``triage.Priority`` /
+    ``importance.ImportanceTier``). Kept as plain strings here (not the enums
+    themselves) so this module doesn't need to import ``triage``/
+    ``importance`` — validation against the real enums happens where scopes
+    are constructed from user input (``grants.parse_scope``).
+
+    A scope with both fields ``None`` is the unscoped grant; callers should
+    canonicalize that to bare ``scope=None`` rather than constructing one
+    (``PermissionMatrix.grant``/``revoke`` do this for you).
     """
 
-    grants: dict[tuple[Action, Domain], Rung] = field(default_factory=dict)
+    priorities: "frozenset[str] | None" = None
+    tiers: "frozenset[str] | None" = None
 
-    def max_rung(self, action: Action, domain: Domain) -> Rung:
-        return self.grants.get((action, domain), Rung.READ_ONLY)
+    def matches(self, priority: "str | None", tier: "str | None") -> bool:
+        """Fail-closed predicate matching: a predicate with values matches
+        only when the corresponding context value is PRESENT and a member of
+        the set. Missing context (``None``) never satisfies a predicate that
+        has values — a priority-scoped grant cannot apply to an item whose
+        priority is unknown. A ``None`` predicate (no values) matches
+        anything, including missing context."""
+        if self.priorities is not None:
+            if priority is None or priority not in self.priorities:
+                return False
+        if self.tiers is not None:
+            if tier is None or tier not in self.tiers:
+                return False
+        return True
 
-    def allows(self, action: Action, domain: Domain, rung: Rung) -> bool:
-        """True if performing ``action`` on ``domain`` at ``rung`` is permitted."""
-        return rung <= self.max_rung(action, domain)
+    def is_unscoped(self) -> bool:
+        return self.priorities is None and self.tiers is None
 
-    def grant(self, action: Action, domain: Domain, rung: Rung) -> "PermissionMatrix":
-        """Return a new matrix with an added/updated grant (immutable update)."""
+
+def _canonical_scope(scope: "GrantScope | None") -> "GrantScope | None":
+    """Normalize a scope with no predicates at all to bare ``None`` — the
+    unscoped grant has exactly one representation in storage."""
+    if scope is not None and scope.is_unscoped():
+        return None
+    return scope
+
+
+@dataclass(frozen=True)
+class ScopedGrant:
+    """One grant entry: a rung, optionally narrowed to a :class:`GrantScope`.
+    ``scope=None`` is the unscoped grant — matches any context."""
+
+    rung: Rung
+    scope: "GrantScope | None" = None
+
+
+@dataclass(frozen=True)
+class PermissionMatrix:
+    """Maps (Action, Domain) -> the grants currently held for that pair.
+
+    Anything not present defaults to READ_ONLY: the safe floor. Grants are
+    added deliberately as trust is built, and can be clawed back by removing
+    them. A pair may hold MULTIPLE grants (Phase 4 stage 1) — an unscoped
+    grant plus any number of scoped ones — and the effective rung for a
+    given evaluation context is the max over every grant whose scope matches
+    that context (see :meth:`max_rung`).
+    """
+
+    grants: "dict[tuple[Action, Domain], tuple[ScopedGrant, ...]]" = field(
+        default_factory=dict
+    )
+
+    def max_rung(
+        self,
+        action: Action,
+        domain: Domain,
+        *,
+        priority: "str | None" = None,
+        tier: "str | None" = None,
+    ) -> Rung:
+        """The highest rung any matching grant confers for this context.
+
+        Called with no ``priority``/``tier`` (every pre-Phase-4 call site),
+        only unscoped grants can match — fail-closed matching means a scoped
+        predicate never matches missing context — so this is byte-identical
+        to the pre-scoping behavior. The URGENT interrupt rule (module
+        docstring) is applied per matching grant before taking the max.
+        """
+        best = Rung.READ_ONLY
+        for sg in self.grants.get((action, domain), ()):
+            if sg.scope is not None and not sg.scope.matches(priority, tier):
+                continue
+            rung = sg.rung
+            if priority == "urgent" and rung > Rung.PROPOSE:
+                urgent_scoped = (
+                    sg.scope is not None
+                    and sg.scope.priorities is not None
+                    and "urgent" in sg.scope.priorities
+                )
+                if not urgent_scoped:
+                    rung = Rung.PROPOSE
+            if rung > best:
+                best = rung
+        return best
+
+    def allows(
+        self,
+        action: Action,
+        domain: Domain,
+        rung: Rung,
+        *,
+        priority: "str | None" = None,
+        tier: "str | None" = None,
+    ) -> bool:
+        """True if performing ``action`` on ``domain`` at ``rung`` is
+        permitted in this context."""
+        return rung <= self.max_rung(action, domain, priority=priority, tier=tier)
+
+    def grant(
+        self,
+        action: Action,
+        domain: Domain,
+        rung: Rung,
+        *,
+        scope: "GrantScope | None" = None,
+    ) -> "PermissionMatrix":
+        """Return a new matrix with a grant added/replaced (immutable
+        update). Replaces an existing grant for this (action, domain) that
+        has the SAME scope; otherwise appends a new one alongside whatever
+        grants already exist for the pair."""
+        norm_scope = _canonical_scope(scope)
         new = dict(self.grants)
-        new[(action, domain)] = rung
+        existing = list(new.get((action, domain), ()))
+        for i, sg in enumerate(existing):
+            if sg.scope == norm_scope:
+                existing[i] = ScopedGrant(rung, norm_scope)
+                break
+        else:
+            existing.append(ScopedGrant(rung, norm_scope))
+        new[(action, domain)] = tuple(existing)
         return PermissionMatrix(new)
 
-    def revoke(self, action: Action, domain: Domain) -> "PermissionMatrix":
-        """Return a new matrix without this grant — the (action, domain)
-        falls back to the READ_ONLY floor (immutable update, like grant)."""
+    def revoke(
+        self,
+        action: Action,
+        domain: Domain,
+        *,
+        scope: "GrantScope | None | _Unset" = UNSET,
+    ) -> "PermissionMatrix":
+        """Return a new matrix without this grant (immutable update, like
+        ``grant``). No ``scope`` argument revokes EVERY grant for the pair
+        (the pre-scoping behavior — falls all the way to the READ_ONLY
+        floor). An explicit ``scope`` (including ``scope=None`` for the
+        unscoped grant specifically) revokes only the matching-scope entry,
+        leaving any other scoped grants for the pair untouched."""
         new = dict(self.grants)
-        new.pop((action, domain), None)
+        if scope is UNSET:
+            new.pop((action, domain), None)
+        else:
+            norm_scope = _canonical_scope(scope)
+            remaining = tuple(
+                sg for sg in new.get((action, domain), ()) if sg.scope != norm_scope
+            )
+            if remaining:
+                new[(action, domain)] = remaining
+            else:
+                new.pop((action, domain), None)
         return PermissionMatrix(new)
 
 

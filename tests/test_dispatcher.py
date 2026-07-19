@@ -924,6 +924,192 @@ def test_routine_thread_proceeds_to_draft():
     assert len(result) == 1
 
 
+# ---------------------------------------------------------------------------
+# SEND_REPLY action selection (Phase 4 stage 2, docs/future-state.md; G15)
+# ---------------------------------------------------------------------------
+
+
+class _SendCapableConnector(_FakeConnector):
+    """A _FakeConnector that also supports the gated send_reply write path,
+    for SEND_REPLY action-selection tests. Records every send_reply call."""
+
+    def __init__(self, threads=None, supports=True):
+        super().__init__(threads)
+        self._supports = supports
+        self.send_calls: list[str] = []
+
+    def supports_sending(self):
+        return self._supports
+
+    def send_reply(self, *, draft_id):
+        self.send_calls.append(draft_id)
+
+
+class _AutoSendGraph:
+    """A fake graph whose gate auto-applied at the given rung and produced
+    an applied_ref — the shape submit_gmail_thread's SEND_REPLY notify_text
+    branch needs (_FakeGraph's default shape carries no applied_ref)."""
+
+    def __init__(self, rung=3, applied_ref="d-1"):
+        self._rung = rung
+        self._applied_ref = applied_ref
+        self.calls: list[dict] = []
+
+    def invoke(self, state, config):
+        self.calls.append({"state": state, "config": config})
+        return {
+            "proposed_draft": "drafted reply",
+            "retrieved_memories": [],
+            "audit_events": [
+                {"event": "autonomy_gate", "ts": "2026-07-10T00:00:01+00:00",
+                 "action": state.get("action"), "domain": "mail",
+                 "max_rung": self._rung, "routed_to": "auto_apply"},
+                {"event": "auto_applied", "ts": "2026-07-10T00:00:02+00:00"},
+            ],
+            "applied_ref": self._applied_ref,
+        }
+
+
+def test_send_reply_gates_pass_needs_all_three():
+    """Matrix of the three independent gates (Phase 4 stage 2, G15): only
+    when matrix rung + connector.supports_sending() + mail_send_enabled ALL
+    hold does the mail path choose action=send_reply over draft_reply."""
+    from attune.orchestrator import Action, Domain, Rung, default_matrix
+
+    granted_matrix = default_matrix().grant(Action.SEND_REPLY, Domain.MAIL, Rung.PROPOSE)
+    ungranted_matrix = default_matrix()  # no SEND_REPLY entry -> READ_ONLY
+
+    cases = [
+        # (matrix, supports_sending, mail_send_enabled, expect_send)
+        (granted_matrix, True, True, True),
+        (ungranted_matrix, True, True, False),
+        (granted_matrix, False, True, False),
+        (granted_matrix, True, False, False),
+    ]
+    for i, (matrix, supports, enabled, expect_send) in enumerate(cases):
+        graph = _FakeGraph(proposed="draft text")
+        app = _fake_app_ctx(graph=graph)
+        app.matrix = matrix
+        connector = _SendCapableConnector({"t1": _FakeThread("t1")}, supports=supports)
+        gmail = _FakeGmail(["t1"])
+
+        handle_gmail_notification(
+            app, {"emailAddress": "me@example.com", "historyId": f"80{i}"},
+            gmail_service=gmail, watch_state=_FakeWatchState(history_id="100"),
+            connector=connector,
+            post_approval=lambda *a, **kw: None,
+            user_id="me@example.com",
+            triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fine"),
+            mail_send_enabled=enabled,
+        )
+
+        action = graph.calls[0]["state"]["action"]
+        assert (action == "send_reply") == expect_send, (
+            matrix is granted_matrix, supports, enabled,
+        )
+
+
+def test_send_reply_gates_pass_computes_tier_fail_closed_without_profile():
+    """The tier lookup mirrors the gate node's own fail-closed posture: no
+    importance_profile at all still lets an UNSCOPED grant match (missing
+    context only blocks a grant that NEEDS the signal)."""
+    from attune.dispatcher import _send_reply_gates_pass
+    from attune.orchestrator import Action, Domain, Rung, default_matrix
+
+    app = _fake_app_ctx(graph=_FakeGraph())
+    app.matrix = default_matrix().grant(Action.SEND_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    connector = _SendCapableConnector({"t1": _FakeThread("t1")}, supports=True)
+
+    assert _send_reply_gates_pass(
+        app, connector, priority="routine", sender="x@y.com",
+        mail_send_enabled=True,
+    ) is True
+
+
+def test_send_reply_card_title_says_approve_to_send():
+    """At PROPOSE, the card's title SAYS it will send — presentation only,
+    the draft/body text is unaffected (same rule as the URGENT marker)."""
+    from attune.orchestrator import Action, Domain, Rung, default_matrix
+
+    matrix = default_matrix().grant(Action.SEND_REPLY, Domain.MAIL, Rung.PROPOSE)
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    app.matrix = matrix
+    connector = _SendCapableConnector({"t1": _FakeThread("t1")})
+    posted = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "820"},
+        gmail_service=_FakeGmail(["t1"]), watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda tid, draft, rationale, *, title=None: posted.append(
+            {"draft": draft, "title": title}
+        ),
+        user_id="me@example.com",
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fine"),
+        mail_send_enabled=True,
+    )
+
+    assert len(posted) == 1
+    assert "Approve to SEND this reply" in posted[0]["title"]
+    assert posted[0]["draft"] == "drafted reply"
+
+
+def test_send_reply_urgent_card_combines_send_and_urgent_markers():
+    from attune.orchestrator import Action, Domain, Rung, default_matrix
+
+    matrix = default_matrix().grant(Action.SEND_REPLY, Domain.MAIL, Rung.PROPOSE)
+    graph = _FakeGraph(proposed="drafted reply")
+    app = _fake_app_ctx(graph=graph)
+    app.matrix = matrix
+    connector = _SendCapableConnector({"t1": _FakeThread("t1")})
+    posted = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "821"},
+        gmail_service=_FakeGmail(["t1"]), watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda tid, draft, rationale, *, title=None: posted.append(title),
+        user_id="me@example.com",
+        triage_fn=lambda client, summary: TriageResult(Priority.URGENT, "client blocked"),
+        mail_send_enabled=True,
+    )
+
+    assert "Approve to SEND this reply" in posted[0]
+    assert "URGENT" in posted[0]
+
+
+def test_send_reply_act_notify_auto_sends_with_specific_notification():
+    """The exit criterion's own words: an ACT_NOTIFY-granted SEND_REPLY
+    auto-sends and the notification route gets a plain "Sent reply to
+    <sender>: <subject>" line — not the generic "Acted autonomously"
+    template every other auto-applied action shares."""
+    from attune.orchestrator import Action, Domain, Rung, default_matrix
+
+    matrix = default_matrix().grant(Action.SEND_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    graph = _AutoSendGraph(rung=3, applied_ref="d-1")
+    app = _fake_app_ctx(graph=graph)
+    app.matrix = matrix
+    connector = _SendCapableConnector(
+        {"t1": _FakeThread("t1", subject="Q3 numbers", from_addr="client@x.com")}
+    )
+    notices = []
+
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "830"},
+        gmail_service=_FakeGmail(["t1"]), watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        notify=notices.append,
+        triage_fn=lambda client, summary: TriageResult(Priority.ROUTINE, "fine"),
+        mail_send_enabled=True,
+    )
+
+    assert notices == ["Sent reply to client@x.com: Q3 numbers"]
+    assert graph.calls[0]["state"]["action"] == "send_reply"
+
+
 def test_noise_thread_records_triage_audit_event():
     audit_log = _FakeAuditLog()
     graph = _FakeGraph()

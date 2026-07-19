@@ -474,6 +474,55 @@ def test_calendar_writes_is_a_fatal_check():
 
 
 # ---------------------------------------------------------------------------
+# mail-send (Phase 4 stage 2, docs/future-state.md; G15)
+# ---------------------------------------------------------------------------
+
+
+def test_mail_send_skip_when_disabled():
+    from attune.cli.doctor import check_mail_send
+    from attune.config import Settings
+
+    settings = Settings.from_env({})
+    status, detail = check_mail_send(settings)
+    assert status == SKIP
+    assert "ATTUNE_MAIL_SEND_ENABLED" in detail
+
+
+def test_mail_send_fail_on_mcp_backend():
+    from attune.cli.doctor import check_mail_send
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_MAIL_SEND_ENABLED": "1",
+        "ATTUNE_WORKSPACE_BACKEND": "mcp",
+        "ATTUNE_MCP_URL": "https://mcp.example/mcp",
+    })
+    status, detail = check_mail_send(settings)
+    assert status == FAIL
+    assert "MCP" in detail
+    assert "contract v1" in detail
+
+
+def test_mail_send_pass_on_google_oauth_backend():
+    from attune.cli.doctor import check_mail_send
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_MAIL_SEND_ENABLED": "1",
+        "ATTUNE_WORKSPACE_BACKEND": "google_oauth",
+    })
+    status, detail = check_mail_send(settings)
+    assert status == PASS
+    assert "gmail.send" in detail
+
+
+def test_mail_send_is_a_fatal_check():
+    from attune.cli.doctor import FATAL_CHECKS
+
+    assert "mail-send" in FATAL_CHECKS
+
+
+# ---------------------------------------------------------------------------
 # audit-chain (security finding F1)
 # ---------------------------------------------------------------------------
 

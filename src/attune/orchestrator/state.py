@@ -82,6 +82,16 @@ class DraftApproveState(TypedDict, total=False):
     # this was proposed — mail: the thread's last_message_at ISO; calendar:
     # the conflicted event's start ISO. Apply refuses when it changed.
     source_snapshot: Optional[str]
+    # LABEL proposals only (Phase 3 stage 1, G9): the label to apply, e.g.
+    # connectors.base.DEFAULT_NOISE_LABEL. Found missing during Phase 4
+    # stage 2 while writing a REAL (not fake-graph) regression test for the
+    # resume-routing fix: an undeclared TypedDict key is silently dropped
+    # by LangGraph across the interrupt/resume boundary, so
+    # make_label_apply_fn's apply() always saw label_name=None on a real
+    # compiled graph and skipped ("nothing_to_materialize") — the archive-
+    # proposal write path never actually archived anything in production.
+    # See docs/decisions.md.
+    label_name: Optional[str]
 
     # --- accumulator: append-only, survives resume ---
     audit_events: Annotated[list[dict[str, Any]], operator.add]

@@ -92,6 +92,16 @@ class Settings:
     # dispatcher.py's docstring and docs/decisions.md.
     calendar_writes_enabled: bool = False
 
+    # Phase 4 stage 2 (docs/future-state.md, G15): opt-in SEND_REPLY write
+    # path. Default off. Same double-gate discipline again (config flag + a
+    # real gmail.send scope) and, like labels/calendar-writes, only ONE of
+    # three independent gates the dispatcher checks before ever choosing
+    # action=SEND_REPLY over DRAFT_REPLY — see dispatcher.py's
+    # ``_send_reply_gates_pass`` and docs/decisions.md. A grant of SEND_REPLY
+    # via the CLI additionally refuses outright while this is off (rule 4:
+    # no shortcuts) — see cli/autonomy_cmd.py.
+    mail_send_enabled: bool = False
+
     # MCP backend (Streamable HTTP). Separate URLs support managed Gmail and
     # Calendar servers; ATTUNE_MCP_URL is the shared fallback.
     mcp_url: str | None = None
@@ -165,6 +175,13 @@ class Settings:
     # docs/decisions.md). Never read/written by the CLI's plain preview.
     brief_snapshot_path: str = "./brief_snapshot.json"
 
+    # Phase 4 stage 2 (docs/future-state.md, G13): graduation/demotion
+    # approval-card bookkeeping — a posted card's exact snapshot (so
+    # approving it later can re-grant a SCOPED demotion correctly) and
+    # 30-day rejection cooldowns. See orchestrator/grants.py's
+    # JsonGraduationState.
+    graduation_state_path: str = "./graduation_state.json"
+
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -236,6 +253,7 @@ class Settings:
             google_credentials_file=e.get("ATTUNE_GOOGLE_CREDENTIALS_FILE"),
             mail_labels_enabled=_is_true(e.get("ATTUNE_MAIL_LABELS_ENABLED")),
             calendar_writes_enabled=_is_true(e.get("ATTUNE_CALENDAR_WRITES_ENABLED")),
+            mail_send_enabled=_is_true(e.get("ATTUNE_MAIL_SEND_ENABLED")),
             mcp_url=e.get("ATTUNE_MCP_URL"),
             mcp_gmail_url=e.get("ATTUNE_MCP_GMAIL_URL"),
             mcp_calendar_url=e.get("ATTUNE_MCP_CALENDAR_URL"),
@@ -306,6 +324,9 @@ class Settings:
             ),
             brief_snapshot_path=_path(
                 "ATTUNE_BRIEF_SNAPSHOT_PATH", "brief_snapshot.json"
+            ),
+            graduation_state_path=_path(
+                "ATTUNE_GRADUATION_STATE_PATH", "graduation_state.json"
             ),
         )
 

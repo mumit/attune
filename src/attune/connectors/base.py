@@ -19,6 +19,11 @@ Two safety facts are baked into this interface:
    implementation may raise ``SendNotPermitted``; the direct-OAuth implementation
    gates it behind an explicit scope + autonomy grant. This keeps the safe
    default (draft, don't send) structural rather than a matter of discipline.
+   ``supports_sending()`` (Phase 4 stage 2, G15) is the capability probe the
+   dispatcher checks before ever choosing ``action=SEND_REPLY`` over
+   ``DRAFT_REPLY`` — see ``dispatcher.py``'s ``_send_reply_gates_pass`` and
+   ``orchestrator.draft_approve.make_connector_apply_fn``, which still
+   drafts first and only then sends, when granted.
 
 3. **Labeling/archiving mirrors the same structural-refusal shape** (Phase 3
    stage 1, ``docs/future-state.md`` G9). ``label_thread`` is the real write
@@ -237,6 +242,20 @@ class WorkspaceConnector(ABC):
             "This connector is draft-only. Sending requires an explicit send "
             "scope and an autonomy grant; by default the human sends from Gmail."
         )
+
+    def supports_sending(self) -> bool:
+        """Capability probe for :meth:`send_reply` (Phase 4 stage 2, G15).
+
+        False by default. Unlike :meth:`supports_labeling`/
+        :meth:`supports_calendar_writes` — which report BACKEND-structural
+        capability independent of the deployment's opt-in flag, because a
+        connector that structurally CAN label/write still needs a separate
+        opt-in before doing so — sending is dangerous enough that "can this
+        backend send in principle" isn't the useful question for a caller
+        deciding whether to even build a SEND_REPLY proposal. This mirrors
+        ``send_enabled`` directly (see ``DirectOAuthConnector``): the probe
+        IS the enabled posture, not a separate structural fact about it."""
+        return False
 
     def add_label(self, *, thread_id: str, label: str) -> None:
         """Apply a label (organizational, low-risk). Optional to implement."""
