@@ -9,6 +9,8 @@ from attune.hosted.google_provider import (
     CALENDAR_PRIMARY_URL,
     CALENDAR_EVENTS_URL,
     CALENDAR_READONLY_SCOPE,
+    GMAIL_COMPOSE_SCOPE,
+    GMAIL_DRAFTS_URL,
     GMAIL_PROFILE_URL,
     GMAIL_THREADS_URL,
     GMAIL_READONLY_SCOPE,
@@ -173,6 +175,82 @@ def test_bounded_gmail_thread_summaries_use_only_canonical_routes():
     ]
     assert session.calls[1][2]["params"]["maxResults"] == 10
     assert session.calls[2][2]["params"]["format"] == "metadata"
+
+
+def test_gmail_draft_create_uses_fixed_endpoint_and_minimizes_response():
+    session = Session()
+    draft_response = Response(
+        200, {"id": "draft_1", "message": {"id": "msg_1", "threadId": "thread_1"}}
+    )
+
+    def post(url, **kwargs):
+        session.calls.append(("post", url, kwargs))
+        return draft_response if url == GMAIL_DRAFTS_URL else session.token
+
+    session.post = post
+    result = GoogleProvider(session).gmail_draft_create(
+        credential(scopes=[GMAIL_COMPOSE_SCOPE]),
+        thread_ref="thread_1",
+        body="Hello there",
+    )
+    assert result.response() == {"draft_id": "draft_1"}
+    assert [call[1] for call in session.calls] == [GOOGLE_TOKEN_URL, GMAIL_DRAFTS_URL]
+    request_body = session.calls[1][2]["json"]
+    assert request_body["message"]["threadId"] == "thread_1"
+    import base64
+
+    decoded = base64.urlsafe_b64decode(request_body["message"]["raw"])
+    assert decoded.count(b"Hello there") == 1
+    assert all(call[2]["allow_redirects"] is False for call in session.calls)
+    assert session.token.closed and draft_response.closed
+
+
+def test_gmail_draft_create_rejects_invalid_thread_ref_and_oversized_body():
+    session = Session()
+    with pytest.raises(ValueError):
+        GoogleProvider(session).gmail_draft_create(
+            credential(), thread_ref="../etc", body="x"
+        )
+    with pytest.raises(ValueError):
+        GoogleProvider(session).gmail_draft_create(
+            credential(), thread_ref="thread_1", body="x" * 10_001
+        )
+    with pytest.raises(ValueError):
+        GoogleProvider(session).gmail_draft_create(
+            credential(), thread_ref="thread_1", body=""
+        )
+    assert session.calls == []
+
+
+def test_gmail_draft_create_requires_compose_scope():
+    session = Session()
+    with pytest.raises(ProviderFailure):
+        GoogleProvider(session).gmail_draft_create(
+            credential(scopes=[GMAIL_READONLY_SCOPE]),
+            thread_ref="thread_1",
+            body="Hello",
+        )
+    assert session.calls == []
+
+
+def test_gmail_draft_create_rejects_malformed_draft_response():
+    session = Session()
+
+    def post(url, **kwargs):
+        session.calls.append(("post", url, kwargs))
+        return (
+            Response(200, {"id": "not valid!"})
+            if url == GMAIL_DRAFTS_URL
+            else session.token
+        )
+
+    session.post = post
+    with pytest.raises(ProviderFailure):
+        GoogleProvider(session).gmail_draft_create(
+            credential(scopes=[GMAIL_COMPOSE_SCOPE]),
+            thread_ref="thread_1",
+            body="Hello",
+        )
 
 
 def test_bounded_calendar_events_fix_primary_calendar_and_window():

@@ -96,3 +96,49 @@ submissions were refused with 409. After fresh authentication, the PUT returned
 canonical `authorized` state with Google Chat and Slack selected independently
 for both conversation and morning briefs. No installation, destination,
 ingress, credential, or message was inferred from that success.
+
+## Proactive brief delivery (Phase 5 stage 4, G12)
+
+The morning-brief preference recorded above now has a real delivery path
+behind it, implemented and tested but not deployed. An owner (or, later, a
+recurring trigger — see below) calls `POST /v1/brief/run`; the control
+plane's `HostedBriefProducer` enqueues one `channel.brief.deliver` job and
+dispatches it through the existing producer/broker machinery, idempotent per
+tenant per principal per UTC hour by construction (the dispatch idempotency
+key folds in the current hour, so a second click in the same hour returns
+the same job rather than a duplicate). The worker's `HostedBriefExecutor`
+then:
+
+1. reads bounded, unread Gmail thread metadata and upcoming Calendar events
+   through the same secret-broker routes and caps the conversational brief
+   route uses;
+2. ranks them — plus any recent attended Slack/Chat signal from stage 1's
+   `PostgresAttentionStore` (empty in production today; the seam is wired) —
+   through `brief.build_spine`, the exact pure ranking function local
+   triage and briefs already use, scored by stage 1's
+   `PostgresImportanceProfile`;
+3. renders a bounded, deterministic brief (no model call — see
+   `docs/decisions.md` for why); and
+4. for every ACTIVE, verified owner-DM destination whose stored preference
+   includes briefs for its own provider (`brief_channels`, never
+   `interaction_channels` — the same preference this document's ceremony
+   records), durably proposes the rendered text and asks the channel broker
+   to deliver it, exactly like a conversation reply: the broker
+   independently re-reads the stored text via a one-use claim, never
+   trusting a live parameter from the worker.
+
+One job can legitimately fan out to more than one destination (an owner who
+selected both Google Chat and Slack for briefs gets both), unlike a
+conversation reply's strict one job–one destination shape — see
+`sql/0044_hosted_brief_delivery.sql` for the resulting schema difference.
+Delivery is content-free audited: counts only (how many spine items, how
+many destinations), never rendered text.
+
+Gates: `ATTUNE_ENABLE_HOSTED_BRIEF` (default off) controls both the
+control-plane route and the worker route/executor together. Recurring
+scheduling — firing `channel.brief.deliver` on a timer without an owner
+click — remains future operator work, mirroring the expired-protocol
+retention job's own separate, non-database scheduler identity
+(`protocol_retention.py`) rather than a bespoke mechanism for this one job
+kind. Hosted nudges and hygiene-action proposals (the local product's wider
+Phase 3 suggestion surface) are explicitly out of scope for this phase.

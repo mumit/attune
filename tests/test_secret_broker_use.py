@@ -5,6 +5,7 @@ from uuid import UUID
 
 from attune.hosted.google_provider import (
     CalendarEventSummary,
+    GmailDraftCreated,
     GmailProfile,
     GmailThreadSummary,
     ProviderFailure,
@@ -75,6 +76,12 @@ class Google:
         return (CalendarEventSummary(
             "event_1", "Appointment", "start", "end", "Office", "confirmed"
         ),)
+
+    def gmail_draft_create(self, credential, **kwargs):
+        self.calls.append((credential, kwargs))
+        if self.error:
+            raise self.error
+        return GmailDraftCreated("draft_1")
 
 
 class Audit:
@@ -173,6 +180,58 @@ def test_calendar_failure_is_content_free_audited_and_finalized():
         google=Google(ProviderFailure("provider secret")),
         audit=Audit([True, True]),
     ).google_calendar_primary(INTENT)
+    assert result.status_code == 502 and result.body is None
+    assert vault.finalized[0][1]["outcome"] == "failed"
+
+
+def test_gmail_draft_create_uses_own_capability_and_minimizes_response():
+    vault = Vault(use_intent("google.gmail.draft.create"))
+    google, audit = Google(), Audit()
+    result = SecretBroker(
+        vault=vault, cipher=Cipher(), google=google, audit=audit
+    ).google_gmail_draft_create(INTENT, thread_ref="thread_1", body="Hello there")
+    assert result.status_code == 200
+    assert result.body == {"draft_id": "draft_1"}
+    assert google.calls == [
+        ({"refresh_token": "secret"}, {"thread_ref": "thread_1", "body": "Hello there"})
+    ]
+    assert [event["outcome"] for event in audit.events] == ["allowed", "observed"]
+    assert vault.finalized == [
+        (INTENT, {"producer_kind": "worker", "outcome": "consumed"})
+    ]
+
+
+def test_gmail_draft_create_wrong_connector_capability_is_denied_without_decrypting():
+    vault, cipher, audit = Vault(use_intent("google.gmail.threads.read")), Cipher(), Audit([True])
+    result = SecretBroker(
+        vault=vault, cipher=cipher, google=Google(), audit=audit
+    ).google_gmail_draft_create(INTENT, thread_ref="thread_1", body="Hello")
+    assert result.status_code == 404
+    assert cipher.calls == []
+    assert audit.events[0]["outcome"] == "denied"
+    assert vault.finalized[0][1]["outcome"] == "failed"
+
+
+def test_gmail_draft_create_oversized_body_is_denied_without_calling_provider():
+    vault = Vault(use_intent("google.gmail.draft.create"))
+    google, audit = Google(), Audit([True])
+    result = SecretBroker(
+        vault=vault, cipher=Cipher(), google=google, audit=audit
+    ).google_gmail_draft_create(INTENT, thread_ref="thread_1", body="x" * 10_001)
+    assert result.status_code == 400
+    assert google.calls == []
+    assert audit.events[0]["outcome"] == "denied"
+    assert vault.finalized[0][1]["outcome"] == "failed"
+
+
+def test_gmail_draft_create_provider_failure_is_content_free_audited_and_finalized():
+    vault = Vault(use_intent("google.gmail.draft.create"))
+    result = SecretBroker(
+        vault=vault,
+        cipher=Cipher(),
+        google=Google(ProviderFailure("provider secret")),
+        audit=Audit([True, True]),
+    ).google_gmail_draft_create(INTENT, thread_ref="thread_1", body="Hello")
     assert result.status_code == 502 and result.body is None
     assert vault.finalized[0][1]["outcome"] == "failed"
 

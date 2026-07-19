@@ -62,10 +62,16 @@ from attune.hosted.hosted_policy import PostgresHostedPolicyRepository
 from attune.hosted.hosted_channels import PostgresHostedChannelRepository
 from attune.hosted.channel_setup import PostgresHostedChannelSetupRepository
 from attune.hosted.channel_broker import PostgresChannelBrokerRepository
+from attune.hosted.brief_delivery import (
+    BriefDestination,
+    BriefWork,
+    PostgresHostedBriefRepository,
+)
 from attune.hosted.google_chat_conversation_executor import (
     PostgresGoogleChatConversationWorkRepository,
 )
 from attune.hosted.capability_gateway import (
+    AuthorizedCapability,
     CapabilityDefinition,
     CapabilityDenied,
     CapabilityRegistry,
@@ -74,11 +80,27 @@ from attune.hosted.capability_gateway import (
     RiskTier,
     TypedCapabilityGateway,
 )
+from attune.hosted.capability_admission import PostgresCapabilityAdmissionRepository
 from attune.hosted.identity import VerifiedIdentity
 from attune.hosted.identity_session import (
     IdentitySessionSecrets,
     PostgresIdentitySessionRepository,
 )
+from attune.hosted.intelligence import (
+    IntelligenceReferenceHasher,
+    PostgresAttentionStore,
+    PostgresImportanceProfile,
+)
+from attune.orchestrator.attention import RETENTION_DAYS, AttentionItem
+from attune.orchestrator.importance import (
+    DECAY_DAYS,
+    HIGH_MIN_SIGNALS,
+    LOW_RUN_THRESHOLD,
+    ImportanceTier,
+    TierAssessment,
+)
+from attune.orchestrator.triage import Priority
+from attune.memory.signals import ActionSignal
 from attune.hosted.tenant import TenantContext, tenant_transaction
 from attune.hosted.vault import (
     PostgresCredentialIntentRepository,
@@ -130,7 +152,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0041_web_conversation.sql"
+    assert migrations[-1].name == "0044_hosted_brief_delivery.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -259,6 +281,34 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_web_message_executor" in web_conversation
     assert "TO attune_control_plane" in web_conversation
     assert "provider IN ('google', 'slack', 'web')" in web_conversation
+    intelligence = sql_by_name["0042_intelligence_persistence.sql"]
+    assert "CREATE TABLE attune.importance_signals" in intelligence
+    assert "CREATE TABLE attune.attention_items" in intelligence
+    assert "importance_signals_one_pin_per_sender" in intelligence
+    assert "FORCE ROW LEVEL SECURITY" in intelligence
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON attune.importance_signals, attune.attention_items" in intelligence
+    assert "TO attune_worker" in intelligence
+    assert "attune_control_plane" not in intelligence
+    capability_admission = sql_by_name["0043_capability_admission.sql"]
+    assert "CREATE TABLE attune.capability_admissions" in capability_admission
+    assert "capability_admissions_no_update_delete" in capability_admission
+    assert "ALTER TABLE attune.approvals ALTER COLUMN job_id DROP NOT NULL" in capability_admission
+    assert "ADD COLUMN admission_id uuid" in capability_admission
+    assert "attune_capability_executor" in capability_admission
+    assert "claim_capability_approval" in capability_admission
+    assert (
+        "REVOKE UPDATE ON attune.approvals FROM attune_worker, attune_control_plane"
+        in capability_admission
+    )
+    brief_delivery = sql_by_name["0044_hosted_brief_delivery.sql"]
+    assert "CREATE TABLE attune.hosted_brief_deliveries" in brief_delivery
+    assert "PRIMARY KEY (tenant_id, job_id, destination_id)" in brief_delivery
+    assert "claim_google_chat_brief_delivery" in brief_delivery
+    assert "claim_slack_brief_delivery" in brief_delivery
+    assert "'google_chat' = ANY(preference.brief_channels)" in brief_delivery
+    assert "'slack' = ANY(preference.brief_channels)" in brief_delivery
+    assert "GRANT SELECT, INSERT ON attune.hosted_brief_deliveries TO attune_worker" in brief_delivery
+    assert "REVOKE CREATE ON SCHEMA attune FROM attune_channel_link_executor" in brief_delivery
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -298,6 +348,17 @@ def test_lifecycle_inventory_is_complete_and_fail_closed():
     assert RELATIONAL_ASSET_BY_TABLE["deletion_markers"].deletion_rule == (
         DeletionRule.RETAIN_TOMBSTONE
     )
+    assert RELATIONAL_ASSET_BY_TABLE["importance_signals"].data_class == (
+        DataClass.CUSTOMER_CONTENT
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["importance_signals"].deletion_rule == (
+        DeletionRule.ERASE
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["importance_signals"].customer_export
+    assert RELATIONAL_ASSET_BY_TABLE["attention_items"].data_class == (
+        DataClass.CUSTOMER_CONTENT
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["attention_items"].customer_export
     with pytest.raises(RuntimeError, match="does not match tenant tables"):
         validate_relational_lifecycle_inventory((*TENANT_TABLES, "unreviewed_table"))
 
@@ -373,6 +434,85 @@ def test_repositories_reject_invalid_data_before_connecting():
         )
 
 
+_TEST_HMAC_KEY = hashlib.sha256(b"attune-test-intelligence-hmac-key").digest()
+
+
+def test_intelligence_reference_hasher_is_keyed_deterministic_and_domain_separated():
+    with pytest.raises(ValueError, match="32 bytes"):
+        IntelligenceReferenceHasher(b"short")
+
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    first = hasher.hash("sender", "vip@example.com")
+    again = hasher.hash("sender", "vip@example.com")
+    assert first == again
+    assert len(first) == 32
+
+    # Domain separation: the same literal value hashed under a different
+    # ``kind`` never collides.
+    assert first != hasher.hash("channel", "vip@example.com")
+
+    # A different key must never reproduce the same digest (the whole point
+    # of a keyed hash over a plain one -- an attacker without the key cannot
+    # dictionary-attack a guessable sender/channel reference).
+    other_key = hashlib.sha256(b"a different key").digest()
+    assert hasher.hash("sender", "vip@example.com") != (
+        IntelligenceReferenceHasher(other_key).hash("sender", "vip@example.com")
+    )
+
+    with pytest.raises(ValueError, match="invalid intelligence reference"):
+        hasher.hash("sender", "")
+    with pytest.raises(ValueError, match="invalid intelligence reference"):
+        hasher.hash("sender", "x" * 321)
+
+
+def test_intelligence_repositories_reject_invalid_data_before_connecting():
+    def forbidden_connection():
+        raise AssertionError("invalid input must not reach the database")
+
+    context = TenantContext(TENANT_A)
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    importance = PostgresImportanceProfile(
+        forbidden_connection, context, PRINCIPAL_A, reference_hasher=hasher
+    )
+    attention = PostgresAttentionStore(
+        forbidden_connection, context, PRINCIPAL_A, reference_hasher=hasher
+    )
+
+    with pytest.raises(ValueError, match="signal must be an ActionSignal"):
+        importance.record_signal("vip@example.com", "approved")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid intelligence reference"):
+        importance.record_signal("", ActionSignal.APPROVED)
+    with pytest.raises(ValueError, match="tier must be an ImportanceTier"):
+        importance.pin("vip@example.com", "high")  # type: ignore[arg-type]
+
+    def _item(**overrides):
+        fields = dict(
+            source="slack",
+            channel_ref="C1",
+            channel_name="general",
+            sender_ref="U1",
+            sender_display="Alice",
+            summary="hello",
+            ts=datetime.now(timezone.utc),
+            priority=Priority.ROUTINE,
+            mentions_principal=False,
+            thread_ref=None,
+        )
+        fields.update(overrides)
+        return AttentionItem(**fields)
+
+    with pytest.raises(ValueError, match="source must be slack or google_chat"):
+        attention.add(_item(source="teams"))
+    with pytest.raises(ValueError, match="priority must be a Priority"):
+        attention.add(_item(priority="urgent"))
+    with pytest.raises(ValueError, match="between 1 and 200"):
+        attention.add(_item(channel_name=""))
+    with pytest.raises(ValueError, match="between 1 and 2000"):
+        attention.add(_item(summary="x" * 2001))
+    with pytest.raises(ValueError, match="non-negative integer"):
+        attention.recent(limit=-1)
+
+
 @pytest.fixture(scope="module")
 def database_url() -> str:
     value = os.environ.get("ATTUNE_TEST_DATABASE_URL")
@@ -395,7 +535,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 41
+    assert apply_migrations(admin) == 44
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -1254,6 +1394,176 @@ def test_google_chat_conversation_delivery_is_canonical_replay_safe_and_broker_o
         direct.close()
 
 
+def test_hosted_brief_job_round_trips_through_real_stores_and_holds_rls(
+    initialized_database, database_url
+):
+    """Gated Postgres round trip (Phase 5 stage 4, G12): a self-contained
+    tenant/principal/destination/preference/job fixture, proving
+    ``PostgresHostedBriefRepository`` resolves authority and fan-out
+    destinations, and the new brief delivery claim/complete functions round-
+    trip real rows -- plus the same forced-RLS/function-only isolation every
+    other delivery table in this schema holds."""
+    psycopg = pytest.importorskip("psycopg")
+    tenant_id = UUID("30000000-0000-4000-8000-000000000201")
+    principal_id = UUID("30000000-0000-4000-8000-000000000202")
+    installation_id = UUID("30000000-0000-4000-8000-000000000203")
+    destination_id = UUID("30000000-0000-4000-8000-000000000204")
+    connector_id = UUID("30000000-0000-4000-8000-000000000205")
+    job_id = UUID("30000000-0000-4000-8000-000000000206")
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) VALUES (%s,%s,%s)",
+            (tenant_id, "hosted-brief-tenant", "test"),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test')
+            """,
+            (tenant_id, principal_id, hashlib.sha256(b"hosted-brief-principal").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.installations
+                (tenant_id, id, provider, kind, external_ref_hash, status)
+            VALUES (%s, %s, 'google', 'channel', %s, 'active')
+            """,
+            (tenant_id, installation_id, hashlib.sha256(b"hosted-brief-install").digest()),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.connectors
+                (tenant_id, id, principal_id, installation_id, provider,
+                 credential_ref, status)
+            VALUES (%s, %s, %s, %s, 'google', %s, 'active')
+            """,
+            (tenant_id, connector_id, principal_id, installation_id,
+             UUID("30000000-0000-4000-8000-000000000207")),
+        )
+        cursor.execute(
+            "INSERT INTO attune.policies "
+            "(tenant_id, version, document, active, created_by) "
+            "VALUES (%s, 1, '{}'::jsonb, true, %s)",
+            (tenant_id, principal_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.hosted_channel_destinations
+                (tenant_id, id, owner_principal_id, installation_id, provider,
+                 installation_ref_hash, actor_ref_hash, destination_ref_hash,
+                 visibility, status, ingress_verified_at, delivery_verified_at,
+                 route_version)
+            VALUES (%s, %s, %s, %s, 'google_chat', %s, %s, %s, 'owner_dm',
+                    'active', clock_timestamp(), clock_timestamp(), 1)
+            """,
+            (
+                tenant_id, destination_id, principal_id, installation_id,
+                hashlib.sha256(b"hosted-brief-install-ref").digest(),
+                hashlib.sha256(b"hosted-brief-actor-ref").digest(),
+                hashlib.sha256(b"hosted-brief-destination-ref").digest(),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.hosted_channel_routes
+                (tenant_id, destination_id, ciphertext, nonce, wrapped_dek, key_resource)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                tenant_id, destination_id, b"ciphertext", b"0" * 12, b"wrapped",
+                "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.hosted_channel_preferences
+                (tenant_id, owner_principal_id, interaction_channels, brief_channels)
+            VALUES (%s, %s, ARRAY[]::text[], ARRAY['google_chat'])
+            """,
+            (tenant_id, principal_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.jobs
+                (tenant_id, id, kind, state, idempotency_key, capability,
+                 payload, attempts, lease_expires_at)
+            VALUES (%s, %s, 'channel.brief.deliver', 'leased', %s,
+                    'assistant.brief.deliver',
+                    jsonb_build_object('schema_version', 1,
+                        'principal_id', %s::text),
+                    1, clock_timestamp() + interval '5 minutes')
+            """,
+            (tenant_id, job_id, hashlib.sha256(b"hosted-brief-job").digest(),
+             principal_id),
+        )
+    initialized_database.commit()
+
+    worker_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_worker"]
+    )
+    context = TenantContext(tenant_id)
+    canonical_job = PostgresJobRepository(worker_factory).get(context, job_id)
+    assert canonical_job is not None
+    brief_repository = PostgresHostedBriefRepository(worker_factory)
+    work = brief_repository.resolve(context, canonical_job)
+    assert work == BriefWork(principal_id, connector_id)
+    destinations = brief_repository.list_brief_destinations(
+        context, principal_id=principal_id
+    )
+    assert destinations == (BriefDestination(destination_id, "google_chat"),)
+    brief_repository.propose_delivery(
+        context, job_id=job_id, destination_id=destination_id,
+        brief_text="Hello, this is your brief.",
+    )
+    # Idempotent: proposing again for the same (job, destination) is a no-op,
+    # never an error.
+    brief_repository.propose_delivery(
+        context, job_id=job_id, destination_id=destination_id,
+        brief_text="A different rendering would be ignored.",
+    )
+
+    broker = PostgresChannelBrokerRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_channel_broker"])
+    )
+    writer = PostgresAuditWriterRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_audit_writer"])
+    )
+    first_hash = hashlib.sha256(b"hosted-brief-delivery-first").digest()
+    first = broker.claim_brief_delivery(
+        destination_id=destination_id, job_id=job_id, claim_hash=first_hash,
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert first.brief_text == "Hello, this is your brief."
+    assert not first.already_delivered
+    assert writer.write(first.pre_audit_intent_id) is not None
+    completed = broker.complete_brief_delivery(
+        job_id=job_id, destination_id=destination_id, claim_hash=first_hash,
+        succeeded=True,
+        provider_message_ref_hash=hashlib.sha256(b"hosted-brief-message").digest(),
+    )
+    assert completed.delivery_state == "delivered"
+    assert writer.write(completed.outcome_audit_intent_id) is not None
+
+    replay = broker.claim_brief_delivery(
+        destination_id=destination_id, job_id=job_id,
+        claim_hash=hashlib.sha256(b"hosted-brief-delivery-replay").digest(),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
+    )
+    assert replay.already_delivered and replay.brief_text is None
+
+    direct = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_channel_broker"]
+    )()
+    try:
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT * FROM attune.hosted_brief_deliveries")
+        direct.rollback()
+    finally:
+        direct.close()
+
+
 def test_google_chat_destination_disconnect_blocks_use_and_allows_explicit_relink(
     initialized_database, database_url
 ):
@@ -1654,6 +1964,78 @@ def test_memory_repository_scopes_vector_search_and_soft_delete(
     )
 
 
+def test_memory_repository_list_recent_and_get_are_tenant_scoped(
+    initialized_database, database_url
+):
+    """docs/hosted-memory.md: the inspect/forget commands' repository
+    surface -- recency listing and id-addressable lookup, both tenant- and
+    principal-scoped (SEC-201: the predicate comes from the caller's
+    verified context, never a selector the user or model typed)."""
+    repository = PostgresMemoryRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    )
+    older = repository.add(
+        TenantContext(TENANT_A),
+        principal_id=PRINCIPAL_A,
+        creator_id=PRINCIPAL_A,
+        content="older memory",
+        provenance={},
+        source_class="user_taught",
+        confidence=1,
+        model="list-recent-test",
+        embedding=[0, 1, 0],
+    )
+    newer = repository.add(
+        TenantContext(TENANT_A),
+        principal_id=PRINCIPAL_A,
+        creator_id=PRINCIPAL_A,
+        content="newer memory",
+        provenance={},
+        source_class="user_taught",
+        confidence=1,
+        model="list-recent-test",
+        embedding=[0, 1, 0],
+    )
+    other_tenant = repository.add(
+        TenantContext(TENANT_B),
+        principal_id=PRINCIPAL_B,
+        creator_id=PRINCIPAL_B,
+        content="tenant B memory for listing",
+        provenance={},
+        source_class="user_taught",
+        confidence=1,
+        model="list-recent-test",
+        embedding=[0, 1, 0],
+    )
+
+    listing = repository.list_recent(TenantContext(TENANT_A), principal_id=PRINCIPAL_A)
+    ids = [item.id for item in listing]
+    assert ids.index(newer.id) < ids.index(older.id)
+    assert other_tenant.id not in ids
+
+    assert repository.get(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, memory_id=newer.id
+    ).content == "newer memory"
+    # Cross-tenant get: another tenant's context cannot read tenant A's memory.
+    assert repository.get(
+        TenantContext(TENANT_B), principal_id=PRINCIPAL_B, memory_id=newer.id
+    ) is None
+    # Cross-tenant list: tenant B's listing never contains tenant A's rows.
+    tenant_b_listing = repository.list_recent(
+        TenantContext(TENANT_B), principal_id=PRINCIPAL_B
+    )
+    assert all(item.id != newer.id and item.id != older.id for item in tenant_b_listing)
+
+    assert repository.soft_delete(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, memory_id=older.id
+    )
+    after_delete = repository.list_recent(TenantContext(TENANT_A), principal_id=PRINCIPAL_A)
+    assert older.id not in [item.id for item in after_delete]
+    assert repository.get(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, memory_id=older.id
+    ) is None
+
+
 def test_audit_outbox_is_idempotent_and_writer_accepts_only_intent_ids(
     initialized_database, database_url
 ):
@@ -1716,22 +2098,59 @@ def test_audit_outbox_is_idempotent_and_writer_accepts_only_intent_ids(
 def test_approval_repository_binds_actor_action_version_and_single_use(
     initialized_database, database_url
 ):
+    """attune.approvals now backs a real security transition (migration
+    0043): direct UPDATE is refused for every runtime role, and the sole
+    decide/consume path is the actor-bound, one-use, idempotent-replay
+    attune.claim_capability_approval SECURITY DEFINER function."""
+
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "SELECT version FROM attune.policies WHERE tenant_id = %s AND active",
+            (TENANT_A,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO attune.policies "
+                "(tenant_id, version, document, active, created_by) "
+                "VALUES (%s, 1, '{}'::jsonb, true, %s) RETURNING version",
+                (TENANT_A, PRINCIPAL_A),
+            )
+            row = cursor.fetchone()
+        policy_version = row[0]
+
     factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
-    jobs = PostgresJobRepository(factory)
+    connection = factory()
+    try:
+        with tenant_transaction(connection, TenantContext(TENANT_A)) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO attune.capability_admissions
+                    (tenant_id, principal_id, connector_id, capability,
+                     contract_version, risk, policy_version, arguments)
+                VALUES (%s, %s, %s, %s, 1, 2, %s, %s::jsonb)
+                RETURNING id
+                """,
+                (
+                    TENANT_A,
+                    PRINCIPAL_A,
+                    CONNECTOR_A,
+                    "gmail.draft",
+                    policy_version,
+                    '{"proposal": "opaque"}',
+                ),
+            )
+            admission_id = cursor.fetchone()[0]
+    finally:
+        connection.close()
+
     approvals = PostgresApprovalRepository(factory)
-    job = jobs.enqueue(
-        TenantContext(TENANT_A),
-        kind="gmail.draft",
-        capability="gmail.draft",
-        payload={"proposal": "opaque"},
-        idempotency_key=hashlib.sha256(b"approval-job").digest(),
-    )
     opaque_hash = hashlib.sha256(b"opaque-approval-reference").digest()
     action_hash = hashlib.sha256(b"canonical-action").digest()
     destination_hash = hashlib.sha256(b"destination").digest()
     approval = approvals.propose(
         TenantContext(TENANT_A),
-        job_id=job.id,
+        admission_id=admission_id,
         approver_id=PRINCIPAL_A,
         connector_id=CONNECTOR_A,
         opaque_ref_hash=opaque_hash,
@@ -1739,53 +2158,201 @@ def test_approval_repository_binds_actor_action_version_and_single_use(
         capability="gmail.draft",
         destination_hash=destination_hash,
         source_version="history-123",
-        policy_version=1,
+        policy_version=policy_version,
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
+    assert approval.status == "pending"
+    assert approval.surface == "web"
+    assert approval.job_id is None
+    assert approval.admission_id == admission_id
+
+    worker_connection = factory()
+    try:
+        with pytest.raises(Exception, match="permission denied"):
+            with tenant_transaction(worker_connection, TenantContext(TENANT_A)) as cursor:
+                cursor.execute(
+                    "UPDATE attune.approvals SET status = 'rejected' WHERE id = %s",
+                    (approval.id,),
+                )
+    finally:
+        worker_connection.close()
+
+    control_plane_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    control_plane_connection = control_plane_factory()
+    try:
+        with pytest.raises(Exception, match="permission denied"):
+            with tenant_transaction(
+                control_plane_connection, TenantContext(TENANT_A)
+            ) as cursor:
+                cursor.execute(
+                    "UPDATE attune.approvals SET status = 'rejected' WHERE id = %s",
+                    (approval.id,),
+                )
+    finally:
+        control_plane_connection.close()
+
+    # Wrong tenant, then wrong approver: neither can claim it.
     assert (
-        approvals.decide(
+        approvals.claim(
             TenantContext(TENANT_B),
-            opaque_ref_hash=opaque_hash,
-            approver_id=PRINCIPAL_A,
+            approval_id=approval.id,
+            principal_id=PRINCIPAL_A,
             decision="approved",
         )
         is None
     )
-    decided = approvals.decide(
-        TenantContext(TENANT_A),
-        opaque_ref_hash=opaque_hash,
-        approver_id=PRINCIPAL_A,
-        decision="approved",
-    )
-    assert decided is not None and decided.id == approval.id
     assert (
-        approvals.consume(
+        approvals.claim(
             TenantContext(TENANT_A),
             approval_id=approval.id,
-            expected_action_hash=hashlib.sha256(b"changed-action").digest(),
-            expected_source_version="history-123",
-            expected_policy_version=1,
+            principal_id=PRINCIPAL_B,
+            decision="approved",
         )
         is None
     )
-    consumed = approvals.consume(
+
+    claimed = approvals.claim(
         TenantContext(TENANT_A),
         approval_id=approval.id,
-        expected_action_hash=action_hash,
-        expected_source_version="history-123",
-        expected_policy_version=1,
+        principal_id=PRINCIPAL_A,
+        decision="approved",
     )
-    assert consumed is not None and consumed.status == "consumed"
-    assert (
-        approvals.consume(
-            TenantContext(TENANT_A),
-            approval_id=approval.id,
-            expected_action_hash=action_hash,
-            expected_source_version="history-123",
-            expected_policy_version=1,
+    assert claimed is not None
+    assert claimed.final_status == "consumed"
+    assert claimed.admission_id == admission_id
+    assert claimed.capability == "gmail.draft"
+    assert dict(claimed.arguments) == {"proposal": "opaque"}
+    assert claimed.connector_id == CONNECTOR_A
+    assert claimed.policy_version == policy_version
+
+    # One-use: replaying the same decision returns the recorded outcome
+    # rather than erroring or mutating anything again (SEC-501).
+    replay = approvals.claim(
+        TenantContext(TENANT_A),
+        approval_id=approval.id,
+        principal_id=PRINCIPAL_A,
+        decision="approved",
+    )
+    assert replay is not None
+    assert replay.final_status == "consumed"
+    assert dict(replay.arguments) == {"proposal": "opaque"}
+
+    # A pending approval that is instead rejected never returns arguments.
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            """
+            INSERT INTO attune.approvals
+                (tenant_id, admission_id, approver_id, connector_id,
+                 opaque_ref_hash, action_hash, capability, destination_hash,
+                 source_version, policy_version, surface, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'web', %s)
+            RETURNING id
+            """,
+            (
+                TENANT_A,
+                admission_id,
+                PRINCIPAL_A,
+                CONNECTOR_A,
+                hashlib.sha256(b"opaque-approval-reference-2").digest(),
+                action_hash,
+                "gmail.draft",
+                destination_hash,
+                "history-123",
+                policy_version,
+                datetime.now(timezone.utc) + timedelta(minutes=10),
+            ),
         )
-        is None
+        second_approval_id = cursor.fetchone()[0]
+    rejected = approvals.claim(
+        TenantContext(TENANT_A),
+        approval_id=second_approval_id,
+        principal_id=PRINCIPAL_A,
+        decision="rejected",
     )
+    assert rejected is not None
+    assert rejected.final_status == "rejected"
+    assert rejected.arguments is None
+
+
+def test_capability_admission_repository_persists_atomically_and_never_dispatches(
+    initialized_database, database_url
+):
+    """PostgresCapabilityAdmissionRepository.record() -- admission is never
+    execution authority: it inserts one immutable capability_admissions row
+    and one pending approvals row in the same transaction, and creates no
+    job or dispatch intent."""
+
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "SELECT version FROM attune.policies WHERE tenant_id = %s AND active",
+            (TENANT_A,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO attune.policies "
+                "(tenant_id, version, document, active, created_by) "
+                "VALUES (%s, 1, '{}'::jsonb, true, %s) RETURNING version",
+                (TENANT_A, PRINCIPAL_A),
+            )
+            row = cursor.fetchone()
+        policy_version = row[0]
+
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    repository = PostgresCapabilityAdmissionRepository(factory)
+    admitted = AuthorizedCapability(
+        context=TenantContext(TENANT_A),
+        principal_id=PRINCIPAL_A,
+        connector_id=CONNECTOR_A,
+        capability="google.gmail.draft.create",
+        contract_version=1,
+        risk=RiskTier.R2,
+        policy_version=policy_version,
+        arguments={"thread_ref": "thread_9", "body": "Ready to ship."},
+    )
+    recorded = repository.record(
+        TenantContext(TENANT_A),
+        authorized=admitted,
+        destination_hash=hashlib.sha256(b"thread_9").digest(),
+        now=datetime.now(timezone.utc),
+    )
+
+    connection = factory()
+    try:
+        with tenant_transaction(connection, TenantContext(TENANT_A)) as cursor:
+            cursor.execute(
+                "SELECT capability, contract_version, risk, policy_version, arguments "
+                "FROM attune.capability_admissions WHERE tenant_id = %s AND id = %s",
+                (TENANT_A, recorded.admission_id),
+            )
+            admission_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT status, admission_id, job_id, surface, policy_version "
+                "FROM attune.approvals WHERE tenant_id = %s AND id = %s",
+                (TENANT_A, recorded.approval_id),
+            )
+            approval_row = cursor.fetchone()
+    finally:
+        connection.close()
+
+    assert admission_row[0] == "google.gmail.draft.create"
+    assert admission_row[1] == 1
+    assert admission_row[2] == 2
+    assert admission_row[3] == policy_version
+    assert dict(admission_row[4]) == {"thread_ref": "thread_9", "body": "Ready to ship."}
+    assert approval_row == (
+        "pending", recorded.admission_id, None, "web", policy_version,
+    )
+    # No job exists yet from this admission alone -- only an approval does.
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM attune.jobs "
+            "WHERE tenant_id = %s AND capability = 'google.gmail.draft.create'",
+            (TENANT_A,),
+        )
+        assert cursor.fetchone()[0] == 0
 
 
 def test_provider_events_and_checkpoints_are_idempotent_and_tenant_scoped(
@@ -2995,9 +3562,15 @@ def test_customer_export_request_and_claim_are_fixed_recent_and_function_only(
     with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
         cursor.execute(
             "SELECT action, outcome FROM attune.audit_intents "
-            "WHERE target_ref_hash = %s",
+            "WHERE target_ref_hash = %s ORDER BY created_at",
             (hashlib.sha256(str(requested[0]).encode()).digest(),),
         )
+        # Pre-existing gap fixed in passing (Phase 5 stage 4): this query had
+        # no ORDER BY, relying on undefined physical row order -- harmless
+        # while few rows existed ahead of it in the shared TENANT_A fixture,
+        # but exposed as soon as an earlier test in this module (this
+        # stage's own hosted-brief test) added enough preceding audit_intents
+        # volume for the planner to stop returning rows in insertion order.
         assert cursor.fetchall() == [
             ("export.requested", "observed"),
             ("export.claimed", "observed"),
@@ -4162,6 +4735,261 @@ def test_web_conversation_accept_is_session_scoped_idempotent_and_function_only(
                         hashlib.sha256(b"direct-installation").digest(),
                     ),
                 )
+        direct.rollback()
+    finally:
+        direct.close()
+
+
+# ---------------------------------------------------------------------------
+# Hosted intelligence persistence (docs/future-state.md Phase 5 item 1;
+# docs/gap-analysis.md G8/G18): PostgresImportanceProfile/PostgresAttentionStore.
+# ---------------------------------------------------------------------------
+
+INTELLIGENCE_TENANT_A = UUID("40000000-0000-4000-8000-000000000001")
+INTELLIGENCE_TENANT_B = UUID("40000000-0000-4000-8000-000000000002")
+INTELLIGENCE_PRINCIPAL_A = UUID("40000000-0000-4000-8000-000000000011")
+INTELLIGENCE_PRINCIPAL_B = UUID("40000000-0000-4000-8000-000000000012")
+
+
+def _attention_item(**overrides):
+    fields = dict(
+        source="slack",
+        channel_ref="C-general",
+        channel_name="general",
+        sender_ref="U-alice",
+        sender_display="Alice",
+        summary="please review the proposal",
+        ts=datetime.now(timezone.utc),
+        priority=Priority.ROUTINE,
+        mentions_principal=False,
+        thread_ref=None,
+    )
+    fields.update(overrides)
+    return AttentionItem(**fields)
+
+
+def _run_importance_tier_rule_matrix(profile_factory):
+    """The same tier-rule scenarios as tests/test_importance.py (LOW
+    demotion, HIGH promotion, pin override, decay, unknown sender), run here
+    against any ``ImportanceProfile``-shaped object built by
+    ``profile_factory()``. This is the shared conformance proof that
+    ``PostgresImportanceProfile`` applies ``orchestrator.importance
+    .assess_from_signals`` -- the exact same rule engine
+    ``JsonImportanceProfile`` uses -- not a reimplementation."""
+    now = datetime.now(timezone.utc)
+
+    low_profile = profile_factory()
+    for i in range(LOW_RUN_THRESHOLD):
+        low_profile.record_signal(
+            "matrix-newsletter@example.com", ActionSignal.IGNORED,
+            ts=now - timedelta(days=LOW_RUN_THRESHOLD - i),
+        )
+    assessment = low_profile.assess("matrix-newsletter@example.com", now=now)
+    assert assessment.tier == ImportanceTier.LOW
+    assert assessment.pinned is False
+
+    high_profile = profile_factory()
+    for i in range(HIGH_MIN_SIGNALS):
+        high_profile.record_signal(
+            "matrix-vip@example.com", ActionSignal.APPROVED,
+            ts=now - timedelta(days=HIGH_MIN_SIGNALS - i),
+        )
+    assert high_profile.assess("matrix-vip@example.com", now=now).tier == (
+        ImportanceTier.HIGH
+    )
+
+    pin_profile = profile_factory()
+    for i in range(LOW_RUN_THRESHOLD):
+        pin_profile.record_signal(
+            "matrix-pinned@example.com", ActionSignal.IGNORED,
+            ts=now - timedelta(days=LOW_RUN_THRESHOLD - i),
+        )
+    pin_profile.pin("matrix-pinned@example.com", ImportanceTier.HIGH)
+    pinned_assessment = pin_profile.assess("matrix-pinned@example.com", now=now)
+    assert pinned_assessment.tier == ImportanceTier.HIGH
+    assert pinned_assessment.pinned is True
+    assert pin_profile.unpin("matrix-pinned@example.com") is True
+    assert pin_profile.assess("matrix-pinned@example.com", now=now).tier == (
+        ImportanceTier.LOW
+    )
+    assert pin_profile.unpin("matrix-pinned@example.com") is False
+
+    decay_profile = profile_factory()
+    for i in range(LOW_RUN_THRESHOLD):
+        decay_profile.record_signal(
+            "matrix-decayed@example.com", ActionSignal.IGNORED,
+            ts=now - timedelta(days=LOW_RUN_THRESHOLD - i),
+        )
+    long_later = now + timedelta(days=DECAY_DAYS + LOW_RUN_THRESHOLD + 1)
+    decayed_assessment = decay_profile.assess(
+        "matrix-decayed@example.com", now=long_later
+    )
+    assert decayed_assessment.tier == ImportanceTier.NORMAL
+    assert decayed_assessment.reason == "no recorded signals"
+
+    unknown_profile = profile_factory()
+    assert unknown_profile.assess("matrix-unknown@example.com", now=now) == (
+        TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
+    )
+
+
+def test_json_importance_profile_matches_the_shared_tier_rule_matrix(tmp_path):
+    """Offline sanity check that the shared helper above is itself correct,
+    proven against the existing local backend before trusting it to certify
+    the new Postgres one."""
+    from attune.orchestrator.importance import JsonImportanceProfile
+
+    counter = {"n": 0}
+
+    def profile_factory():
+        counter["n"] += 1
+        return JsonImportanceProfile(str(tmp_path / f"importance-{counter['n']}.json"))
+
+    _run_importance_tier_rule_matrix(profile_factory)
+
+
+def test_intelligence_tenants_are_provisioned(initialized_database):
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) "
+            "VALUES (%s, %s, %s), (%s, %s, %s)",
+            (
+                INTELLIGENCE_TENANT_A, "intelligence-tenant-a", "test",
+                INTELLIGENCE_TENANT_B, "intelligence-tenant-b", "test",
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test'), (%s, %s, %s, 'test')
+            """,
+            (
+                INTELLIGENCE_TENANT_A, INTELLIGENCE_PRINCIPAL_A,
+                hashlib.sha256(b"intelligence-a").digest(),
+                INTELLIGENCE_TENANT_B, INTELLIGENCE_PRINCIPAL_B,
+                hashlib.sha256(b"intelligence-b").digest(),
+            ),
+        )
+    initialized_database.commit()
+
+
+def test_postgres_importance_profile_matches_the_local_tier_rule_matrix(
+    initialized_database, database_url
+):
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    context = TenantContext(INTELLIGENCE_TENANT_A)
+
+    def profile_factory():
+        return PostgresImportanceProfile(
+            factory, context, INTELLIGENCE_PRINCIPAL_A, reference_hasher=hasher
+        )
+
+    _run_importance_tier_rule_matrix(profile_factory)
+
+
+def test_postgres_attention_store_recent_ordering_since_and_limit(
+    initialized_database, database_url
+):
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    store = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_A), INTELLIGENCE_PRINCIPAL_A,
+        reference_hasher=hasher,
+    )
+    now = datetime.now(timezone.utc)
+    store.add(_attention_item(sender_ref="ordering-alice", ts=now, summary="alice message"))
+    store.add(_attention_item(
+        sender_ref="ordering-bob", ts=now + timedelta(minutes=1), summary="bob message",
+    ))
+
+    recent = store.recent()
+    summaries = [item.summary for item in recent]
+    assert summaries.index("bob message") < summaries.index("alice message")
+    newest = recent[summaries.index("bob message")]
+    assert newest.source == "slack"
+    assert newest.channel_name == "general"
+    # channel_ref/sender_ref come back as opaque hex digests, not the
+    # original provider identifier (module docstring's documented, reviewed
+    # divergence from the local JSON store) -- but they are STABLE: the same
+    # provider reference always hashes to the same value.
+    assert newest.sender_ref == hasher.hash("sender", "ordering-bob").hex()
+
+    since_recent = store.recent(since=now + timedelta(seconds=30))
+    assert [item.summary for item in since_recent] == ["bob message"]
+
+    limited = store.recent(limit=1)
+    assert len(limited) == 1
+    assert limited[0].summary == "bob message"
+
+
+def test_postgres_attention_store_retention_window_prunes_old_items(
+    initialized_database, database_url
+):
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    store = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_B), INTELLIGENCE_PRINCIPAL_B,
+        reference_hasher=hasher,
+    )
+    now = datetime.now(timezone.utc)
+    old_ts = now - timedelta(days=RETENTION_DAYS + 1)
+    store.add(_attention_item(sender_ref="stale", ts=old_ts, summary="stale message"))
+    store.add(_attention_item(sender_ref="fresh", ts=now, summary="fresh message"))
+
+    summaries = [item.summary for item in store.recent()]
+    assert "fresh message" in summaries
+    assert "stale message" not in summaries
+
+
+def test_importance_and_attention_are_isolated_per_tenant_under_rls(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+
+    profile_a = PostgresImportanceProfile(
+        factory, TenantContext(INTELLIGENCE_TENANT_A), INTELLIGENCE_PRINCIPAL_A,
+        reference_hasher=hasher,
+    )
+    profile_b = PostgresImportanceProfile(
+        factory, TenantContext(INTELLIGENCE_TENANT_B), INTELLIGENCE_PRINCIPAL_B,
+        reference_hasher=hasher,
+    )
+    profile_a.record_signal("isolation-vip@example.com", ActionSignal.APPROVED)
+    # profile_a's tenant/principal is shared with the tier-rule-matrix test
+    # above, so senders() may carry other hashes too -- only the isolation
+    # boundary (profile_b sees NONE of tenant A's senders) is asserted here.
+    assert hasher.hash("sender", "isolation-vip@example.com").hex() in (
+        profile_a.senders()
+    )
+    assert profile_b.senders() == []
+    assert profile_b.assess("isolation-vip@example.com").tier == ImportanceTier.NORMAL
+
+    attention_a = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_A), INTELLIGENCE_PRINCIPAL_A,
+        reference_hasher=hasher,
+    )
+    attention_b = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_B), INTELLIGENCE_PRINCIPAL_B,
+        reference_hasher=hasher,
+    )
+    attention_a.add(_attention_item(sender_ref="isolation-alice", summary="tenant a only"))
+    assert "tenant a only" in [item.summary for item in attention_a.recent()]
+    assert "tenant a only" not in [item.summary for item in attention_b.recent()]
+
+    direct = factory()
+    try:
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT id FROM attune.importance_signals")
+        direct.rollback()
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT id FROM attune.attention_items")
         direct.rollback()
     finally:
         direct.close()

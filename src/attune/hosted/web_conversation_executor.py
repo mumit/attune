@@ -16,7 +16,15 @@ from typing import Any
 from uuid import UUID
 
 from .durable import HostedTurn
-from .google_chat_conversation_executor import GoogleChatConversationExecutor
+from .google_chat_conversation_executor import (
+    DraftCapabilityAdmissions,
+    DraftCapabilityGateway,
+    GoogleChatConversationExecutor,
+    MemoryAuditSink,
+    MemoryRepository,
+    build_turn_provenance,
+)
+from .intelligence import ImportanceSignalRecorder
 from .repositories import ConnectionFactory, HostedJob
 from .tenant import TenantContext, tenant_transaction
 
@@ -27,6 +35,7 @@ CAPABILITY = "assistant.conversation.read"
 @dataclass(frozen=True)
 class WebConversationWork:
     conversation_id: UUID
+    principal_id: UUID
     connector_id: UUID
     user_sequence: int
 
@@ -48,7 +57,7 @@ class PostgresWebConversationWorkRepository:
             with tenant_transaction(connection, context) as cursor:
                 cursor.execute(
                     """
-                    SELECT conversation.id, connector.id,
+                    SELECT conversation.id, conversation.principal_id, connector.id,
                            (job.payload->>'user_sequence')::bigint
                       FROM attune.jobs job
                       JOIN attune.provider_events event
@@ -95,7 +104,7 @@ class PostgresWebConversationWorkRepository:
             raise RuntimeError("conversation job authority is unavailable")
         work = WebConversationWork(*rows[0])
         if work != WebConversationWork(
-            payload["conversation_id"], rows[0][1], payload["user_sequence"]
+            payload["conversation_id"], rows[0][1], rows[0][2], payload["user_sequence"]
         ):
             raise RuntimeError("conversation job payload changed")
         return work
@@ -119,7 +128,8 @@ class PostgresWebConversationWorkRepository:
                 return [HostedTurn(*row) for row in reversed(cursor.fetchall())]
 
     def append_assistant(
-        self, context: TenantContext, *, conversation_id: UUID, content: str, job_id: UUID
+        self, context: TenantContext, *, conversation_id: UUID, content: str, job_id: UUID,
+        extra_provenance: dict[str, object] | None = None,
     ) -> HostedTurn:
         if not isinstance(content, str) or not 1 <= len(content) <= 8_000:
             raise ValueError("assistant response is invalid")
@@ -156,7 +166,7 @@ class PostgresWebConversationWorkRepository:
                     (context.tenant_id, conversation_id),
                 )
                 sequence = cursor.fetchone()[0]
-                provenance = {"schema_version": 1, "job_id": str(job_id)}
+                provenance = build_turn_provenance(job_id, extra_provenance)
                 cursor.execute(
                     """
                     INSERT INTO attune.conversation_turns
@@ -185,19 +195,28 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
         *,
         now=None,
         timezone_name: str = "UTC",
+        memory: MemoryRepository | None = None,
+        memory_audit: MemoryAuditSink | None = None,
+        capability_gateway: DraftCapabilityGateway | None = None,
+        capability_admissions: DraftCapabilityAdmissions | None = None,
+        importance_signals: ImportanceSignalRecorder | None = None,
     ):
         super().__init__(
             work, intents, workspace, models, None,
             now=now, timezone_name=timezone_name,
             reply_method="_web_conversation_has_no_reply_broker",
             intent_key_prefix="attune-web-converse-v1:",
+            memory=memory, memory_audit=memory_audit,
+            capability_gateway=capability_gateway,
+            capability_admissions=capability_admissions,
+            importance_signals=importance_signals,
         )
 
     def __call__(self, context: TenantContext, job: HostedJob) -> None:
-        authority, answer = self._respond(context, job)
+        authority, answer, extra_provenance = self._respond(context, job)
         self._work.append_assistant(
             context, conversation_id=authority.conversation_id,
-            content=answer, job_id=job.id,
+            content=answer, job_id=job.id, extra_provenance=extra_provenance,
         )
 
 

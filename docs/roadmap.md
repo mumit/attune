@@ -52,11 +52,15 @@ order:
 The first slice of step 5 is live in development: a signed-in owner can start
 and resume a tenant-bound, versioned setup record whose Workspace status is
 derived from canonical connector state. Channels, policy, and activation still
-require fixed server-side ceremonies. Step 6 now has a tested, non-deployed
-admission core for exact proposals, tenant-scoped policy/grant and connector
-resolution, and risk ceilings. Its dispatch integration, execution budgets,
-freshness/idempotency, audit, and approval gates remain; this does not skip the
-remaining work or assurance gates in steps 2–5.
+require fixed server-side ceremonies. Step 6's admission core (exact
+proposals, tenant-scoped policy/grant and connector resolution, risk
+ceilings) is now wired to the real dispatch spine for one capability,
+`google.gmail.draft.create` at R2 -- implemented and tested, not deployed;
+see the Phase 5 stage 3 paragraph below. Rate/cost/concurrency budgets, live
+provider source-freshness re-verification, and admission/approval-decision
+audit remain before that capability's own activation gate can pass; this
+does not skip the remaining work or assurance gates in steps 2–5, and no
+other capability or write surface is wired.
 
 Step 5 also has a live development fixed R0 policy ceremony: recent owner
 authentication, content-free mandatory audit, exact function-owned policy and
@@ -208,6 +212,110 @@ not authorize customer data or constitute a hosted launch.
 
 The current SQLite, JSON, JSONL, and local Qdrant implementation remains a
 single-principal self-hosted substrate. It is not a hosted tenant boundary.
+
+Stage 1 of converging hosted onto the local product intelligence
+(`docs/future-state.md` Phase 5 item 1; `docs/gap-analysis.md` G8/G18) is
+implemented and tested but not deployed: migration 0042 adds forced-RLS
+`attune.importance_signals` and `attune.attention_items`, registered in the
+reviewed lifecycle inventory as customer content and granted only to
+`attune_worker`; `attune.hosted.intelligence.PostgresImportanceProfile` and
+`PostgresAttentionStore` satisfy the exact local `ImportanceProfile`/
+`AttentionStore` protocol shapes, importing the same tier-rule engine
+(`orchestrator.importance.assess_from_signals`) local triage and briefs
+already use, with sender/channel/thread references stored as keyed HMAC
+digests rather than plaintext. No executor constructs either class yet, no
+HMAC key is provisioned outside tests, and no hosted behavior changes: this
+mirrors the capability gateway's own "tested, non-deployed admission core"
+status above. Wiring an executor to actually read/write these stores, and
+extending the same pattern to correlation/brief assembly, are later
+independent slices.
+
+Stage 2 of the same effort — hosted conversational memory retrieval plus
+explicit teach/inspect/forget commands on the shared conversation executor
+(Google Chat, Slack, and web) — is implemented and tested behind a
+default-off gate, `ATTUNE_ENABLE_HOSTED_MEMORY`, and not deployed: a third
+fixed model-gateway task (`embed`) joins `classify`/`converse` with the same
+worker-credential-free discipline, the tenant/principal filter is injected
+by the storage adapter from `TenantContext` (SEC-201) rather than by the
+model or message text, memory commands are recognized deterministically
+before any classifier call, and the two-step forget confirmation's turn-scoped
+state rides in the already-durable `conversation_turns.provenance` column
+rather than any shared worker process state (SEC-011). See
+[`hosted-memory.md`](hosted-memory.md) for the design and
+[`decisions.md`](decisions.md) for the dated record. Gate-off behavior is
+pinned as byte-identical to pre-stage-2 conversation handling; there is no
+hosted approval workflow or signal-capture path yet, both deliberately out
+of scope.
+
+Stage 3 of the same effort — wiring the dormant typed capability gateway
+into the dispatch spine, then introducing the first hosted write capability
+(`docs/future-state.md` Phase 5 item 3; `docs/gap-analysis.md` G17; roadmap
+step 6's remaining half) — is implemented and tested behind a default-off
+gate, `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`, and not deployed. One
+capability is registered, `google.gmail.draft.create` v1, at product risk
+tier **R2** per the security architecture's own risk-tier table (not the R1
+this stage's plan initially proposed — see `decisions.md` for why the
+normative table governs). A new migration (0043) adds an immutable,
+append-only `attune.capability_admissions` table and turns the previously
+dormant `attune.approvals` (migration 0001) into a real privilege boundary:
+direct `UPDATE` is revoked from every runtime role, and a new one-use,
+actor-bound SECURITY DEFINER function (`attune.claim_capability_approval`,
+owned by a new memberless role) is the only decide/consume path. The
+approval surface is web-conversation-only, using a deterministic grammar
+mirroring the memory command grammar exactly; admission, approval, and
+dispatch stay three separate steps, and dispatch reuses the existing,
+unmodified dispatch producer and broker client rather than a new one. Gate-
+off (and every non-web surface) behavior is pinned as byte-identical to
+pre-stage-3 mutation refusal. Full detail, including precisely which
+section-8.1 execution-checklist items this slice does and does not satisfy,
+is in [`capability-gateway.md`](capability-gateway.md); the dated design
+record is in [`decisions.md`](decisions.md). No worker deployment sets the
+gate on, the fixed R0 policy grants no tenant R2 authority, and no OAuth
+flow requests the scope this capability requires — no production tenant can
+exercise it. Rate/cost/concurrency budgets, live Gmail thread source-
+freshness re-verification before dispatch, and content-free audit of the
+admission/approval-decision steps themselves (distinct from the job's own
+claim/execute audit, which is unchanged) are genuine remaining gates before
+this capability's activation gate can pass.
+
+Stage 4 of the same effort — the hosted proactive brief job
+(`docs/future-state.md` Phase 5 item 4; `docs/gap-analysis.md` G12), closing
+out Phase 5 — is implemented and tested behind a default-off gate,
+`ATTUNE_ENABLE_HOSTED_BRIEF`, and not deployed. The worker executor
+(`channel.brief.deliver`) assembles a proactive "what matters now" spine by
+importing `brief.build_spine` directly (the exact pure ranking/rendering
+function local triage and briefs already use, renamed from a private helper
+with no logic change), fed by bounded Gmail/Calendar reads through the
+existing secret-broker routes and stage 1's tenant-scoped
+`PostgresImportanceProfile`/`PostgresAttentionStore` (the attention store is
+empty in production today — no executor writes to it yet — the seam is
+wired regardless, matching stage 1's own documented posture). A new
+migration (0044) adds `attune.hosted_brief_deliveries`, keyed
+`(tenant_id, job_id, destination_id)` so one job can fan out to every ACTIVE
+destination whose stored preference includes briefs, and Google Chat/Slack
+delivery claim/complete function pairs mirroring the existing conversation-
+reply delivery functions exactly, except sourcing rendered brief text from
+this new table (never a live worker parameter) and matching
+`brief_channels` rather than `interaction_channels`. An owner-facing
+control-plane route, `POST /v1/brief/run`, requires the same ordinary
+session/CSRF bar as `POST /v1/conversation/messages` (not the destructive-
+ceremony recency gate) and is idempotent per tenant per principal per UTC
+hour by construction (the dispatch idempotency key folds in the current
+hour) — recurring scheduling without an owner click remains future operator
+work, mirroring the retention job's own separate-scheduler-identity
+pattern. The draft-and-approve capability's approve/reject decisions now
+also record an importance signal (keyed on the hashed thread reference,
+since no Gmail read in that flow ever resolves a real sender) and a raw
+action-signal hosted-memory write when the memory gate is on, closing the
+signal-capture loop stage 3 left open; a pre-existing gap in
+`build_turn_provenance` (a draft-capability provenance key it should have
+allowed since stage 3, never caught because no stage-3 test exercised the
+real repository) was fixed alongside it. Hosted nudges and hygiene-action
+proposals (the local product's Phase 3 breadth) remain explicitly out of
+scope for this phase — Phase 5's brief/nudge item closes with briefs only.
+The dated design record, including what was and wasn't reused from
+`brief.py`, is in [`decisions.md`](decisions.md); the delivery flow and its
+gates are also described in [`hosted-channels.md`](hosted-channels.md).
 
 ## Later
 

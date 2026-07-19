@@ -53,6 +53,19 @@ both touch), and owner-only file permissions on the persisted file (mirrors
 Sender keys are normalized (stripped, lowercased) email addresses so
 ``Sender@Example.com`` and ``  sender@example.com `` are the same profile
 entry.
+
+Hosted seam (``docs/future-state.md`` Phase 5 item 1, gap G18): the
+:class:`ImportanceProfile` protocol above and the pure, decay-aware
+:func:`assess_from_signals` rule engine are the only pieces a caller (
+``orchestrator/triage.py``, ``brief.py``) actually depends on — neither
+depends on the JSON file format. Hosted consumes this via
+``attune.hosted.intelligence.PostgresImportanceProfile``, which is bound to
+one ``TenantContext``/principal at construction (so its methods have the
+exact ``ImportanceProfile`` shape, no ``context`` parameter, and drop
+straight into ``triage_thread``/``assemble_brief`` unchanged) and imports
+``assess_from_signals``, ``DECAY_DAYS``, and ``MAX_SIGNALS`` directly rather
+than reimplementing the tier thresholds — the deterministic rules are one
+piece of code either way.
 """
 
 from __future__ import annotations
@@ -202,7 +215,7 @@ class JsonImportanceProfile:
         if not effective:
             return TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
 
-        return _assess_from_signals(effective)
+        return assess_from_signals(effective)
 
     def senders(self) -> list[str]:
         with self._lock, locked(self._path + ".lock"):
@@ -266,10 +279,16 @@ class JsonImportanceProfile:
                 os.unlink(temp_path)
 
 
-def _assess_from_signals(
+def assess_from_signals(
     effective: list[tuple[ActionSignal, datetime]],
 ) -> TierAssessment:
-    """Rules 4-6 over an already-decayed, oldest-first signal list."""
+    """Rules 4-6 over an already-decayed, oldest-first signal list.
+
+    Public (not a leading-underscore helper) because this is the exact,
+    reusable rule engine the hosted seam imports (module docstring) — the
+    tier thresholds must exist as one piece of code, not be reimplemented
+    against a different storage backend.
+    """
     signals_only = [sig for sig, _ in effective]
 
     # Rule 4 (LOW): the most recent N (>=3) effective signals are all

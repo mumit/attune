@@ -170,6 +170,49 @@ def test_default_session_ignores_ambient_proxy_and_netrc(monkeypatch):
     assert session.trust_env is False
 
 
+def test_draft_create_client_sends_exact_body_and_returns_only_draft_id():
+    session = Session(Response(body={"draft_id": "draft_1"}))
+    draft_id = SecretBrokerClient(
+        URL, AUDIENCE, token_provider=lambda audience: "token", session=session,
+    ).google_gmail_draft_create(INTENT, thread_ref="thread_1", body="Hi there")
+    assert draft_id == "draft_1"
+    assert session.calls == [
+        (
+            f"{URL}/v1/providers/google/gmail/drafts/create",
+            {
+                "json": {
+                    "intent_id": str(INTENT),
+                    "thread_ref": "thread_1",
+                    "body": "Hi there",
+                },
+                "headers": {"Authorization": "Bearer token"},
+                "timeout": 15.0,
+                "allow_redirects": False,
+                "stream": True,
+            },
+        )
+    ]
+    assert session.response.closed
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        Response(status=404),
+        Response(body={"draft_id": "draft_1", "thread_id": "thread_1"}),
+        Response(body={"draft_id": ""}),
+        Response(body={"draft_id": "x" * 181}),
+    ],
+)
+def test_draft_create_client_fails_closed_on_response_ambiguity(response):
+    with pytest.raises(RuntimeError):
+        SecretBrokerClient(
+            URL, AUDIENCE, token_provider=lambda audience: "token",
+            session=Session(response),
+        ).google_gmail_draft_create(INTENT, thread_ref="thread_1", body="Hi")
+    assert response.closed
+
+
 def test_conversation_read_clients_validate_bounded_collection_contracts():
     gmail_response = Response(body={"threads": [{
         "thread_id": "thread_1", "subject": "Subject", "sender": "From",

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
-TASKS = frozenset({"classify", "converse"})
+TASKS = frozenset({"classify", "converse", "embed"})
+_CHAT_TASKS = frozenset({"classify", "converse"})
 ROLES = frozenset({"system", "user", "assistant"})
 MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$")
 MAX_MESSAGES = 8
@@ -15,11 +17,16 @@ MAX_MESSAGE_CHARS = 8_000
 MAX_TOTAL_CHARS = 32_000
 MAX_RESPONSE_CHARS = 16_000
 MAX_GATEWAY_RESPONSE_BYTES = 100_000
+MAX_EMBED_CHARS = 8_000
+MAX_EMBED_DIMENSIONS = 4_096
 
 
 class CompletionClient(Protocol):
     @property
     def chat(self) -> Any: ...
+
+    @property
+    def embeddings(self) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -27,10 +34,15 @@ class ModelResult:
     text: str
 
 
+@dataclass(frozen=True)
+class EmbedResult:
+    vector: tuple[float, ...]
+
+
 class HostedModelGateway:
     def __init__(self, client: CompletionClient, *, models: Mapping[str, str]):
         if set(models) != TASKS:
-            raise ValueError("model routes must contain classify and converse")
+            raise ValueError("model routes must contain classify, converse, and embed")
         if any(
             not isinstance(model, str) or not MODEL_NAME.fullmatch(model)
             for model in models.values()
@@ -55,9 +67,37 @@ class HostedModelGateway:
             raise RuntimeError("model response contract is invalid")
         return ModelResult(text)
 
+    def embed(self, *, text: str) -> EmbedResult:
+        normalized = validate_embed_input(text)
+        response = self._client.embeddings.create(
+            model=self._models["embed"], input=normalized
+        )
+        try:
+            vector = response.data[0].embedding
+        except (AttributeError, IndexError, TypeError) as error:
+            raise RuntimeError("model response contract is invalid") from error
+        if not isinstance(vector, list) or not 1 <= len(vector) <= MAX_EMBED_DIMENSIONS:
+            raise RuntimeError("model response contract is invalid")
+        values: list[float] = []
+        for value in vector:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
+                raise RuntimeError("model response contract is invalid")
+            values.append(float(value))
+        return EmbedResult(tuple(values))
+
+
+def validate_embed_input(text: object) -> str:
+    if not isinstance(text, str) or not 1 <= len(text) <= MAX_EMBED_CHARS:
+        raise ValueError("embed input is invalid")
+    return text
+
 
 def validate_messages(*, task: str, messages: object) -> list[dict[str, str]]:
-    if not isinstance(task, str) or task not in TASKS:
+    if not isinstance(task, str) or task not in _CHAT_TASKS:
         raise ValueError("unsupported model task")
     if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_MESSAGES:
         raise ValueError("model messages are invalid")

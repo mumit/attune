@@ -16,6 +16,7 @@ GOOGLE_GMAIL_PROFILE_ACTION = "credential.use.google.gmail.profile.read"
 GOOGLE_CALENDAR_PRIMARY_ACTION = "credential.use.google.calendar.primary.read"
 GOOGLE_GMAIL_THREADS_ACTION = "credential.use.google.gmail.threads.read"
 GOOGLE_CALENDAR_EVENTS_ACTION = "credential.use.google.calendar.events.read"
+GOOGLE_GMAIL_DRAFT_CREATE_ACTION = "credential.use.google.gmail.draft.create"
 GOOGLE_OAUTH_INSTALL_ACTION = "credential.install.google.oauth"
 GOOGLE_OAUTH_DISCONNECT_ACTION = "credential.revoke.google.oauth"
 
@@ -372,6 +373,62 @@ class SecretBroker:
             intent,
             action=GOOGLE_CALENDAR_EVENTS_ACTION,
             body={"events": [event.response() for event in events]},
+        )
+
+    def google_gmail_draft_create(
+        self, intent_id: UUID, *, thread_ref: str, body: str
+    ) -> SecretBrokerResult:
+        intent = self._lease(intent_id, "worker", "use")
+        if intent is None:
+            return SecretBrokerResult(404)
+        if (
+            intent.provider != "google"
+            or intent.capability != "google.gmail.draft.create"
+            or intent.encrypted is None
+            or intent.credential_version is None
+            or self._google is None
+        ):
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION,
+                status_code=404, outcome="denied",
+            )
+        if not isinstance(body, str) or not 1 <= len(body) <= 10_000:
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION,
+                status_code=400, outcome="denied",
+            )
+        if not self._record(
+            intent, action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION, outcome="allowed"
+        ):
+            return SecretBrokerResult(503)
+        try:
+            credential = self._cipher.decrypt(
+                intent.encrypted, tenant_id=intent.tenant.tenant_id,
+                connector_id=intent.connector_id, provider=intent.provider,
+                credential_version=intent.credential_version,
+            )
+            created = self._google.gmail_draft_create(
+                credential, thread_ref=thread_ref, body=body
+            )
+        except ProviderFailure:
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION,
+                status_code=502, outcome="failed",
+            )
+        except ValueError:
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION,
+                status_code=400, outcome="denied",
+            )
+        except Exception:
+            return self._finish_failure(
+                intent, action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION,
+                status_code=503, outcome="failed",
+            )
+        return self._finish_success(
+            intent,
+            action=GOOGLE_GMAIL_DRAFT_CREATE_ACTION,
+            body=created.response(),
         )
 
     def _finish_success(

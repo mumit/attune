@@ -65,8 +65,22 @@ RELATIONAL_ASSETS = (
         DeletionRule.ERASE,
         customer_export=True,
     ),
+    # importance_signals (docs/future-state.md Phase 5 item 1) is derived
+    # behavioral state the principal can inspect/correct locally (`attune
+    # importance show/pin`) -- the same "owner-inspectable, owner-correctable"
+    # posture as `memories`, so it gets the same class/rule/export triple, not
+    # a bespoke "derived" bucket. attention_items is recorded chat/Slack
+    # signal content with its own retention window (RETENTION_DAYS,
+    # attune.hosted.intelligence), matching conversation_turns.
+    # hosted_brief_deliveries (docs/future-state.md Phase 5 item 4) stores the
+    # bounded rendered brief text delivered to the owner directly -- unlike
+    # hosted_channel_deliveries, which only tracks delivery state and reads
+    # its content from conversation_turns -- so it gets the same class/rule/
+    # export triple as conversation_turns/memories, not the OPERATIONAL
+    # bucket the delivery-claim tables below otherwise share.
     *_assets(
-        "memories memory_embeddings conversations conversation_turns",
+        "memories memory_embeddings conversations conversation_turns "
+        "importance_signals attention_items hosted_brief_deliveries",
         DataClass.CUSTOMER_CONTENT,
         DeletionRule.ERASE,
         customer_export=True,
@@ -78,7 +92,8 @@ RELATIONAL_ASSETS = (
         customer_export=False,
     ),
     *_assets(
-        "jobs approvals provider_events job_retries workflow_checkpoints "
+        "jobs approvals capability_admissions provider_events job_retries "
+        "workflow_checkpoints "
         "usage_records dispatch_intents credential_intents job_reconciliations "
         "oauth_transactions identity_sessions hosted_channel_setup_transactions "
         "hosted_channel_routes hosted_channel_deliveries export_jobs "

@@ -53,6 +53,10 @@ class Broker:
         self.calls.append(("google_oauth_exchange", intent_id, kwargs))
         return SimpleNamespace(status_code=204)
 
+    def google_gmail_draft_create(self, intent_id, **kwargs):
+        self.calls.append(("google_gmail_draft_create", intent_id, kwargs))
+        return SimpleNamespace(status_code=200, body={"draft_id": "draft_1"})
+
 
 class FailingBroker(Broker):
     def install(self, intent_id, credential):
@@ -228,6 +232,45 @@ def test_conversation_provider_reads_require_exact_bounded_contracts():
         ).status_code
         == 400
     )
+
+
+def test_gmail_draft_create_requires_worker_and_exact_bounded_contract():
+    broker = Broker()
+    app = client(broker)
+    headers = {"Authorization": "Bearer valid-worker"}
+    assert app.post(
+        "/v1/providers/google/gmail/drafts/create",
+        json={"intent_id": str(INTENT), "thread_ref": "thread_1", "body": "Hi"},
+    ).status_code == 403
+    ok = app.post(
+        "/v1/providers/google/gmail/drafts/create", headers=headers,
+        json={"intent_id": str(INTENT), "thread_ref": "thread_1", "body": "Hi"},
+    )
+    assert ok.status_code == 200 and ok.get_json() == {"draft_id": "draft_1"}
+    assert broker.calls == [
+        (
+            "google_gmail_draft_create",
+            INTENT,
+            {"thread_ref": "thread_1", "body": "Hi"},
+        )
+    ]
+    # Oversized body is refused at the request boundary, before the broker.
+    broker = Broker()
+    app = client(broker)
+    assert app.post(
+        "/v1/providers/google/gmail/drafts/create", headers=headers,
+        json={"intent_id": str(INTENT), "thread_ref": "thread_1", "body": "x" * 10_001},
+    ).status_code == 400
+    assert broker.calls == []
+    # Unknown/extra fields are refused, matching every other broker route.
+    assert app.post(
+        "/v1/providers/google/gmail/drafts/create", headers=headers,
+        json={
+            "intent_id": str(INTENT), "thread_ref": "thread_1", "body": "Hi",
+            "cc": "victim@example.com",
+        },
+    ).status_code == 400
+    assert broker.calls == []
 
 
 def test_use_anomaly_log_is_fixed_and_content_free(caplog):

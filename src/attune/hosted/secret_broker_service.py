@@ -209,6 +209,29 @@ def create_app(
             return jsonify({"error": "broker_unavailable"}), 503
         return _provider_result(result)
 
+    @app.post("/v1/providers/google/gmail/drafts/create")
+    def google_gmail_draft_create():
+        if not authorize(expected_worker):
+            return jsonify({"error": "forbidden"}), 403
+        body = body_for({"intent_id", "thread_ref", "body"})
+        parsed = intent_id(body) if body is not None else None
+        if (
+            parsed is None
+            or not isinstance(body["thread_ref"], str)
+            or not 1 <= len(body["thread_ref"]) <= 180
+            or not isinstance(body["body"], str)
+            or not 1 <= len(body["body"]) <= 10_000
+        ):
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            result = broker.google_gmail_draft_create(
+                parsed, thread_ref=body["thread_ref"], body=body["body"]
+            )
+        except Exception as error:
+            LOG.warning("credential use failed (%s)", type(error).__name__)
+            return jsonify({"error": "broker_unavailable"}), 503
+        return _provider_result(result)
+
     @app.post("/v1/providers/google/calendar/events")
     def google_calendar_events():
         if not authorize(expected_worker):

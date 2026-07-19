@@ -7,7 +7,7 @@ import math
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
 from .tenant import TenantContext, tenant_transaction
@@ -40,7 +40,8 @@ class HostedMemory:
 @dataclass(frozen=True)
 class HostedApproval:
     id: UUID
-    job_id: UUID
+    job_id: UUID | None
+    admission_id: UUID | None
     approver_id: UUID
     connector_id: UUID
     action_hash: bytes
@@ -48,8 +49,34 @@ class HostedApproval:
     destination_hash: bytes
     source_version: str
     policy_version: int
+    surface: str
     status: str
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class ClaimedApproval:
+    """The result of the one-use ``attune.claim_capability_approval`` claim.
+
+    ``capability``/``arguments``/``connector_id``/``policy_version`` are
+    populated only when ``final_status == "consumed"`` and the approval is
+    bound to an admission (``admission_id`` set) -- the frozen content a
+    dispatch producer needs to create the job and dispatch intent. A replay
+    of an already-decided approval returns the same recorded
+    ``final_status`` rather than erroring or mutating anything again
+    (SEC-501); ``final_status`` is one of ``approved`` [unused by this
+    single-shot claim -- see the migration header], ``rejected``,
+    ``expired``, or ``consumed``.
+    """
+
+    approval_id: UUID
+    admission_id: UUID | None
+    job_id: UUID | None
+    capability: str | None
+    arguments: Mapping[str, Any] | None
+    connector_id: UUID | None
+    policy_version: int | None
+    final_status: str
 
 
 class PostgresJobRepository:
@@ -371,6 +398,75 @@ class PostgresMemoryRepository:
                     for row in cursor.fetchall()
                 ]
 
+    def get(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        memory_id: UUID,
+    ) -> HostedMemory | None:
+        """One memory by id, tenant/principal-scoped (SEC-201: the
+        predicate below always comes from the verified caller context, never
+        from a selector the user or model typed)."""
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, principal_id, content, source_class, confidence
+                      FROM attune.memories
+                     WHERE tenant_id = %s AND principal_id = %s AND id = %s
+                       AND deleted_at IS NULL
+                    """,
+                    (context.tenant_id, principal_id, memory_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                return HostedMemory(
+                    id=row[0],
+                    principal_id=row[1],
+                    content=row[2],
+                    source_class=row[3],
+                    confidence=row[4],
+                )
+
+    def list_recent(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        limit: int = 20,
+    ) -> list[HostedMemory]:
+        """Most-recent-first listing for inspection (SEC-201: the tenant and
+        principal predicates below are supplied by the caller's verified
+        ``TenantContext``/``principal_id``, never derived from message text
+        or model output)."""
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, principal_id, content, source_class, confidence
+                      FROM attune.memories
+                     WHERE tenant_id = %s AND principal_id = %s
+                       AND deleted_at IS NULL
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT %s
+                    """,
+                    (context.tenant_id, principal_id, limit),
+                )
+                return [
+                    HostedMemory(
+                        id=row[0],
+                        principal_id=row[1],
+                        content=row[2],
+                        source_class=row[3],
+                        confidence=row[4],
+                    )
+                    for row in cursor.fetchall()
+                ]
+
     def soft_delete(
         self,
         context: TenantContext,
@@ -405,6 +501,14 @@ class PostgresMemoryRepository:
 
 
 class PostgresApprovalRepository:
+    """Propose a durable approval row; decide/consume only through the
+    one-use ``attune.claim_capability_approval`` SECURITY DEFINER function
+    (migration 0043). Direct UPDATE on ``attune.approvals`` is no longer
+    granted to any runtime role -- the claim function is the sole,
+    actor-bound, idempotent-replay mutation path for a real security
+    transition, not merely an atomicity convenience (see docs/decisions.md).
+    """
+
     def __init__(self, connection_factory: ConnectionFactory):
         self._connect = connection_factory
 
@@ -412,7 +516,6 @@ class PostgresApprovalRepository:
         self,
         context: TenantContext,
         *,
-        job_id: UUID,
         approver_id: UUID,
         connector_id: UUID,
         opaque_ref_hash: bytes,
@@ -422,7 +525,14 @@ class PostgresApprovalRepository:
         source_version: str,
         policy_version: int,
         expires_at: datetime,
+        job_id: UUID | None = None,
+        admission_id: UUID | None = None,
+        surface: str = "web",
     ) -> HostedApproval:
+        if (job_id is None) == (admission_id is None):
+            raise ValueError("exactly one of job_id or admission_id is required")
+        if surface not in {"web"}:
+            raise ValueError("invalid approval surface")
         _fixed_hash("opaque_ref_hash", opaque_ref_hash)
         _fixed_hash("action_hash", action_hash)
         _fixed_hash("destination_hash", destination_hash)
@@ -437,18 +547,20 @@ class PostgresApprovalRepository:
                 cursor.execute(
                     """
                     INSERT INTO attune.approvals
-                        (tenant_id, job_id, approver_id, connector_id,
-                         opaque_ref_hash, action_hash, capability,
-                         destination_hash, source_version, policy_version,
-                         expires_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id, job_id, approver_id, connector_id,
-                              action_hash, capability, destination_hash,
-                              source_version, policy_version, status, expires_at
+                        (tenant_id, job_id, admission_id, approver_id,
+                         connector_id, opaque_ref_hash, action_hash,
+                         capability, destination_hash, source_version,
+                         policy_version, surface, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, job_id, admission_id, approver_id,
+                              connector_id, action_hash, capability,
+                              destination_hash, source_version,
+                              policy_version, surface, status, expires_at
                     """,
                     (
                         context.tenant_id,
                         job_id,
+                        admission_id,
                         approver_id,
                         connector_id,
                         opaque_ref_hash,
@@ -457,82 +569,50 @@ class PostgresApprovalRepository:
                         destination_hash,
                         source_version,
                         policy_version,
+                        surface,
                         expires_at,
                     ),
                 )
                 return _approval(cursor.fetchone())
 
-    def decide(
+    def claim(
         self,
         context: TenantContext,
         *,
-        opaque_ref_hash: bytes,
-        approver_id: UUID,
+        approval_id: UUID,
+        principal_id: UUID,
         decision: str,
-    ) -> HostedApproval | None:
-        _fixed_hash("opaque_ref_hash", opaque_ref_hash)
+    ) -> ClaimedApproval | None:
+        """One-use, actor-bound claim through the SECURITY DEFINER function.
+
+        Returns ``None`` only when no approval matches this id/approver in
+        the caller's tenant (unknown reference, same as everywhere else in
+        this schema). A found approval always returns a
+        :class:`ClaimedApproval`, even when it was already decided earlier
+        (idempotent replay, SEC-501) or has since expired.
+        """
+
         if decision not in {"approved", "rejected"}:
             raise ValueError("decision must be approved or rejected")
         with closing(self._connect()) as connection:
             with tenant_transaction(connection, context) as cursor:
                 cursor.execute(
-                    """
-                    UPDATE attune.approvals
-                       SET status = %s, decided_at = clock_timestamp()
-                     WHERE tenant_id = %s AND opaque_ref_hash = %s
-                       AND approver_id = %s AND status = 'pending'
-                       AND expires_at > clock_timestamp()
-                    RETURNING id, job_id, approver_id, connector_id,
-                              action_hash, capability, destination_hash,
-                              source_version, policy_version, status, expires_at
-                    """,
-                    (
-                        decision,
-                        context.tenant_id,
-                        opaque_ref_hash,
-                        approver_id,
-                    ),
+                    "SELECT * FROM attune.claim_capability_approval(%s, %s, %s)",
+                    (approval_id, principal_id, decision),
                 )
                 row = cursor.fetchone()
-                return _approval(row) if row is not None else None
-
-    def consume(
-        self,
-        context: TenantContext,
-        *,
-        approval_id: UUID,
-        expected_action_hash: bytes,
-        expected_source_version: str,
-        expected_policy_version: int,
-    ) -> HostedApproval | None:
-        _fixed_hash("expected_action_hash", expected_action_hash)
-        _bounded_text("expected_source_version", expected_source_version, 255)
-        if expected_policy_version < 1:
-            raise ValueError("expected_policy_version must be positive")
-        with closing(self._connect()) as connection:
-            with tenant_transaction(connection, context) as cursor:
-                cursor.execute(
-                    """
-                    UPDATE attune.approvals
-                       SET status = 'consumed', consumed_at = clock_timestamp()
-                     WHERE tenant_id = %s AND id = %s AND status = 'approved'
-                       AND expires_at > clock_timestamp()
-                       AND action_hash = %s AND source_version = %s
-                       AND policy_version = %s
-                    RETURNING id, job_id, approver_id, connector_id,
-                              action_hash, capability, destination_hash,
-                              source_version, policy_version, status, expires_at
-                    """,
-                    (
-                        context.tenant_id,
-                        approval_id,
-                        expected_action_hash,
-                        expected_source_version,
-                        expected_policy_version,
-                    ),
-                )
-                row = cursor.fetchone()
-                return _approval(row) if row is not None else None
+        if row is None:
+            return None
+        return ClaimedApproval(
+            approval_id=row[0],
+            admission_id=row[1],
+            job_id=row[2],
+            capability=row[3],
+            arguments=row[4],
+            connector_id=row[5],
+            policy_version=row[6],
+            final_status=row[7],
+        )
 
 
 def _job(row: Sequence[Any]) -> HostedJob:
@@ -552,15 +632,17 @@ def _approval(row: Sequence[Any]) -> HostedApproval:
     return HostedApproval(
         id=row[0],
         job_id=row[1],
-        approver_id=row[2],
-        connector_id=row[3],
-        action_hash=bytes(row[4]),
-        capability=row[5],
-        destination_hash=bytes(row[6]),
-        source_version=row[7],
-        policy_version=row[8],
-        status=row[9],
-        expires_at=row[10],
+        admission_id=row[2],
+        approver_id=row[3],
+        connector_id=row[4],
+        action_hash=bytes(row[5]),
+        capability=row[6],
+        destination_hash=bytes(row[7]),
+        source_version=row[8],
+        policy_version=row[9],
+        surface=row[10],
+        status=row[11],
+        expires_at=row[12],
     )
 
 
