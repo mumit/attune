@@ -56,6 +56,17 @@ comments and unknown keys are preserved, legacy names are migrated, and a
 want a new configuration. Without `--target local`, initialization remains
 configuration-only.
 
+Use `attune init --quick` for the shortest path through the wizard: it asks
+only the essential questions (workspace backend, data directory, mailbox,
+internal domains, LLM base/key/default model, embedding model/key) and
+defaults everything else, printing the follow-up commands for channels and
+Google credentials. Add `--recommended` (with `--quick` or the full wizard)
+to fill the documented mixed-provider model routing from
+[`configuration.md`](docs/configuration.md) as editable defaults. Use
+`attune init --google-setup` for a guided, resumable checklist through the
+Google Cloud Console ceremony, with exact copy-paste values and no silent
+cloud mutations.
+
 See [Getting started](docs/getting-started.md), the complete
 [configuration reference](docs/configuration.md), the
 [user journey](docs/user-journey.md), [Design](docs/design.md), and

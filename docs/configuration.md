@@ -43,6 +43,11 @@ Model names and availability change. Check the current
 [Anthropic model overview](https://platform.claude.com/docs/en/about-claude/models/overview),
 then confirm gateway compatibility with `attune doctor`.
 
+`attune init --recommended` fills this exact starting point (and the
+embedding model/dimensions below) as editable defaults during the wizard —
+it never overwrites a value you already configured, and every field it fills
+stays a plain, editable line in `.env`.
+
 For embeddings, start with OpenAI `text-embedding-3-small` and `1536`
 dimensions. `text-embedding-3-large` at `3072` dimensions is the quality-first
 alternative. See the [OpenAI embeddings guide](https://developers.openai.com/api/docs/guides/embeddings).

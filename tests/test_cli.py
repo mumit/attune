@@ -13,13 +13,21 @@ from attune.cli.doctor import (
     SKIP,
     WARN,
     Check,
+    _fail_read,
+    _fail_workspace,
     _qdrant_ready_url,
     check_audit_chain,
     check_channel_routes,
+    check_google_oauth_app,
     check_source_channels,
     run_doctor,
 )
-from attune.cli.init_cmd import run_init
+from attune.cli.init_cmd import (
+    RECOMMENDED_EMBEDDING_DIMENSIONS,
+    RECOMMENDED_EMBEDDING_MODEL,
+    RECOMMENDED_MODELS,
+    run_init,
+)
 from attune.cli.run_cmd import run_run
 
 
@@ -192,6 +200,192 @@ def test_init_runs_oauth_flow_for_client_secret(tmp_path):
     assert flows == [{"path": str(secret_file), "dir": data_dir}]
     content = (tmp_path / ".env").read_text()
     assert f"ATTUNE_GOOGLE_CREDENTIALS_FILE={data_dir}/google_authorized_user.json" in content
+
+
+def test_init_offers_guided_google_setup_when_no_client_file_exists(tmp_path):
+    data_dir = str(tmp_path / "data")
+    calls = []
+
+    def fake_google_setup(*, data_dir, ask, out):
+        calls.append(data_dir)
+        out("[fake checklist ran]")
+
+    answers = {
+        "Data directory": data_dir,
+        "mailbox email": "owner@example.com",
+        "Default chat model": "m",
+        "Embedding model": "e",
+        "Embedding dimensions": "1536",
+        "guided Google Cloud setup checklist": "y",
+    }
+    lines = []
+    code = run_init(
+        env_file=str(tmp_path / ".env"),
+        ask=_by_prompt(answers),
+        ask_secret=lambda p: "",
+        google_setup=fake_google_setup,
+        out=lines.append,
+    )
+
+    assert code == 0
+    assert calls == [data_dir]
+    assert any("[fake checklist ran]" in line for line in lines)
+
+
+def test_init_does_not_offer_google_setup_when_client_file_exists(tmp_path):
+    secret_file = tmp_path / "client_secret.json"
+    secret_file.write_text('{"installed": {"client_id": "x"}}')
+
+    def fail_google_setup(**kwargs):
+        raise AssertionError("must not offer the checklist when a file exists")
+
+    answers = {
+        "Data directory": str(tmp_path / "data"),
+        "mailbox email": "owner@example.com",
+        "Google credentials JSON": str(secret_file),
+        "Run Google consent flow": "n",
+        "Default chat model": "m",
+        "Embedding model": "e",
+        "Embedding dimensions": "1536",
+    }
+    code = run_init(
+        env_file=str(tmp_path / ".env"),
+        ask=_by_prompt(answers),
+        ask_secret=lambda p: "",
+        google_setup=fail_google_setup,
+        out=lambda s: None,
+    )
+    assert code == 0
+
+
+def test_quick_init_asks_only_the_essential_questions(tmp_path):
+    data_dir = str(tmp_path / "data")
+    essential_substrings = (
+        "Workspace backend",
+        "Data directory",
+        "mailbox email",
+        "Internal email domains",
+        "OpenAI-compatible base URL",
+        "LLM API key",
+        "Default chat model",
+        "Embedding API key",
+        "Embedding model",
+    )
+
+    def ask(prompt: str) -> str:
+        assert any(text in prompt for text in essential_substrings), (
+            f"quick mode asked a non-essential question: {prompt!r}"
+        )
+        if "Data directory" in prompt:
+            return data_dir
+        if "mailbox email" in prompt:
+            return "owner@example.com"
+        return ""
+
+    def ask_secret(prompt: str) -> str:
+        assert any(text in prompt for text in essential_substrings), (
+            f"quick mode asked a non-essential secret: {prompt!r}"
+        )
+        return "secret" if "LLM API" in prompt else ""
+
+    lines = []
+    code = run_init(
+        env_file=str(tmp_path / ".env"),
+        quick=True,
+        ask=ask,
+        ask_secret=ask_secret,
+        out=lines.append,
+    )
+
+    assert code == 0
+    assert any("Quick setup skipped" in line for line in lines)
+    assert any("attune init --google-setup" in line for line in lines)
+    content = (tmp_path / ".env").read_text()
+    env_lines = content.splitlines()
+    assert "ATTUNE_SLACK_CHANNEL=" in env_lines  # channels unset = disabled
+    # per-task overrides defaulted blank => falls back to ATTUNE_MODEL_DEFAULT
+    assert "ATTUNE_MODEL_CLASSIFY=" in env_lines
+
+
+def test_quick_init_preserves_existing_non_essential_values(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ATTUNE_MODEL_DRAFT=already-configured-model\n"
+        "SLACK_BOT_TOKEN=xoxb-existing\n"
+        "ATTUNE_SLACK_CHANNEL=U0123456789\n"
+        "ATTUNE_TIMEZONE=America/Vancouver\n"
+    )
+    data_dir = str(tmp_path / "data")
+    answers = {
+        "Data directory": data_dir,
+        "mailbox email": "owner@example.com",
+        "Default chat model": "m",
+        "Embedding model": "e",
+        "Embedding dimensions": "1536",
+    }
+    code = run_init(
+        env_file=str(env_file),
+        quick=True,
+        ask=_by_prompt(answers),
+        ask_secret=lambda p: "",
+        out=lambda s: None,
+    )
+
+    assert code == 0
+    content = env_file.read_text()
+    assert "ATTUNE_MODEL_DRAFT=already-configured-model" in content
+    assert "SLACK_BOT_TOKEN=xoxb-existing" in content
+    assert "ATTUNE_SLACK_CHANNEL=U0123456789" in content
+    assert "ATTUNE_TIMEZONE=America/Vancouver" in content
+
+
+def test_recommended_fills_documented_values_on_a_new_setup(tmp_path):
+    data_dir = str(tmp_path / "data")
+    answers = {
+        "Data directory": data_dir,
+        "mailbox email": "owner@example.com",
+    }
+    code = run_init(
+        env_file=str(tmp_path / ".env"),
+        quick=True,
+        recommended=True,
+        ask=_by_prompt(answers),
+        ask_secret=lambda p: "secret",
+        out=lambda s: None,
+    )
+
+    assert code == 0
+    content = (tmp_path / ".env").read_text()
+    for key, value in RECOMMENDED_MODELS.items():
+        assert f"{key}={value}" in content
+    assert f"ATTUNE_EMBEDDING_MODEL={RECOMMENDED_EMBEDDING_MODEL}" in content
+    assert f"ATTUNE_EMBEDDING_DIMENSIONS={RECOMMENDED_EMBEDDING_DIMENSIONS}" in content
+
+
+def test_recommended_does_not_override_an_explicit_existing_value(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ATTUNE_MODEL_DRAFT=custom-model\n")
+    data_dir = str(tmp_path / "data")
+    answers = {
+        "Data directory": data_dir,
+        "mailbox email": "owner@example.com",
+        "Default chat model": "m",
+        "Embedding model": "e",
+        "Embedding dimensions": "1536",
+    }
+    code = run_init(
+        env_file=str(env_file),
+        recommended=True,
+        ask=_by_prompt(answers),
+        ask_secret=lambda p: "",
+        out=lambda s: None,
+    )
+
+    assert code == 0
+    content = env_file.read_text()
+    assert "ATTUNE_MODEL_DRAFT=custom-model" in content
+    # An override left blank still picks up the recommended value.
+    assert f"ATTUNE_MODEL_CLASSIFY={RECOMMENDED_MODELS['ATTUNE_MODEL_CLASSIFY']}" in content
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +769,125 @@ def test_audit_chain_fails_with_line_number_on_tamper(tmp_path):
     status, detail = check_audit_chain(settings)
     assert status == FAIL
     assert "line 2" in detail
+
+
+# ---------------------------------------------------------------------------
+# google-oauth-app (UX item #2, G20) + inline Doctor fix hints (UX item #4)
+# ---------------------------------------------------------------------------
+
+
+def test_google_oauth_app_skip_when_mcp_backend():
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_WORKSPACE_BACKEND": "mcp",
+        "ATTUNE_MCP_URL": "https://mcp.example/mcp",
+    })
+    status, detail = check_google_oauth_app(settings)
+    assert status == SKIP
+    assert "mcp" in detail
+
+
+def test_google_oauth_app_skip_when_no_state_recorded(tmp_path):
+    from attune.config import Settings
+
+    settings = Settings.from_env({"ATTUNE_DATA_DIR": str(tmp_path)})
+    status, detail = check_google_oauth_app(settings)
+    assert status == SKIP
+    assert "google-setup" in detail or "legacy" in detail
+
+
+def test_google_oauth_app_skip_when_internal(tmp_path):
+    from attune.cli.google_setup_state import GoogleSetupState, google_setup_state_path
+    from attune.config import Settings
+
+    state = GoogleSetupState()
+    state.set_consent_mode("internal")
+    state.save(google_setup_state_path(str(tmp_path)))
+
+    settings = Settings.from_env({"ATTUNE_DATA_DIR": str(tmp_path)})
+    status, detail = check_google_oauth_app(settings)
+    assert status == SKIP
+    assert "internal" in detail
+
+
+def test_google_oauth_app_skip_when_published():
+    from attune.cli.google_setup_state import GoogleSetupState, google_setup_state_path
+    from attune.config import Settings
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        state = GoogleSetupState()
+        state.set_consent_mode("external_published")
+        state.save(google_setup_state_path(tmp))
+        settings = Settings.from_env({"ATTUNE_DATA_DIR": tmp})
+        status, detail = check_google_oauth_app(settings)
+    assert status == SKIP
+
+
+def test_google_oauth_app_warns_on_external_testing_with_credential_age(tmp_path):
+    from attune.cli.google_setup_state import GoogleSetupState, google_setup_state_path
+    from attune.config import Settings
+
+    state = GoogleSetupState()
+    state.set_consent_mode("external_testing")
+    state.save(google_setup_state_path(str(tmp_path)))
+    cred_file = tmp_path / "google_authorized_user.json"
+    cred_file.write_text("{}")
+
+    settings = Settings.from_env({
+        "ATTUNE_DATA_DIR": str(tmp_path),
+        "ATTUNE_GOOGLE_CREDENTIALS_FILE": str(cred_file),
+    })
+    status, detail = check_google_oauth_app(settings)
+    assert status == WARN
+    assert "7 days" in detail
+    assert "Internal" in detail
+    assert "publish" in detail
+    assert "day(s) old" in detail
+
+
+def test_google_oauth_app_is_not_a_fatal_check():
+    from attune.cli.doctor import FATAL_CHECKS
+
+    assert "google-oauth-app" not in FATAL_CHECKS
+
+
+def test_fail_workspace_hint_for_google_oauth_backend():
+    status, detail = _fail_workspace(FileNotFoundError("no such file"), mcp=False)
+    assert status == FAIL
+    assert "ATTUNE_GOOGLE_CREDENTIALS_FILE" in detail
+    assert "authorized-user JSON" in detail
+    assert "attune init" in detail
+
+
+def test_fail_workspace_hint_for_mcp_backend():
+    status, detail = _fail_workspace(ConnectionError("refused"), mcp=True)
+    assert status == FAIL
+    assert "tools/list" in detail
+    assert "mcp-contract.md" in detail
+
+
+def test_fail_workspace_appends_invalid_grant_reauth_hint():
+    status, detail = _fail_workspace(Exception("invalid_grant: Token has expired"), mcp=False)
+    assert status == FAIL
+    assert "7 days" in detail
+    assert "attune init --google-setup" in detail
+
+
+def test_fail_read_hint_names_the_source_and_fix():
+    status, detail = _fail_read(Exception("boom"), source="Gmail")
+    assert status == FAIL
+    assert "enable the Gmail API" in detail
+    assert "add the test user" in detail
+    assert "attune init" in detail
+
+
+def test_fail_read_appends_invalid_grant_reauth_hint():
+    status, detail = _fail_read(Exception("invalid_grant"), source="Calendar")
+    assert status == FAIL
+    assert "7 days" in detail
+    assert "attune init --google-setup" in detail
 
 
 # ---------------------------------------------------------------------------

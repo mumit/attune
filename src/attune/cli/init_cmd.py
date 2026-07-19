@@ -16,6 +16,47 @@ from dotenv import dotenv_values
 
 DEFAULT_DATA_DIR = "~/.attune"
 
+# The documented mixed-provider starting point from docs/configuration.md's
+# "Recommended model routing" section (UX item #3, G20). Used only as the
+# DEFAULT shown for these questions -- never force-overwritten over an
+# already-configured value -- when ``--recommended`` is passed. Keep these
+# two literally in sync with configuration.md; a golden test pins them.
+RECOMMENDED_MODELS = {
+    "ATTUNE_MODEL_DEFAULT": "gpt-5.6-terra",
+    "ATTUNE_MODEL_CLASSIFY": "claude-haiku-4-5",
+    "ATTUNE_MODEL_DRAFT": "claude-sonnet-5",
+    "ATTUNE_MODEL_REASON": "gpt-5.6-terra",
+    "ATTUNE_MODEL_CONSOLIDATE": "gpt-5.6-terra",
+    "ATTUNE_MODEL_CONVERSE": "claude-sonnet-5",
+    "ATTUNE_MODEL_MEMORY_EXTRACT": "claude-haiku-4-5",
+}
+RECOMMENDED_EMBEDDING_MODEL = "text-embedding-3-small"
+RECOMMENDED_EMBEDDING_DIMENSIONS = "1536"
+
+
+def _external_testing_reminder(data_dir: str) -> str | None:
+    """One-line persistent reminder when the checklist recorded
+    External+Testing (Deliverable B item 3, G20/UX item #2)."""
+    from .google_setup_state import GoogleSetupState, google_setup_state_path
+    from .setup_state import SetupStateError
+
+    if not data_dir:
+        return None
+    path = google_setup_state_path(data_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        state = GoogleSetupState.load_or_create(path)
+    except (SetupStateError, OSError, ValueError):
+        return None
+    if state.consent_mode != "external_testing":
+        return None
+    return (
+        "Reminder: OAuth consent screen is External+Testing — refresh "
+        "tokens expire ~7 days after issuance (see `attune doctor` check "
+        "google-oauth-app)."
+    )
+
 _SPECIAL_MIGRATIONS = {
     "FUELIX_TOKEN": "ATTUNE_LLM_API_KEY",
     "BEARER_OPENAI_TOKEN": "ATTUNE_LLM_API_KEY",
@@ -119,6 +160,9 @@ def run_init(
     oauth_flow: Callable[..., str] | None = None,
     target: str = "configure",
     yes: bool = False,
+    quick: bool = False,
+    recommended: bool = False,
+    google_setup: Callable[..., object] | None = None,
     local_runner: (
         Callable[
             [list[str] | tuple[str, ...]], subprocess.CompletedProcess[str]
@@ -149,14 +193,23 @@ def run_init(
 
     out(("Editing " if existed and not (fresh or force) else "Creating ") + env_file)
     out("Existing values are defaults; secrets are never displayed.")
+    if quick:
+        out(
+            "Quick mode: asking only the essential questions; everything "
+            "else keeps its current value or a safe default."
+        )
 
     backend = ask_default(
         "Workspace backend (google_oauth/mcp)",
         current.get("ATTUNE_WORKSPACE_BACKEND", "google_oauth"),
     )
-    ingestion = ask_default(
-        "Ingestion mode (poll/google_pubsub)",
-        current.get("ATTUNE_INGESTION_MODE", "poll"),
+    ingestion = (
+        current.get("ATTUNE_INGESTION_MODE", "poll")
+        if quick
+        else ask_default(
+            "Ingestion mode (poll/google_pubsub)",
+            current.get("ATTUNE_INGESTION_MODE", "poll"),
+        )
     )
     data_dir = os.path.expanduser(
         ask_default("Data directory", current.get("ATTUNE_DATA_DIR", DEFAULT_DATA_DIR))
@@ -188,7 +241,11 @@ def run_init(
     )
     llm_key = ask_kept_secret("LLM API key / bearer token", "ATTUNE_LLM_API_KEY")
     model_default = ask_default(
-        "Default chat model", current.get("ATTUNE_MODEL_DEFAULT", "")
+        "Default chat model",
+        current.get(
+            "ATTUNE_MODEL_DEFAULT",
+            RECOMMENDED_MODELS["ATTUNE_MODEL_DEFAULT"] if recommended else "",
+        ),
     )
     model_prompts = {
         "ATTUNE_MODEL_CLASSIFY": "Classification model",
@@ -198,22 +255,55 @@ def run_init(
         "ATTUNE_MODEL_CONVERSE": "Conversation model",
         "ATTUNE_MODEL_MEMORY_EXTRACT": "Memory extraction model",
     }
-    models = {
-        key: ask_default(prompt, current.get(key, model_default))
-        for key, prompt in model_prompts.items()
-    }
-    embedding_base = ask_default(
-        "Embedding API base URL",
-        current.get("ATTUNE_EMBEDDING_BASE_URL", llm_base),
+    if quick:
+        # Task-model overrides are skipped in quick mode; blank means "use
+        # ATTUNE_MODEL_DEFAULT" at runtime (llm.py's model_for), unless
+        # --recommended fills the documented per-task split instead.
+        models = {
+            key: current.get(key, RECOMMENDED_MODELS[key] if recommended else "")
+            for key in model_prompts
+        }
+    else:
+        models = {
+            key: ask_default(
+                prompt,
+                current.get(
+                    key, RECOMMENDED_MODELS[key] if recommended else model_default
+                ),
+            )
+            for key, prompt in model_prompts.items()
+        }
+    embedding_base = (
+        current.get("ATTUNE_EMBEDDING_BASE_URL", llm_base)
+        if quick
+        else ask_default(
+            "Embedding API base URL",
+            current.get("ATTUNE_EMBEDDING_BASE_URL", llm_base),
+        )
     )
     embedding_key = ask_kept_secret(
         "Embedding API key (blank uses LLM key)", "ATTUNE_EMBEDDING_API_KEY"
     )
     embedding_model = ask_default(
-        "Embedding model", current.get("ATTUNE_EMBEDDING_MODEL", "")
+        "Embedding model",
+        current.get(
+            "ATTUNE_EMBEDDING_MODEL",
+            RECOMMENDED_EMBEDDING_MODEL if recommended else "",
+        ),
     )
-    embedding_dims = ask_default(
-        "Embedding dimensions", current.get("ATTUNE_EMBEDDING_DIMENSIONS", "")
+    embedding_dims = (
+        current.get(
+            "ATTUNE_EMBEDDING_DIMENSIONS",
+            RECOMMENDED_EMBEDDING_DIMENSIONS if recommended else "",
+        )
+        if quick
+        else ask_default(
+            "Embedding dimensions",
+            current.get(
+                "ATTUNE_EMBEDDING_DIMENSIONS",
+                RECOMMENDED_EMBEDDING_DIMENSIONS if recommended else "",
+            ),
+        )
     )
 
     google_project = current.get("GOOGLE_PROJECT_ID", "")
@@ -222,7 +312,9 @@ def run_init(
     mcp_gmail_url = current.get("ATTUNE_MCP_GMAIL_URL", "")
     mcp_calendar_url = current.get("ATTUNE_MCP_CALENDAR_URL", "")
     mcp_token = current.get("ATTUNE_MCP_TOKEN", "")
-    if backend == "google_oauth":
+    if quick:
+        pass  # workspace credentials keep their current values, unasked
+    elif backend == "google_oauth":
         google_project = ask_default("Google Cloud project ID", google_project)
         google_creds = _google_credentials_step(
             ask=ask,
@@ -231,6 +323,7 @@ def run_init(
             data_dir=data_dir,
             oauth_flow=oauth_flow,
             default=google_creds,
+            google_setup=google_setup,
         )
     else:
         mcp_url = ask_default("MCP Streamable HTTP URL", mcp_url)
@@ -239,51 +332,78 @@ def run_init(
             mcp_calendar_url = ask_default("Calendar MCP URL", mcp_calendar_url)
         mcp_token = ask_kept_secret("MCP bearer token", "ATTUNE_MCP_TOKEN")
 
-    slack_bot = ask_kept_secret("Slack bot token", "SLACK_BOT_TOKEN")
-    slack_app = ask_kept_secret("Slack app-level token", "SLACK_APP_TOKEN") if slack_bot else ""
-    slack_channel = ask_default(
-        "Slack destination ID (owner U... or conversation D/C/G...)",
-        current.get("ATTUNE_SLACK_CHANNEL", ""),
-    ) if slack_bot else ""
-    slack_allowed = ask_default(
-        "Allowed Slack user IDs", current.get("ATTUNE_SLACK_ALLOWED_USERS", "")
-    ) if slack_bot else ""
-
-    chat_space = ask_default(
-        "Google Chat space (spaces/..., blank to skip)",
-        current.get("ATTUNE_CHAT_SPACE", ""),
-    )
-    chat_creds = ask_default(
-        "Google Chat app service-account JSON",
-        current.get("ATTUNE_CHAT_CREDENTIALS_FILE", ""),
-    ) if chat_space else ""
-    chat_allowed = ask_default(
-        "Allowed Google Chat user IDs", current.get("ATTUNE_CHAT_ALLOWED_USERS", "")
-    ) if chat_space else ""
-
-    available = [name for name, ok in (("slack", slack_bot), ("google_chat", chat_space)) if ok]
-    route_default = ",".join(available)
-    brief_channels = ask_default(
-        "Brief channels", current.get("ATTUNE_BRIEF_CHANNELS", route_default)
-    )
-    approval_channel = ask_default(
-        "Approval channel",
-        current.get("ATTUNE_APPROVAL_CHANNEL", available[0] if available else ""),
-    )
-    notification_channels = ask_default(
-        "Notification channels", current.get("ATTUNE_NOTIFICATION_CHANNELS", route_default)
-    )
-    interaction_channels = ask_default(
-        "Interaction channels", current.get("ATTUNE_INTERACTION_CHANNELS", route_default)
-    )
-
-    visibility_ack = current.get("ATTUNE_ACK_DESTINATION_VISIBILITY", "")
-    if (slack_channel and not slack_channel.startswith("D")) or chat_space:
-        visibility_ack = ask_default(
-            "Destination membership verified (yes/no)", visibility_ack or "no"
+    if quick:
+        slack_bot = current.get("SLACK_BOT_TOKEN", "")
+        slack_app = current.get("SLACK_APP_TOKEN", "")
+        slack_channel = current.get("ATTUNE_SLACK_CHANNEL", "")
+        slack_allowed = current.get("ATTUNE_SLACK_ALLOWED_USERS", "")
+        chat_space = current.get("ATTUNE_CHAT_SPACE", "")
+        chat_creds = current.get("ATTUNE_CHAT_CREDENTIALS_FILE", "")
+        chat_allowed = current.get("ATTUNE_CHAT_ALLOWED_USERS", "")
+        brief_channels = current.get("ATTUNE_BRIEF_CHANNELS", "")
+        approval_channel = current.get("ATTUNE_APPROVAL_CHANNEL", "")
+        notification_channels = current.get("ATTUNE_NOTIFICATION_CHANNELS", "")
+        interaction_channels = current.get("ATTUNE_INTERACTION_CHANNELS", "")
+        visibility_ack = current.get("ATTUNE_ACK_DESTINATION_VISIBILITY", "")
+        timezone = current.get("ATTUNE_TIMEZONE", "UTC")
+        brief_time = current.get("ATTUNE_BRIEF_TIME", "07:30")
+    else:
+        slack_bot = ask_kept_secret("Slack bot token", "SLACK_BOT_TOKEN")
+        slack_app = (
+            ask_kept_secret("Slack app-level token", "SLACK_APP_TOKEN")
+            if slack_bot else ""
         )
-    timezone = ask_default("Timezone (IANA name)", current.get("ATTUNE_TIMEZONE", "UTC"))
-    brief_time = ask_default("Morning brief time", current.get("ATTUNE_BRIEF_TIME", "07:30"))
+        slack_channel = ask_default(
+            "Slack destination ID (owner U... or conversation D/C/G...)",
+            current.get("ATTUNE_SLACK_CHANNEL", ""),
+        ) if slack_bot else ""
+        slack_allowed = ask_default(
+            "Allowed Slack user IDs", current.get("ATTUNE_SLACK_ALLOWED_USERS", "")
+        ) if slack_bot else ""
+
+        chat_space = ask_default(
+            "Google Chat space (spaces/..., blank to skip)",
+            current.get("ATTUNE_CHAT_SPACE", ""),
+        )
+        chat_creds = ask_default(
+            "Google Chat app service-account JSON",
+            current.get("ATTUNE_CHAT_CREDENTIALS_FILE", ""),
+        ) if chat_space else ""
+        chat_allowed = ask_default(
+            "Allowed Google Chat user IDs", current.get("ATTUNE_CHAT_ALLOWED_USERS", "")
+        ) if chat_space else ""
+
+        available = [
+            name for name, ok in (("slack", slack_bot), ("google_chat", chat_space)) if ok
+        ]
+        route_default = ",".join(available)
+        brief_channels = ask_default(
+            "Brief channels", current.get("ATTUNE_BRIEF_CHANNELS", route_default)
+        )
+        approval_channel = ask_default(
+            "Approval channel",
+            current.get("ATTUNE_APPROVAL_CHANNEL", available[0] if available else ""),
+        )
+        notification_channels = ask_default(
+            "Notification channels",
+            current.get("ATTUNE_NOTIFICATION_CHANNELS", route_default),
+        )
+        interaction_channels = ask_default(
+            "Interaction channels",
+            current.get("ATTUNE_INTERACTION_CHANNELS", route_default),
+        )
+
+        visibility_ack = current.get("ATTUNE_ACK_DESTINATION_VISIBILITY", "")
+        if (slack_channel and not slack_channel.startswith("D")) or chat_space:
+            visibility_ack = ask_default(
+                "Destination membership verified (yes/no)", visibility_ack or "no"
+            )
+        timezone = ask_default(
+            "Timezone (IANA name)", current.get("ATTUNE_TIMEZONE", "UTC")
+        )
+        brief_time = ask_default(
+            "Morning brief time", current.get("ATTUNE_BRIEF_TIME", "07:30")
+        )
 
     updates = {
         "ATTUNE_WORKSPACE_BACKEND": backend,
@@ -328,6 +448,21 @@ def run_init(
         f"; backup: {env_file}.bak" if existed and not (fresh or force) else ""
     )
     out(f"Wrote {env_file} (0600){backup_note}")
+    if quick:
+        out(
+            "Quick setup skipped: ingestion mode, per-task model overrides, "
+            "Google/MCP workspace credentials, Slack/Google Chat channels, "
+            "and timezone/brief time (each kept its current value or a safe "
+            "default)."
+        )
+        out(
+            "Follow-up: `attune init --google-setup` for the guided Google "
+            "Cloud checklist; `attune init` (without --quick) for the full "
+            "wizard to add channels."
+        )
+    reminder = _external_testing_reminder(data_dir)
+    if reminder:
+        out(reminder)
     if target == "configure":
         out("Next: attune doctor, then attune brief")
         return 0
@@ -457,12 +592,35 @@ def _run_local_target(
 
 
 def _google_credentials_step(
-    *, ask, ask_default, out, data_dir: str, oauth_flow, default: str = ""
+    *,
+    ask,
+    ask_default,
+    out,
+    data_dir: str,
+    oauth_flow,
+    default: str = "",
+    google_setup: Callable[..., object] | None = None,
 ) -> str:
     path = ask_default(
         "Google credentials JSON (authorized user, service account, or OAuth client)",
         default,
     )
+    resolved = os.path.expanduser(path) if path else ""
+    if not resolved or not os.path.exists(resolved):
+        offer = ask(
+            "No Google OAuth client file found yet. Walk through the guided "
+            "Google Cloud setup checklist now? (y/N): "
+        ).strip().lower()
+        if offer == "y":
+            from .google_setup_cmd import run_google_setup as _default_google_setup
+
+            setup_fn = google_setup or _default_google_setup
+            setup_fn(data_dir=data_dir, ask=ask, out=out)
+            path = ask_default(
+                "Google credentials JSON (authorized user, service account, "
+                "or OAuth client)",
+                path,
+            )
     if not path:
         return ""
     path = os.path.expanduser(path)

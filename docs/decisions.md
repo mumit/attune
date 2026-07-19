@@ -2,6 +2,90 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-19 — Self-hosted setup-friction package (Phase 6, G20)
+
+Closes `docs/future-state.md` Phase 6's first bullet against the top-4
+persona-A UX items in `docs/current-state.md`: the Google Cloud ceremony, the
+7-day Testing-token trap, wizard length, missing Doctor fix hints, and the
+Slack app's manual configuration. Nothing here touches the hosted platform,
+and no new `ATTUNE_` variable was added — every new piece of state is
+secret-free and lives outside `.env`, per the constraint in this file's
+CLAUDE.md-derived boundaries.
+
+- **The guided Google Cloud checklist (`attune init --google-setup`) confirms
+  every step, never mutates silently.** Each of the seven numbered steps
+  (project, two API-enable commands, consent branding, Internal/External+
+  Testing choice, exact scopes, Desktop OAuth client) only ever prints a URL
+  or a copy-paste command and waits for an explicit confirm/skip answer. The
+  two `gcloud services enable` steps are the only ones Attune can run for the
+  operator, and only with a fixed argument tuple, `shell=False`, and no
+  Attune environment passed through — the same discipline
+  `local_setup.py`'s Docker Compose runner already uses for `--target local`.
+  The OAuth scope strings are pulled live from `credentials.SCOPES_DEFAULT`
+  so the checklist can never drift from what the code actually requests.
+  Progress lives in a new `google-setup-state.json` (`google_setup_state.py`),
+  built by literally reusing `setup_state.py`'s `StepState`/`STEP_STATUSES`
+  vocabulary (extended with a `skipped` status) rather than inventing a
+  parallel one — schema-versioned, atomic writes, owner-only permissions, no
+  symlinks, and never a configuration value or credential. The checklist is
+  also offered automatically inside `attune init`'s existing
+  `_google_credentials_step` the moment no client file is found at the
+  answered path, so the paved path and the guided path are the same code.
+
+- **The Internal/External+Testing answer is state, not configuration, and
+  feeds two independent consumers.** Step 5 of the checklist
+  (`consent_audience`) records `consent_mode` in the same state file. Doctor's
+  new `google-oauth-app` check reads it: WARN with the 7-day refresh-token
+  hint (plus the two fixes and the authorized-user file's approximate mtime
+  age) only when `external_testing` is recorded; SKIP for `internal`,
+  `external_published`, MCP backends, or no recorded state at all (legacy
+  setups must not regress to a false WARN). `attune init` also prints a
+  one-line persistent reminder at the end of every run when the state says
+  `external_testing`, so the trap surfaces at the moment of setup completion,
+  not only during `attune doctor`.
+
+- **`invalid_grant` gets the same hint appended wherever Doctor already
+  renders a workspace/read failure, and nowhere else.** `_fail_workspace` and
+  `_fail_read` in `doctor.py` are the one inline-hint rendering path for the
+  `workspace`, `gmail-read`, and `calendar-read` checks (previously these
+  checks had no hint at all and fell through to Doctor's generic "check
+  crashed" message); each appends the re-authorization hint specifically
+  when the underlying exception's message contains `invalid_grant`. Per the
+  task's own allowance, the runtime's retry/audit path was deliberately left
+  untouched — Doctor is the correct, non-invasive surface for a hint that is
+  about operator action, not dispatch behavior.
+
+- **Every existing Doctor FAIL now carries the fix from
+  `docs/getting-started.md`'s common-failures table, inline.** `installation`,
+  `llm`, and `qdrant` already had it. `workspace`, `gmail-read`,
+  `calendar-read`, and `slack` did not — they relied on `run_doctor`'s generic
+  crash renderer. All four now catch their underlying exception and render
+  the table's fix directly in the FAIL line; the table itself stays in the
+  docs as reference, not as the only place the fix is written down.
+
+- **`--quick` and `--recommended` are prompt-selection flags on the same
+  editor, not a second write path.** `--quick` skips ingestion mode, the six
+  per-task `ATTUNE_MODEL_*` overrides, Google/MCP workspace credentials,
+  Slack/Google Chat routing, and timezone/brief time — each keeps its current
+  `.env` value (unasked, not blanked) or a blank/safe default on a fresh
+  setup. `--recommended` (usable with `--quick` or the full wizard) changes
+  only the *fallback* `ask_default`/`current.get` shows for the model and
+  embedding questions to the exact values in `configuration.md`'s
+  "Recommended model routing" — so a value already configured is never
+  overwritten, and a value still asked (non-quick mode) shows the
+  recommendation as an Enter-to-accept default rather than forcing it. Both
+  flags flow through the one existing `_rewrite_env`/`_atomic_write` path;
+  nothing new touches `.env` directly.
+
+- **The Slack app manifest (`attune slack manifest`) is a new `slack`
+  subcommand group, not an extension of an existing one** (none existed).
+  It prints the exact JSON manifest for Socket Mode, the four bot scopes,
+  the `message.im` event, App Home's Messages tab, and Interactivity, then
+  lists the three steps Slack's manifest format cannot express: creating the
+  app from the manifest, generating the app-level/bot tokens, and copying the
+  operator's own member ID. `docs/getting-started.md` section 6 now leads
+  with this path and keeps the nine-step manual walkthrough as a fallback.
+
 ## 2026-07-19 — Hosted proactive briefs close Phase 5 (stage 4, G12)
 
 This closes `docs/future-state.md` Phase 5 item 4 on top of stages 1-3

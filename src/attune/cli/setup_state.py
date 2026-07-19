@@ -19,7 +19,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 STEP_NAMES = ("configure", "apply", "validate")
 STEP_STATUSES = frozenset(
-    {"not_started", "in_progress", "succeeded", "failed", "declined"}
+    {"not_started", "in_progress", "succeeded", "failed", "declined", "skipped"}
 )
 
 

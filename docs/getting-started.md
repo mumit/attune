@@ -125,6 +125,29 @@ override is blank.
 Skip to [4B](#4b-workspace-access-through-mcp) if an MCP service owns your
 Google access.
 
+### Guided checklist (recommended)
+
+```bash
+attune init --google-setup
+```
+
+This walks the Google Cloud Console ceremony below as a numbered, resumable
+checklist: project creation, enabling the two APIs, OAuth consent screen
+branding, choosing Internal or External+Testing, the exact scopes to paste
+(pulled live from the code that uses them, so they can never drift), and
+Desktop OAuth client creation. Every step only ever shows a URL or a
+copy-paste command and waits for you to confirm or skip it; the two
+`gcloud services enable` steps are the only ones Attune can run for you, and
+only after you confirm and only with `gcloud` on PATH. Progress and your
+Internal/External+Testing answer are recorded in secret-free state under
+`ATTUNE_DATA_DIR`, never in `.env` — interrupt and rerun the same command any
+time. It is also offered automatically inside `attune init` the moment the
+wizard reaches the Google credentials question and no client file exists yet.
+
+The remaining steps in this section are the same ceremony written out as a
+manual runbook — read them if you would rather drive the console yourself, or
+if the checklist paused somewhere and you want the full context.
+
 ### Create the Google project
 
 1. Open the [Google Cloud Console](https://console.cloud.google.com/).
@@ -193,6 +216,12 @@ always-on service. Use the appropriate Internal/Published and verification
 posture before depending on it continuously. See Google's
 [OAuth app state overview](https://developers.google.com/identity/protocols/oauth2/production-readiness/overview)
 and [Gmail scope classifications](https://developers.google.com/workspace/gmail/api/auth/scopes).
+
+If you answered the guided checklist's Internal/External+Testing question
+with External+Testing, `attune doctor`'s `google-oauth-app` check WARNs about
+this every run (with the authorized-user file's approximate age) until you
+switch to Internal or publish the app; a workspace/Gmail/Calendar read that
+fails with `invalid_grant` also gets this hint appended in place.
 
 ### Generate the authorized-user credential
 
@@ -295,6 +324,33 @@ check passes and the provider-specific read checks are skipped.
 Slack Socket Mode carries events and button interactions over an outbound
 WebSocket, so no Slack Request URL is needed.
 
+### Manifest path (recommended)
+
+```bash
+attune slack manifest
+```
+
+Prints a ready-to-paste Slack app manifest with Socket Mode, the four bot
+token scopes, the `message.im` event subscription, App Home's Messages tab,
+and Interactivity already configured — exactly what the manual steps below
+set up by hand. Only three steps remain manual because Slack's manifest
+format has no field for them:
+
+1. Paste the printed JSON at [Slack app management](https://api.slack.com/apps)
+   → **Create New App → From an app manifest**, and select the workspace.
+2. Under **Basic Information → App-Level Tokens**, generate a token with the
+   `connections:write` scope (save the `xapp-...` value as `SLACK_APP_TOKEN`),
+   then install the app and save the `xoxb-...` **Bot User OAuth Token** as
+   `SLACK_BOT_TOKEN`.
+3. In Slack, open your profile and choose **More → Copy member ID**. Put the
+   `U...` value in `ATTUNE_SLACK_ALLOWED_USERS`. An empty allowlist denies all
+   interactive users.
+
+### Manual path
+
+The same nine steps written out for the standard Slack app UI, if you would
+rather not use a manifest:
+
 1. Open [Slack app management](https://api.slack.com/apps), choose **Create New
    App → From scratch**, select the workspace, and create the app.
 2. Under **Basic Information → App-Level Tokens**, generate a token with the
@@ -388,6 +444,10 @@ alone. See the [user journey](user-journey.md) for the complete interaction and
 approval flow.
 
 ## Common failures
+
+`attune doctor` now prints each of these fixes inline, in the FAIL line
+itself, so the table below is reference rather than something you need to
+cross-check by hand.
 
 | Doctor result | Meaning and fix |
 |---|---|
