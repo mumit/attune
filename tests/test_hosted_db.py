@@ -79,6 +79,21 @@ from attune.hosted.identity_session import (
     IdentitySessionSecrets,
     PostgresIdentitySessionRepository,
 )
+from attune.hosted.intelligence import (
+    IntelligenceReferenceHasher,
+    PostgresAttentionStore,
+    PostgresImportanceProfile,
+)
+from attune.orchestrator.attention import RETENTION_DAYS, AttentionItem
+from attune.orchestrator.importance import (
+    DECAY_DAYS,
+    HIGH_MIN_SIGNALS,
+    LOW_RUN_THRESHOLD,
+    ImportanceTier,
+    TierAssessment,
+)
+from attune.orchestrator.triage import Priority
+from attune.memory.signals import ActionSignal
 from attune.hosted.tenant import TenantContext, tenant_transaction
 from attune.hosted.vault import (
     PostgresCredentialIntentRepository,
@@ -130,7 +145,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0041_web_conversation.sql"
+    assert migrations[-1].name == "0042_intelligence_persistence.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -259,6 +274,14 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     assert "REVOKE CREATE ON SCHEMA attune FROM attune_web_message_executor" in web_conversation
     assert "TO attune_control_plane" in web_conversation
     assert "provider IN ('google', 'slack', 'web')" in web_conversation
+    intelligence = sql_by_name["0042_intelligence_persistence.sql"]
+    assert "CREATE TABLE attune.importance_signals" in intelligence
+    assert "CREATE TABLE attune.attention_items" in intelligence
+    assert "importance_signals_one_pin_per_sender" in intelligence
+    assert "FORCE ROW LEVEL SECURITY" in intelligence
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON attune.importance_signals, attune.attention_items" in intelligence
+    assert "TO attune_worker" in intelligence
+    assert "attune_control_plane" not in intelligence
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -298,6 +321,17 @@ def test_lifecycle_inventory_is_complete_and_fail_closed():
     assert RELATIONAL_ASSET_BY_TABLE["deletion_markers"].deletion_rule == (
         DeletionRule.RETAIN_TOMBSTONE
     )
+    assert RELATIONAL_ASSET_BY_TABLE["importance_signals"].data_class == (
+        DataClass.CUSTOMER_CONTENT
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["importance_signals"].deletion_rule == (
+        DeletionRule.ERASE
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["importance_signals"].customer_export
+    assert RELATIONAL_ASSET_BY_TABLE["attention_items"].data_class == (
+        DataClass.CUSTOMER_CONTENT
+    )
+    assert RELATIONAL_ASSET_BY_TABLE["attention_items"].customer_export
     with pytest.raises(RuntimeError, match="does not match tenant tables"):
         validate_relational_lifecycle_inventory((*TENANT_TABLES, "unreviewed_table"))
 
@@ -373,6 +407,85 @@ def test_repositories_reject_invalid_data_before_connecting():
         )
 
 
+_TEST_HMAC_KEY = hashlib.sha256(b"attune-test-intelligence-hmac-key").digest()
+
+
+def test_intelligence_reference_hasher_is_keyed_deterministic_and_domain_separated():
+    with pytest.raises(ValueError, match="32 bytes"):
+        IntelligenceReferenceHasher(b"short")
+
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    first = hasher.hash("sender", "vip@example.com")
+    again = hasher.hash("sender", "vip@example.com")
+    assert first == again
+    assert len(first) == 32
+
+    # Domain separation: the same literal value hashed under a different
+    # ``kind`` never collides.
+    assert first != hasher.hash("channel", "vip@example.com")
+
+    # A different key must never reproduce the same digest (the whole point
+    # of a keyed hash over a plain one -- an attacker without the key cannot
+    # dictionary-attack a guessable sender/channel reference).
+    other_key = hashlib.sha256(b"a different key").digest()
+    assert hasher.hash("sender", "vip@example.com") != (
+        IntelligenceReferenceHasher(other_key).hash("sender", "vip@example.com")
+    )
+
+    with pytest.raises(ValueError, match="invalid intelligence reference"):
+        hasher.hash("sender", "")
+    with pytest.raises(ValueError, match="invalid intelligence reference"):
+        hasher.hash("sender", "x" * 321)
+
+
+def test_intelligence_repositories_reject_invalid_data_before_connecting():
+    def forbidden_connection():
+        raise AssertionError("invalid input must not reach the database")
+
+    context = TenantContext(TENANT_A)
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    importance = PostgresImportanceProfile(
+        forbidden_connection, context, PRINCIPAL_A, reference_hasher=hasher
+    )
+    attention = PostgresAttentionStore(
+        forbidden_connection, context, PRINCIPAL_A, reference_hasher=hasher
+    )
+
+    with pytest.raises(ValueError, match="signal must be an ActionSignal"):
+        importance.record_signal("vip@example.com", "approved")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid intelligence reference"):
+        importance.record_signal("", ActionSignal.APPROVED)
+    with pytest.raises(ValueError, match="tier must be an ImportanceTier"):
+        importance.pin("vip@example.com", "high")  # type: ignore[arg-type]
+
+    def _item(**overrides):
+        fields = dict(
+            source="slack",
+            channel_ref="C1",
+            channel_name="general",
+            sender_ref="U1",
+            sender_display="Alice",
+            summary="hello",
+            ts=datetime.now(timezone.utc),
+            priority=Priority.ROUTINE,
+            mentions_principal=False,
+            thread_ref=None,
+        )
+        fields.update(overrides)
+        return AttentionItem(**fields)
+
+    with pytest.raises(ValueError, match="source must be slack or google_chat"):
+        attention.add(_item(source="teams"))
+    with pytest.raises(ValueError, match="priority must be a Priority"):
+        attention.add(_item(priority="urgent"))
+    with pytest.raises(ValueError, match="between 1 and 200"):
+        attention.add(_item(channel_name=""))
+    with pytest.raises(ValueError, match="between 1 and 2000"):
+        attention.add(_item(summary="x" * 2001))
+    with pytest.raises(ValueError, match="non-negative integer"):
+        attention.recent(limit=-1)
+
+
 @pytest.fixture(scope="module")
 def database_url() -> str:
     value = os.environ.get("ATTUNE_TEST_DATABASE_URL")
@@ -395,7 +508,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 41
+    assert apply_migrations(admin) == 42
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -1652,6 +1765,78 @@ def test_memory_repository_scopes_vector_search_and_soft_delete(
         )
         == []
     )
+
+
+def test_memory_repository_list_recent_and_get_are_tenant_scoped(
+    initialized_database, database_url
+):
+    """docs/hosted-memory.md: the inspect/forget commands' repository
+    surface -- recency listing and id-addressable lookup, both tenant- and
+    principal-scoped (SEC-201: the predicate comes from the caller's
+    verified context, never a selector the user or model typed)."""
+    repository = PostgresMemoryRepository(
+        _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    )
+    older = repository.add(
+        TenantContext(TENANT_A),
+        principal_id=PRINCIPAL_A,
+        creator_id=PRINCIPAL_A,
+        content="older memory",
+        provenance={},
+        source_class="user_taught",
+        confidence=1,
+        model="list-recent-test",
+        embedding=[0, 1, 0],
+    )
+    newer = repository.add(
+        TenantContext(TENANT_A),
+        principal_id=PRINCIPAL_A,
+        creator_id=PRINCIPAL_A,
+        content="newer memory",
+        provenance={},
+        source_class="user_taught",
+        confidence=1,
+        model="list-recent-test",
+        embedding=[0, 1, 0],
+    )
+    other_tenant = repository.add(
+        TenantContext(TENANT_B),
+        principal_id=PRINCIPAL_B,
+        creator_id=PRINCIPAL_B,
+        content="tenant B memory for listing",
+        provenance={},
+        source_class="user_taught",
+        confidence=1,
+        model="list-recent-test",
+        embedding=[0, 1, 0],
+    )
+
+    listing = repository.list_recent(TenantContext(TENANT_A), principal_id=PRINCIPAL_A)
+    ids = [item.id for item in listing]
+    assert ids.index(newer.id) < ids.index(older.id)
+    assert other_tenant.id not in ids
+
+    assert repository.get(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, memory_id=newer.id
+    ).content == "newer memory"
+    # Cross-tenant get: another tenant's context cannot read tenant A's memory.
+    assert repository.get(
+        TenantContext(TENANT_B), principal_id=PRINCIPAL_B, memory_id=newer.id
+    ) is None
+    # Cross-tenant list: tenant B's listing never contains tenant A's rows.
+    tenant_b_listing = repository.list_recent(
+        TenantContext(TENANT_B), principal_id=PRINCIPAL_B
+    )
+    assert all(item.id != newer.id and item.id != older.id for item in tenant_b_listing)
+
+    assert repository.soft_delete(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, memory_id=older.id
+    )
+    after_delete = repository.list_recent(TenantContext(TENANT_A), principal_id=PRINCIPAL_A)
+    assert older.id not in [item.id for item in after_delete]
+    assert repository.get(
+        TenantContext(TENANT_A), principal_id=PRINCIPAL_A, memory_id=older.id
+    ) is None
 
 
 def test_audit_outbox_is_idempotent_and_writer_accepts_only_intent_ids(
@@ -4162,6 +4347,261 @@ def test_web_conversation_accept_is_session_scoped_idempotent_and_function_only(
                         hashlib.sha256(b"direct-installation").digest(),
                     ),
                 )
+        direct.rollback()
+    finally:
+        direct.close()
+
+
+# ---------------------------------------------------------------------------
+# Hosted intelligence persistence (docs/future-state.md Phase 5 item 1;
+# docs/gap-analysis.md G8/G18): PostgresImportanceProfile/PostgresAttentionStore.
+# ---------------------------------------------------------------------------
+
+INTELLIGENCE_TENANT_A = UUID("40000000-0000-4000-8000-000000000001")
+INTELLIGENCE_TENANT_B = UUID("40000000-0000-4000-8000-000000000002")
+INTELLIGENCE_PRINCIPAL_A = UUID("40000000-0000-4000-8000-000000000011")
+INTELLIGENCE_PRINCIPAL_B = UUID("40000000-0000-4000-8000-000000000012")
+
+
+def _attention_item(**overrides):
+    fields = dict(
+        source="slack",
+        channel_ref="C-general",
+        channel_name="general",
+        sender_ref="U-alice",
+        sender_display="Alice",
+        summary="please review the proposal",
+        ts=datetime.now(timezone.utc),
+        priority=Priority.ROUTINE,
+        mentions_principal=False,
+        thread_ref=None,
+    )
+    fields.update(overrides)
+    return AttentionItem(**fields)
+
+
+def _run_importance_tier_rule_matrix(profile_factory):
+    """The same tier-rule scenarios as tests/test_importance.py (LOW
+    demotion, HIGH promotion, pin override, decay, unknown sender), run here
+    against any ``ImportanceProfile``-shaped object built by
+    ``profile_factory()``. This is the shared conformance proof that
+    ``PostgresImportanceProfile`` applies ``orchestrator.importance
+    .assess_from_signals`` -- the exact same rule engine
+    ``JsonImportanceProfile`` uses -- not a reimplementation."""
+    now = datetime.now(timezone.utc)
+
+    low_profile = profile_factory()
+    for i in range(LOW_RUN_THRESHOLD):
+        low_profile.record_signal(
+            "matrix-newsletter@example.com", ActionSignal.IGNORED,
+            ts=now - timedelta(days=LOW_RUN_THRESHOLD - i),
+        )
+    assessment = low_profile.assess("matrix-newsletter@example.com", now=now)
+    assert assessment.tier == ImportanceTier.LOW
+    assert assessment.pinned is False
+
+    high_profile = profile_factory()
+    for i in range(HIGH_MIN_SIGNALS):
+        high_profile.record_signal(
+            "matrix-vip@example.com", ActionSignal.APPROVED,
+            ts=now - timedelta(days=HIGH_MIN_SIGNALS - i),
+        )
+    assert high_profile.assess("matrix-vip@example.com", now=now).tier == (
+        ImportanceTier.HIGH
+    )
+
+    pin_profile = profile_factory()
+    for i in range(LOW_RUN_THRESHOLD):
+        pin_profile.record_signal(
+            "matrix-pinned@example.com", ActionSignal.IGNORED,
+            ts=now - timedelta(days=LOW_RUN_THRESHOLD - i),
+        )
+    pin_profile.pin("matrix-pinned@example.com", ImportanceTier.HIGH)
+    pinned_assessment = pin_profile.assess("matrix-pinned@example.com", now=now)
+    assert pinned_assessment.tier == ImportanceTier.HIGH
+    assert pinned_assessment.pinned is True
+    assert pin_profile.unpin("matrix-pinned@example.com") is True
+    assert pin_profile.assess("matrix-pinned@example.com", now=now).tier == (
+        ImportanceTier.LOW
+    )
+    assert pin_profile.unpin("matrix-pinned@example.com") is False
+
+    decay_profile = profile_factory()
+    for i in range(LOW_RUN_THRESHOLD):
+        decay_profile.record_signal(
+            "matrix-decayed@example.com", ActionSignal.IGNORED,
+            ts=now - timedelta(days=LOW_RUN_THRESHOLD - i),
+        )
+    long_later = now + timedelta(days=DECAY_DAYS + LOW_RUN_THRESHOLD + 1)
+    decayed_assessment = decay_profile.assess(
+        "matrix-decayed@example.com", now=long_later
+    )
+    assert decayed_assessment.tier == ImportanceTier.NORMAL
+    assert decayed_assessment.reason == "no recorded signals"
+
+    unknown_profile = profile_factory()
+    assert unknown_profile.assess("matrix-unknown@example.com", now=now) == (
+        TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
+    )
+
+
+def test_json_importance_profile_matches_the_shared_tier_rule_matrix(tmp_path):
+    """Offline sanity check that the shared helper above is itself correct,
+    proven against the existing local backend before trusting it to certify
+    the new Postgres one."""
+    from attune.orchestrator.importance import JsonImportanceProfile
+
+    counter = {"n": 0}
+
+    def profile_factory():
+        counter["n"] += 1
+        return JsonImportanceProfile(str(tmp_path / f"importance-{counter['n']}.json"))
+
+    _run_importance_tier_rule_matrix(profile_factory)
+
+
+def test_intelligence_tenants_are_provisioned(initialized_database):
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO attune.tenants (id, slug, region) "
+            "VALUES (%s, %s, %s), (%s, %s, %s)",
+            (
+                INTELLIGENCE_TENANT_A, "intelligence-tenant-a", "test",
+                INTELLIGENCE_TENANT_B, "intelligence-tenant-b", "test",
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO attune.principals (tenant_id, id, subject_hash, issuer)
+            VALUES (%s, %s, %s, 'test'), (%s, %s, %s, 'test')
+            """,
+            (
+                INTELLIGENCE_TENANT_A, INTELLIGENCE_PRINCIPAL_A,
+                hashlib.sha256(b"intelligence-a").digest(),
+                INTELLIGENCE_TENANT_B, INTELLIGENCE_PRINCIPAL_B,
+                hashlib.sha256(b"intelligence-b").digest(),
+            ),
+        )
+    initialized_database.commit()
+
+
+def test_postgres_importance_profile_matches_the_local_tier_rule_matrix(
+    initialized_database, database_url
+):
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    context = TenantContext(INTELLIGENCE_TENANT_A)
+
+    def profile_factory():
+        return PostgresImportanceProfile(
+            factory, context, INTELLIGENCE_PRINCIPAL_A, reference_hasher=hasher
+        )
+
+    _run_importance_tier_rule_matrix(profile_factory)
+
+
+def test_postgres_attention_store_recent_ordering_since_and_limit(
+    initialized_database, database_url
+):
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    store = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_A), INTELLIGENCE_PRINCIPAL_A,
+        reference_hasher=hasher,
+    )
+    now = datetime.now(timezone.utc)
+    store.add(_attention_item(sender_ref="ordering-alice", ts=now, summary="alice message"))
+    store.add(_attention_item(
+        sender_ref="ordering-bob", ts=now + timedelta(minutes=1), summary="bob message",
+    ))
+
+    recent = store.recent()
+    summaries = [item.summary for item in recent]
+    assert summaries.index("bob message") < summaries.index("alice message")
+    newest = recent[summaries.index("bob message")]
+    assert newest.source == "slack"
+    assert newest.channel_name == "general"
+    # channel_ref/sender_ref come back as opaque hex digests, not the
+    # original provider identifier (module docstring's documented, reviewed
+    # divergence from the local JSON store) -- but they are STABLE: the same
+    # provider reference always hashes to the same value.
+    assert newest.sender_ref == hasher.hash("sender", "ordering-bob").hex()
+
+    since_recent = store.recent(since=now + timedelta(seconds=30))
+    assert [item.summary for item in since_recent] == ["bob message"]
+
+    limited = store.recent(limit=1)
+    assert len(limited) == 1
+    assert limited[0].summary == "bob message"
+
+
+def test_postgres_attention_store_retention_window_prunes_old_items(
+    initialized_database, database_url
+):
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    store = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_B), INTELLIGENCE_PRINCIPAL_B,
+        reference_hasher=hasher,
+    )
+    now = datetime.now(timezone.utc)
+    old_ts = now - timedelta(days=RETENTION_DAYS + 1)
+    store.add(_attention_item(sender_ref="stale", ts=old_ts, summary="stale message"))
+    store.add(_attention_item(sender_ref="fresh", ts=now, summary="fresh message"))
+
+    summaries = [item.summary for item in store.recent()]
+    assert "fresh message" in summaries
+    assert "stale message" not in summaries
+
+
+def test_importance_and_attention_are_isolated_per_tenant_under_rls(
+    initialized_database, database_url
+):
+    psycopg = pytest.importorskip("psycopg")
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+
+    profile_a = PostgresImportanceProfile(
+        factory, TenantContext(INTELLIGENCE_TENANT_A), INTELLIGENCE_PRINCIPAL_A,
+        reference_hasher=hasher,
+    )
+    profile_b = PostgresImportanceProfile(
+        factory, TenantContext(INTELLIGENCE_TENANT_B), INTELLIGENCE_PRINCIPAL_B,
+        reference_hasher=hasher,
+    )
+    profile_a.record_signal("isolation-vip@example.com", ActionSignal.APPROVED)
+    # profile_a's tenant/principal is shared with the tier-rule-matrix test
+    # above, so senders() may carry other hashes too -- only the isolation
+    # boundary (profile_b sees NONE of tenant A's senders) is asserted here.
+    assert hasher.hash("sender", "isolation-vip@example.com").hex() in (
+        profile_a.senders()
+    )
+    assert profile_b.senders() == []
+    assert profile_b.assess("isolation-vip@example.com").tier == ImportanceTier.NORMAL
+
+    attention_a = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_A), INTELLIGENCE_PRINCIPAL_A,
+        reference_hasher=hasher,
+    )
+    attention_b = PostgresAttentionStore(
+        factory, TenantContext(INTELLIGENCE_TENANT_B), INTELLIGENCE_PRINCIPAL_B,
+        reference_hasher=hasher,
+    )
+    attention_a.add(_attention_item(sender_ref="isolation-alice", summary="tenant a only"))
+    assert "tenant a only" in [item.summary for item in attention_a.recent()]
+    assert "tenant a only" not in [item.summary for item in attention_b.recent()]
+
+    direct = factory()
+    try:
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT id FROM attune.importance_signals")
+        direct.rollback()
+        with direct.cursor() as cursor, pytest.raises(
+            psycopg.errors.InsufficientPrivilege
+        ):
+            cursor.execute("SELECT id FROM attune.attention_items")
         direct.rollback()
     finally:
         direct.close()

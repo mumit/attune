@@ -17,6 +17,7 @@ def create_production_app():
         models={
             "classify": os.environ["ATTUNE_MODEL_CLASSIFY"],
             "converse": os.environ["ATTUNE_MODEL_CONVERSE"],
+            "embed": os.environ["ATTUNE_MODEL_EMBED"],
         },
     )
     return create_app(

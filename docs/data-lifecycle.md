@@ -58,6 +58,21 @@ that inventory exactly and requires forced row-level security on every entry.
 Adding a table without reviewing this document and the executable inventory
 therefore fails migration verification.
 
+Two tenant-bearing relations added for hosted intelligence persistence
+(`docs/future-state.md` Phase 5 item 1; see `docs/decisions.md` 2026-07-19):
+`attune.importance_signals` (the hosted per-sender importance profile) and
+`attune.attention_items` (recorded attended Slack/Google Chat signal) are
+both classified `customer_content` / `erase` / exportable, the same triple as
+`memories`/`conversation_turns` — the principal's own owner-inspectable,
+owner-correctable learned state and recorded chat content, respectively.
+Their sender/channel/thread references are keyed HMAC digests, never
+plaintext, at rest. Neither table is pruned by the retention executor
+described below; each bounds itself with a self-contained write-time prune
+(decay window plus a per-sender signal cap for importance; a retention
+window plus a total item cap for attention), mirroring the local JSON stores
+they persist alongside. This stage is dormant: no executor reads or writes
+either table yet.
+
 Relational coverage is necessary but not sufficient. Every release must also
 review these non-relational locations:
 

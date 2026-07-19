@@ -63,6 +63,15 @@ for threads classified as NOISE. It does NOT decide anything about autonomy
 or take any write action (no auto-labeling, no auto-archiving): that would be
 a new autonomous write path outside the existing per-(action,domain) autonomy
 gate (rule 3), which is out of scope here.
+
+Hosted seam (``docs/future-state.md`` Phase 5 item 1, gap G18): every
+dependency of :func:`triage_thread` above — ``client`` (chat-completions),
+``store``/``importance_profile`` (protocols), ``now`` implicitly via caller-
+supplied timestamps — is already injected, so a hosted executor can call
+this exact function unchanged, passing
+``attune.hosted.intelligence.PostgresImportanceProfile`` as
+``importance_profile``. No hosted-specific triage code is needed; this
+module has nothing local-only left to extract.
 """
 
 from __future__ import annotations

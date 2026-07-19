@@ -18,6 +18,7 @@ TENANT = UUID("10000000-0000-4000-8000-000000000901")
 JOB = UUID("10000000-0000-4000-8000-000000000902")
 CONVERSATION = UUID("10000000-0000-4000-8000-000000000903")
 CONNECTOR = UUID("10000000-0000-4000-8000-000000000904")
+PRINCIPAL = UUID("10000000-0000-4000-8000-000000000905")
 EVENT = UUID("10000000-0000-4000-8000-000000000906")
 NOW = datetime(2026, 7, 17, 16, tzinfo=timezone.utc)
 
@@ -40,7 +41,7 @@ class Work:
 
     def resolve(self, context, value):
         assert context == TenantContext(TENANT) and value.id == JOB
-        return WebConversationWork(CONVERSATION, CONNECTOR, 1)
+        return WebConversationWork(CONVERSATION, PRINCIPAL, CONNECTOR, 1)
 
     def recent(self, context, conversation_id, *, limit):
         return self.turns
@@ -67,7 +68,12 @@ def test_web_conversation_appends_the_assistant_turn_and_calls_no_reply_broker()
         TenantContext(TENANT), job()
     )
     assert work.appended == [
-        {"conversation_id": CONVERSATION, "content": "Hello from Attune.", "job_id": JOB}
+        {
+            "conversation_id": CONVERSATION,
+            "content": "Hello from Attune.",
+            "job_id": JOB,
+            "extra_provenance": {},
+        }
     ]
     # "hi there" is ambiguous for the deterministic keyword router, so the
     # model classify call still runs before the converse call.

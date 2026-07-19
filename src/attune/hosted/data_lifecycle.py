@@ -65,8 +65,16 @@ RELATIONAL_ASSETS = (
         DeletionRule.ERASE,
         customer_export=True,
     ),
+    # importance_signals (docs/future-state.md Phase 5 item 1) is derived
+    # behavioral state the principal can inspect/correct locally (`attune
+    # importance show/pin`) -- the same "owner-inspectable, owner-correctable"
+    # posture as `memories`, so it gets the same class/rule/export triple, not
+    # a bespoke "derived" bucket. attention_items is recorded chat/Slack
+    # signal content with its own retention window (RETENTION_DAYS,
+    # attune.hosted.intelligence), matching conversation_turns.
     *_assets(
-        "memories memory_embeddings conversations conversation_turns",
+        "memories memory_embeddings conversations conversation_turns "
+        "importance_signals attention_items",
         DataClass.CUSTOMER_CONTENT,
         DeletionRule.ERASE,
         customer_export=True,

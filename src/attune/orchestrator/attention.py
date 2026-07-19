@@ -29,6 +29,19 @@ Bounded by construction, on every write:
 
 Both bounds apply together and are documented, not tunable via environment —
 this is operational state, not product configuration.
+
+Hosted seam (``docs/future-state.md`` Phase 5 item 1, gap G18): callers
+(``brief.py``, ``orchestrator/correlation.py``) depend only on the
+:class:`AttentionStore` protocol and the :class:`AttentionItem` shape above,
+never on the JSON file format. Hosted consumes this via
+``attune.hosted.intelligence.PostgresAttentionStore``, which is bound to one
+``TenantContext``/principal at construction (so its ``add``/``recent``
+methods have the exact ``AttentionStore`` shape) and applies the same
+retention-window-then-item-cap bounding as :class:`JsonAttentionStore`, as
+application logic on every write — not the separate hosted
+``protocol_retention`` batch job, which is a reviewed, narrower scope (short-
+lived OAuth/session/provider-event protocol state); see
+``attune.hosted.intelligence`` for the documented reasons.
 """
 
 from __future__ import annotations

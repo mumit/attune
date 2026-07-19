@@ -209,6 +209,40 @@ not authorize customer data or constitute a hosted launch.
 The current SQLite, JSON, JSONL, and local Qdrant implementation remains a
 single-principal self-hosted substrate. It is not a hosted tenant boundary.
 
+Stage 1 of converging hosted onto the local product intelligence
+(`docs/future-state.md` Phase 5 item 1; `docs/gap-analysis.md` G8/G18) is
+implemented and tested but not deployed: migration 0042 adds forced-RLS
+`attune.importance_signals` and `attune.attention_items`, registered in the
+reviewed lifecycle inventory as customer content and granted only to
+`attune_worker`; `attune.hosted.intelligence.PostgresImportanceProfile` and
+`PostgresAttentionStore` satisfy the exact local `ImportanceProfile`/
+`AttentionStore` protocol shapes, importing the same tier-rule engine
+(`orchestrator.importance.assess_from_signals`) local triage and briefs
+already use, with sender/channel/thread references stored as keyed HMAC
+digests rather than plaintext. No executor constructs either class yet, no
+HMAC key is provisioned outside tests, and no hosted behavior changes: this
+mirrors the capability gateway's own "tested, non-deployed admission core"
+status above. Wiring an executor to actually read/write these stores, and
+extending the same pattern to correlation/brief assembly, are later
+independent slices.
+
+Stage 2 of the same effort — hosted conversational memory retrieval plus
+explicit teach/inspect/forget commands on the shared conversation executor
+(Google Chat, Slack, and web) — is implemented and tested behind a
+default-off gate, `ATTUNE_ENABLE_HOSTED_MEMORY`, and not deployed: a third
+fixed model-gateway task (`embed`) joins `classify`/`converse` with the same
+worker-credential-free discipline, the tenant/principal filter is injected
+by the storage adapter from `TenantContext` (SEC-201) rather than by the
+model or message text, memory commands are recognized deterministically
+before any classifier call, and the two-step forget confirmation's turn-scoped
+state rides in the already-durable `conversation_turns.provenance` column
+rather than any shared worker process state (SEC-011). See
+[`hosted-memory.md`](hosted-memory.md) for the design and
+[`decisions.md`](decisions.md) for the dated record. Gate-off behavior is
+pinned as byte-identical to pre-stage-2 conversation handling; there is no
+hosted approval workflow or signal-capture path yet, both deliberately out
+of scope.
+
 ## Later
 
 - richer calendar negotiation and follow-up workflows

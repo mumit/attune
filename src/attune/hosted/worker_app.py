@@ -25,11 +25,11 @@ from .web_conversation_executor import (
     WebConversationExecutor,
 )
 from .model_gateway_client import ModelGatewayClient
-from .repositories import PostgresJobRepository
+from .repositories import PostgresJobRepository, PostgresMemoryRepository
 from .reconciliation import PostgresJobReconciliationRepository
 from .secret_broker_client import SecretBrokerClient
 from .vault import PostgresCredentialIntentRepository
-from .worker_audit import WorkerAudit
+from .worker_audit import WorkerAudit, WorkerMemoryAudit
 from .worker_dispatch import WorkerDispatcher
 from .worker_routes import registered_routes
 from .worker_service import create_app
@@ -77,6 +77,18 @@ def create_production_app():
                 os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
             ),
         )
+    hosted_memory_enabled = os.environ.get("ATTUNE_ENABLE_HOSTED_MEMORY", "false")
+    if hosted_memory_enabled not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_HOSTED_MEMORY must be true or false")
+    memory = None
+    memory_audit = None
+    if hosted_memory_enabled == "true":
+        memory = PostgresMemoryRepository(iam_connection)
+        memory_audit = WorkerMemoryAudit(
+            PostgresAuditProducerRepository(iam_connection, producer_kind="worker"),
+            AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
+        )
+
     google_chat_conversation = None
     conversation_enabled = os.environ.get(
         "ATTUNE_ENABLE_GOOGLE_CHAT_CONVERSATION", "false"
@@ -104,6 +116,8 @@ def create_production_app():
                 os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
             ),
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
+            memory=memory,
+            memory_audit=memory_audit,
         )
     slack_conversation = None
     slack_conversation_enabled = os.environ.get(
@@ -130,6 +144,8 @@ def create_production_app():
                 os.environ["ATTUNE_CHANNEL_BROKER_AUDIENCE"],
             ),
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
+            memory=memory,
+            memory_audit=memory_audit,
         )
     web_conversation = None
     web_conversation_enabled = os.environ.get(
@@ -152,6 +168,8 @@ def create_production_app():
                 os.environ["ATTUNE_MODEL_GATEWAY_AUDIENCE"],
             ),
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
+            memory=memory,
+            memory_audit=memory_audit,
         )
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),

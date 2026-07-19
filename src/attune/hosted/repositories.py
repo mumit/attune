@@ -371,6 +371,75 @@ class PostgresMemoryRepository:
                     for row in cursor.fetchall()
                 ]
 
+    def get(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        memory_id: UUID,
+    ) -> HostedMemory | None:
+        """One memory by id, tenant/principal-scoped (SEC-201: the
+        predicate below always comes from the verified caller context, never
+        from a selector the user or model typed)."""
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, principal_id, content, source_class, confidence
+                      FROM attune.memories
+                     WHERE tenant_id = %s AND principal_id = %s AND id = %s
+                       AND deleted_at IS NULL
+                    """,
+                    (context.tenant_id, principal_id, memory_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                return HostedMemory(
+                    id=row[0],
+                    principal_id=row[1],
+                    content=row[2],
+                    source_class=row[3],
+                    confidence=row[4],
+                )
+
+    def list_recent(
+        self,
+        context: TenantContext,
+        *,
+        principal_id: UUID,
+        limit: int = 20,
+    ) -> list[HostedMemory]:
+        """Most-recent-first listing for inspection (SEC-201: the tenant and
+        principal predicates below are supplied by the caller's verified
+        ``TenantContext``/``principal_id``, never derived from message text
+        or model output)."""
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, principal_id, content, source_class, confidence
+                      FROM attune.memories
+                     WHERE tenant_id = %s AND principal_id = %s
+                       AND deleted_at IS NULL
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT %s
+                    """,
+                    (context.tenant_id, principal_id, limit),
+                )
+                return [
+                    HostedMemory(
+                        id=row[0],
+                        principal_id=row[1],
+                        content=row[2],
+                        source_class=row[3],
+                        confidence=row[4],
+                    )
+                    for row in cursor.fetchall()
+                ]
+
     def soft_delete(
         self,
         context: TenantContext,

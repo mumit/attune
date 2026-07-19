@@ -399,6 +399,8 @@ TENANT_TABLES = (
     "hosted_channel_routes",
     "hosted_channel_deliveries",
     "hosted_channel_credentials",
+    "importance_signals",
+    "attention_items",
 )
 
 validate_relational_lifecycle_inventory(TENANT_TABLES)

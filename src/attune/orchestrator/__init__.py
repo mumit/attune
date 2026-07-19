@@ -74,10 +74,13 @@ from .grants import (
     track_records,
 )
 from .importance import (
+    DECAY_DAYS,
+    MAX_SIGNALS,
     ImportanceProfile,
     ImportanceTier,
     JsonImportanceProfile,
     TierAssessment,
+    assess_from_signals,
 )
 from .pending import (
     JsonPendingApprovals,
@@ -140,6 +143,9 @@ __all__ = [
     "ImportanceTier",
     "JsonImportanceProfile",
     "TierAssessment",
+    "assess_from_signals",
+    "DECAY_DAYS",
+    "MAX_SIGNALS",
     "Priority",
     "TriageResult",
     "triage_thread",

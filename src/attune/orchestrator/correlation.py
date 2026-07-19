@@ -40,6 +40,14 @@ pairwise links merges transitively into one group (A-B and B-C merges A, B,
 and C together even if A and C never link directly). Groups are returned
 sorted by their earliest item's timestamp, and items within a group are
 sorted by timestamp too, so output order is stable given the same input.
+
+Hosted seam (``docs/future-state.md`` Phase 5 item 1, gap G18): this whole
+module is already a pure function of caller-supplied data — no store, no
+clock, no I/O — so it needs no hosted counterpart at all. A future hosted
+brief assembler calls :func:`correlate`/:func:`from_attention_item` directly,
+the same as ``brief.py`` does locally, over
+``attune.hosted.intelligence.PostgresAttentionStore.recent()`` results
+instead of :class:`~orchestrator.attention.JsonAttentionStore` ones.
 """
 
 from __future__ import annotations

@@ -16,6 +16,7 @@ JOB = UUID("10000000-0000-4000-8000-000000000802")
 CONVERSATION = UUID("10000000-0000-4000-8000-000000000803")
 CONNECTOR = UUID("10000000-0000-4000-8000-000000000804")
 DESTINATION = UUID("10000000-0000-4000-8000-000000000805")
+PRINCIPAL = UUID("10000000-0000-4000-8000-000000000808")
 EVENT = UUID("10000000-0000-4000-8000-000000000806")
 INTENT = UUID("10000000-0000-4000-8000-000000000807")
 NOW = datetime(2026, 7, 16, 16, tzinfo=timezone.utc)
@@ -40,7 +41,7 @@ class Work:
 
     def resolve(self, context, value):
         assert context == TenantContext(TENANT) and value.id == JOB
-        return ConversationWork(CONVERSATION, CONNECTOR, DESTINATION, 1)
+        return ConversationWork(CONVERSATION, PRINCIPAL, CONNECTOR, DESTINATION, 1)
 
     def recent(self, context, conversation_id, *, limit):
         assert limit == 6

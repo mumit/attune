@@ -75,4 +75,27 @@ def create_app(
             return jsonify({"error": "model_unavailable"}), 503
         return jsonify({"text": result.text})
 
+    @app.post("/v1/models/embed")
+    def embed():
+        if not authorized():
+            return jsonify({"error": "forbidden"}), 403
+        if not request.is_json:
+            return jsonify({"error": "invalid_request"}), 400
+        body = request.get_json(silent=True)
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"version", "task", "input"}
+            or body.get("version") != 1
+            or body.get("task") != "embed"
+        ):
+            return jsonify({"error": "invalid_request"}), 400
+        try:
+            result = gateway.embed(text=body["input"])
+        except ValueError:
+            return jsonify({"error": "invalid_request"}), 400
+        except Exception as error:
+            LOG.warning("model embedding failed (%s)", type(error).__name__)
+            return jsonify({"error": "model_unavailable"}), 503
+        return jsonify({"vector": list(result.vector)})
+
     return app
