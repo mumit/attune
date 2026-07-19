@@ -18,6 +18,7 @@ from .identity_session import (
     create_identity_session_secrets,
 )
 from .oauth_transaction import create_oauth_transaction_secrets
+from .service_metrics import instrument_service_metrics
 from .slack_provider import build_authorize_url as build_slack_authorize_url
 
 LOG = logging.getLogger(__name__)
@@ -305,6 +306,7 @@ def create_app(
     if hosted_signup_enabled and signup_throttle is None:
         signup_throttle = SignupThrottle()
     app = Flask(__name__, static_url_path="/assets")
+    instrument_service_metrics(app, service="control_plane")
     app.config.update(
         MAX_CONTENT_LENGTH=20_000 if identity_enabled else 1024,
         TRUSTED_HOSTS=[expected_host],

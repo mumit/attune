@@ -45,12 +45,15 @@ def _verifier(token: str, audience: str):
 
 
 class _Jobs:
-    def __init__(self, job: HostedJob | None):
+    def __init__(self, job: HostedJob | None, *, raise_on_claim: bool = False):
         self.job = job
+        self.raise_on_claim = raise_on_claim
         self.claims = []
         self.finished = []
 
     def claim(self, context, job_id, **kwargs):
+        if self.raise_on_claim:
+            raise RuntimeError("database unavailable")
         self.claims.append((context, job_id, kwargs))
         return self.job
 
@@ -214,3 +217,86 @@ def test_post_effect_audit_failure_opens_reconciliation():
     assert result.status_code == 503
     assert reconciliations.opened[-1][2] == "post_effect_audit"
     assert jobs.finished == []
+
+
+def _last_task_execution_line(capsys) -> dict:
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out, "expected an emitted task_execution line"
+    payload = json.loads(out[-1])
+    assert payload["metric"] == "task_execution"
+    return payload
+
+
+TASK_EXECUTION_FIELDS = {"metric", "task", "outcome", "duration_ms"}
+
+
+def test_invalid_envelope_emits_no_task_execution_line(capsys):
+    jobs = _Jobs(_job())
+    _dispatcher(jobs, _Audit(), lambda c, j: None).dispatch(
+        authorization="not-a-bearer", raw_body=_body()
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_succeeded_task_execution_is_emitted(capsys):
+    jobs = _Jobs(_job())
+    _dispatcher(jobs, _Audit(), lambda context, job: None).dispatch(
+        authorization="Bearer valid", raw_body=_body()
+    )
+    payload = _last_task_execution_line(capsys)
+    assert set(payload.keys()) == TASK_EXECUTION_FIELDS
+    assert payload["task"] == "gmail.reconcile"
+    assert payload["outcome"] == "succeeded"
+    assert isinstance(payload["duration_ms"], int)
+    assert payload["duration_ms"] >= 0
+
+
+def test_duplicate_delivery_task_execution_outcome(capsys):
+    jobs = _Jobs(None)
+    _dispatcher(jobs, _Audit(), lambda c, j: None).dispatch(
+        authorization="Bearer valid", raw_body=_body()
+    )
+    payload = _last_task_execution_line(capsys)
+    assert payload["outcome"] == "duplicate"
+    assert payload["task"] == "gmail.reconcile"
+
+
+def test_claim_exception_task_execution_outcome_is_failed(capsys):
+    jobs = _Jobs(_job(), raise_on_claim=True)
+    _dispatcher(jobs, _Audit(), lambda c, j: None).dispatch(
+        authorization="Bearer valid", raw_body=_body()
+    )
+    payload = _last_task_execution_line(capsys)
+    assert payload["outcome"] == "failed"
+
+
+def test_pre_effect_audit_failure_task_execution_outcome_is_reconciled(capsys):
+    jobs = _Jobs(_job())
+    _dispatcher(jobs, _Audit(fail=True), lambda c, j: None).dispatch(
+        authorization="Bearer valid", raw_body=_body()
+    )
+    payload = _last_task_execution_line(capsys)
+    assert payload["outcome"] == "reconciled"
+
+
+def test_executor_exception_task_execution_outcome_is_reconciled(capsys):
+    jobs = _Jobs(_job())
+
+    def fail(context, job):
+        raise RuntimeError("ambiguous provider result")
+
+    _dispatcher(jobs, _Audit(), fail).dispatch(
+        authorization="Bearer valid", raw_body=_body()
+    )
+    payload = _last_task_execution_line(capsys)
+    assert payload["outcome"] == "reconciled"
+
+
+def test_finalize_failure_task_execution_outcome_is_reconciled(capsys):
+    jobs = _Jobs(_job())
+    jobs.finish = lambda *args, **kwargs: False
+    _dispatcher(jobs, _Audit(), lambda c, j: None).dispatch(
+        authorization="Bearer valid", raw_body=_body()
+    )
+    payload = _last_task_execution_line(capsys)
+    assert payload["outcome"] == "reconciled"

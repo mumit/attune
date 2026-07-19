@@ -1711,3 +1711,330 @@ resource "google_compute_global_forwarding_rule" "http" {
   target                = google_compute_target_http_proxy.redirect.id
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
+
+# --- SLO-grade observability (Phase 6 "hosted operations", hosted review
+# gap #8: only seven job-failure alert policies existed; no latency/
+# error-rate visibility, no dashboards, no per-service health signal).
+#
+# The control plane's Flask app emits one content-free "http_request" JSON
+# line per request (attune.hosted.service_metrics.instrument_service_metrics)
+# with only fixed-vocabulary fields -- service/route/method/status_class/
+# status/duration_ms, never tenant, principal, query string, or any other
+# identifier. See docs/decisions.md's 2026-07-19 SLO-monitoring entry for
+# the field contract, and deploy/gcp/runtime/main.tf for the same pattern
+# applied to the five private runtime services plus the worker's
+# task_execution metric.
+#
+# Unconditional infrastructure, exactly like the existing
+# export_download_failure policy above: control_plane is always deployed,
+# so there is no separate service-activation gate to tie this to, and
+# monitoring is not itself a customer-facing feature needing its own
+# security-review gate.
+
+resource "google_logging_metric" "control_plane_http_request_count" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-control-plane-http-request-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.control_plane.name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune control-plane HTTP request count"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "method"
+      value_type  = "STRING"
+      description = "HTTP method."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "method"       = "EXTRACT(jsonPayload.method)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+}
+
+resource "google_logging_metric" "control_plane_http_request_latency" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-control-plane-http-request-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.control_plane.name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune control-plane HTTP request latency"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "control_plane_5xx_error_rate" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} control-plane 5xx error rate"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = <<-EOT
+      The control plane returned more than ${var.slo_5xx_error_threshold}
+      5xx responses within ${var.slo_alert_window_seconds} seconds.
+      Inspect recent deploys and dependency health (identity, secret
+      broker, dispatch broker, audit writer) before assuming a code
+      regression. The signal contains no tenant or session data -- only
+      the fixed route, method, and status class.
+    EOT
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Control-plane 5xx responses over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.control_plane_http_request_count.name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.labels.status_class=\"5xx\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_5xx_error_threshold
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "${var.slo_alert_window_seconds}s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
+resource "google_monitoring_alert_policy" "control_plane_p95_latency" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} control-plane p95 latency"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = <<-EOT
+      p95 control-plane request latency exceeded
+      ${var.slo_control_plane_p95_latency_ms}ms over
+      ${var.slo_alert_window_seconds} seconds. Inspect Cloud SQL, the
+      secret broker, and the dispatch broker before raising the threshold.
+    EOT
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Control-plane p95 latency over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.control_plane_http_request_latency.name}\"",
+        "resource.type=\"cloud_run_revision\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_control_plane_p95_latency_ms
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "${var.slo_alert_window_seconds}s"
+        per_series_aligner = "ALIGN_PERCENTILE_95"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
+# --- SLO dashboard.
+#
+# Built entirely from the log-based metrics above and in
+# deploy/gcp/runtime/main.tf. Five of the six services' metrics are
+# resources in the separate runtime Terraform root/state, not this one, so
+# their metric type strings below are built from the same deterministic
+# "${local.prefix}-<service>-..." naming both roots use -- not a direct
+# Terraform resource reference. Keep the two naming schemes in sync if
+# either changes; a mismatch just means an empty panel, never an error
+# (Cloud Monitoring renders a chart with no data for an unknown metric
+# type rather than failing).
+locals {
+  dashboard_services = [
+    { key = "control-plane", label = "Control plane" },
+    { key = "worker", label = "Worker" },
+    { key = "model-gateway", label = "Model gateway" },
+    { key = "dispatch-broker", label = "Dispatch broker" },
+    { key = "secret-broker", label = "Secret broker" },
+    { key = "channel-broker", label = "Channel broker" },
+  ]
+
+  dashboard_request_rate_widgets = [
+    for service in local.dashboard_services : {
+      title = "${service.label}: request rate"
+      xyChart = {
+        dataSets = [{
+          timeSeriesQuery = {
+            timeSeriesFilter = {
+              filter = "metric.type=\"logging.googleapis.com/user/${local.prefix}-${service.key}-http-request-count\" AND resource.type=\"cloud_run_revision\""
+              aggregation = {
+                alignmentPeriod    = "60s"
+                perSeriesAligner   = "ALIGN_RATE"
+                crossSeriesReducer = "REDUCE_SUM"
+              }
+            }
+          }
+          plotType = "LINE"
+        }]
+        yAxis = { label = "requests/s", scale = "LINEAR" }
+      }
+    }
+  ]
+
+  dashboard_error_rate_widgets = [
+    for service in local.dashboard_services : {
+      title = "${service.label}: 5xx rate"
+      xyChart = {
+        dataSets = [{
+          timeSeriesQuery = {
+            timeSeriesFilter = {
+              filter = "metric.type=\"logging.googleapis.com/user/${local.prefix}-${service.key}-http-request-count\" AND resource.type=\"cloud_run_revision\" AND metric.labels.status_class=\"5xx\""
+              aggregation = {
+                alignmentPeriod    = "60s"
+                perSeriesAligner   = "ALIGN_RATE"
+                crossSeriesReducer = "REDUCE_SUM"
+              }
+            }
+          }
+          plotType = "LINE"
+        }]
+        yAxis = { label = "5xx/s", scale = "LINEAR" }
+      }
+    }
+  ]
+
+  dashboard_latency_widgets = [
+    for service in local.dashboard_services : {
+      title = "${service.label}: p95 latency"
+      xyChart = {
+        dataSets = [{
+          timeSeriesQuery = {
+            timeSeriesFilter = {
+              filter = "metric.type=\"logging.googleapis.com/user/${local.prefix}-${service.key}-http-request-latency\" AND resource.type=\"cloud_run_revision\""
+              aggregation = {
+                alignmentPeriod  = "60s"
+                perSeriesAligner = "ALIGN_PERCENTILE_95"
+              }
+            }
+          }
+          plotType = "LINE"
+        }]
+        yAxis = { label = "ms", scale = "LINEAR" }
+      }
+    }
+  ]
+
+  dashboard_task_execution_widgets = [
+    {
+      title = "Worker: task-execution count by outcome"
+      xyChart = {
+        dataSets = [{
+          timeSeriesQuery = {
+            timeSeriesFilter = {
+              filter = "metric.type=\"logging.googleapis.com/user/${local.prefix}-worker-task-execution-count\" AND resource.type=\"cloud_run_revision\""
+              aggregation = {
+                alignmentPeriod    = "60s"
+                perSeriesAligner   = "ALIGN_RATE"
+                crossSeriesReducer = "REDUCE_SUM"
+                groupByFields      = ["metric.labels.task", "metric.labels.outcome"]
+              }
+            }
+          }
+          plotType = "STACKED_BAR"
+        }]
+        yAxis = { label = "tasks/s", scale = "LINEAR" }
+      }
+    },
+    {
+      title = "Worker: task-execution p95 latency by task"
+      xyChart = {
+        dataSets = [{
+          timeSeriesQuery = {
+            timeSeriesFilter = {
+              filter = "metric.type=\"logging.googleapis.com/user/${local.prefix}-worker-task-execution-latency\" AND resource.type=\"cloud_run_revision\""
+              aggregation = {
+                alignmentPeriod  = "60s"
+                perSeriesAligner = "ALIGN_PERCENTILE_95"
+                groupByFields    = ["metric.labels.task"]
+              }
+            }
+          }
+          plotType = "LINE"
+        }]
+        yAxis = { label = "ms", scale = "LINEAR" }
+      }
+    },
+  ]
+
+  dashboard_widgets = concat(
+    local.dashboard_request_rate_widgets,
+    local.dashboard_error_rate_widgets,
+    local.dashboard_latency_widgets,
+    local.dashboard_task_execution_widgets,
+  )
+}
+
+resource "google_monitoring_dashboard" "slo_overview" {
+  project = local.foundation.project_id
+  dashboard_json = jsonencode({
+    displayName = "${local.prefix} SLO overview"
+    gridLayout = {
+      columns = "3"
+      widgets = local.dashboard_widgets
+    }
+  })
+}

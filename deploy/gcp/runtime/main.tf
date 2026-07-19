@@ -39,6 +39,16 @@ locals {
     local.foundation.workload_identities.worker,
   ])
   channel_broker_audience = "https://${local.prefix}-channel-broker.attune.internal"
+  # The worker's HTTP surface is one uniform /v1/tasks/dispatch route for
+  # every task purpose, so the customer-facing "conversation execution"
+  # p95 latency the SLO alert below cares about cannot be read off the
+  # HTTP request metric -- it must filter the task_execution metric to
+  # exactly whichever bounded conversation task kinds are activated.
+  conversation_task_purposes = concat(
+    var.enable_google_chat_conversation ? ["channel.google_chat.converse"] : [],
+    var.enable_slack_conversation ? ["channel.slack.converse"] : [],
+    var.enable_web_conversation ? ["channel.web.converse"] : [],
+  )
 }
 
 resource "google_cloud_run_v2_service" "audit_writer" {
@@ -1334,4 +1344,742 @@ resource "google_monitoring_alert_policy" "export_writer_failure" {
 
   notification_channels = var.alert_notification_channels
   user_labels           = local.common_labels
+}
+
+# --- SLO-grade observability (Phase 6 "hosted operations", hosted review
+# gap #8: only seven job-failure alert policies existed; no latency/
+# error-rate visibility, no dashboards, no per-service health signal).
+#
+# Each service's Flask app emits one content-free "http_request" JSON line
+# per request (attune.hosted.service_metrics.instrument_service_metrics);
+# the worker additionally emits one "task_execution" line per dispatched
+# task (worker_dispatch.py). Both carry only fixed-vocabulary fields --
+# service/route/method/status_class/status/duration_ms, or
+# task/outcome/duration_ms -- never tenant, principal, query string, or
+# any other identifier. See docs/decisions.md's 2026-07-19 SLO-monitoring
+# entry for the field contract.
+#
+# These log-based metrics and alert policies are unconditional
+# infrastructure, exactly like the seven pre-existing policies above: each
+# is tied only to whether its underlying Cloud Run service itself is
+# deployed (the same enable_* flag that gates the service), never to a
+# separate "enable monitoring" toggle. Monitoring is not a customer-facing
+# feature needing its own security-review gate; the existing
+# secret_broker_use_anomaly and export_writer_failure policies above
+# already establish that norm for this module. Metric emission in the
+# application is unconditional too, for the same reason: it is
+# content-free operational logging, strictly less sensitive than the
+# anomaly markers and audit events these services already write.
+
+resource "google_logging_metric" "worker_http_request_count" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-worker-http-request-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.worker.name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune worker HTTP request count"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "method"
+      value_type  = "STRING"
+      description = "HTTP method."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "method"       = "EXTRACT(jsonPayload.method)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+}
+
+resource "google_logging_metric" "worker_http_request_latency" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-worker-http-request-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.worker.name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune worker HTTP request latency"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "worker_5xx_error_rate" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} worker 5xx error rate"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = <<-EOT
+      The worker returned more than ${var.slo_5xx_error_threshold} 5xx
+      responses within ${var.slo_alert_window_seconds} seconds. Inspect
+      recent deploys, dependency health (audit writer, secret broker,
+      model gateway), and reconciliation backlog. The signal contains no
+      tenant or provider data -- only the fixed route, method, and status
+      class.
+    EOT
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Worker 5xx responses over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.worker_http_request_count.name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.labels.status_class=\"5xx\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_5xx_error_threshold
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "${var.slo_alert_window_seconds}s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels            = local.common_labels
+}
+
+resource "google_logging_metric" "worker_task_execution_count" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-worker-task-execution-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.worker.name}\"",
+    "jsonPayload.metric=\"task_execution\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune worker task-execution count"
+
+    labels {
+      key         = "task"
+      value_type  = "STRING"
+      description = "Fixed registered task purpose (route.purpose)."
+    }
+    labels {
+      key         = "outcome"
+      value_type  = "STRING"
+      description = "succeeded, duplicate, reconciled, or failed."
+    }
+  }
+
+  label_extractors = {
+    "task"    = "EXTRACT(jsonPayload.task)"
+    "outcome" = "EXTRACT(jsonPayload.outcome)"
+  }
+}
+
+resource "google_logging_metric" "worker_task_execution_latency" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-worker-task-execution-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.worker.name}\"",
+    "jsonPayload.metric=\"task_execution\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune worker task-execution latency"
+
+    labels {
+      key         = "task"
+      value_type  = "STRING"
+      description = "Fixed registered task purpose (route.purpose)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "task" = "EXTRACT(jsonPayload.task)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "worker_conversation_p95_latency" {
+  count        = length(local.conversation_task_purposes) > 0 ? 1 : 0
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} worker conversation-execution p95 latency"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = <<-EOT
+      p95 execution latency for the bounded conversation task kinds
+      (Google Chat, Slack, and/or web conversation execution, whichever
+      are activated) exceeded ${var.slo_worker_conversation_p95_latency_ms}ms
+      over ${var.slo_alert_window_seconds} seconds. Inspect the model
+      gateway and its upstream provider before raising the threshold.
+    EOT
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Conversation task p95 latency over threshold"
+    condition_threshold {
+      filter = join(" AND ", concat(
+        [
+          "metric.type=\"logging.googleapis.com/user/${google_logging_metric.worker_task_execution_latency.name}\"",
+          "resource.type=\"cloud_run_revision\"",
+        ],
+        [
+          "(${join(" OR ", [
+            for purpose in local.conversation_task_purposes :
+            "metric.labels.task=\"${purpose}\""
+          ])})",
+        ],
+      ))
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_worker_conversation_p95_latency_ms
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "${var.slo_alert_window_seconds}s"
+        per_series_aligner = "ALIGN_PERCENTILE_95"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels            = local.common_labels
+}
+
+resource "google_logging_metric" "model_gateway_http_request_count" {
+  count   = var.enable_model_gateway ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-model-gateway-http-request-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.model_gateway[0].name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune model-gateway HTTP request count"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "method"
+      value_type  = "STRING"
+      description = "HTTP method."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "method"       = "EXTRACT(jsonPayload.method)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+}
+
+resource "google_logging_metric" "model_gateway_http_request_latency" {
+  count   = var.enable_model_gateway ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-model-gateway-http-request-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.model_gateway[0].name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune model-gateway HTTP request latency"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "model_gateway_5xx_error_rate" {
+  count        = var.enable_model_gateway ? 1 : 0
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} model-gateway 5xx error rate"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The model gateway returned more than ${var.slo_5xx_error_threshold} 5xx responses within ${var.slo_alert_window_seconds} seconds. Inspect the upstream LLM base URL's health and rate limits before assuming a gateway bug; the signal contains no prompt, response, or provider content."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Model-gateway 5xx responses over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.model_gateway_http_request_count[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.labels.status_class=\"5xx\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_5xx_error_threshold
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "${var.slo_alert_window_seconds}s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels            = local.common_labels
+}
+
+resource "google_logging_metric" "dispatch_broker_http_request_count" {
+  count   = var.enable_dispatch_broker ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-dispatch-broker-http-request-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.dispatch_broker[0].name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune dispatch-broker HTTP request count"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "method"
+      value_type  = "STRING"
+      description = "HTTP method."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "method"       = "EXTRACT(jsonPayload.method)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+}
+
+resource "google_logging_metric" "dispatch_broker_http_request_latency" {
+  count   = var.enable_dispatch_broker ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-dispatch-broker-http-request-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.dispatch_broker[0].name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune dispatch-broker HTTP request latency"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "dispatch_broker_5xx_error_rate" {
+  count        = var.enable_dispatch_broker ? 1 : 0
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} dispatch-broker 5xx error rate"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The dispatch broker returned more than ${var.slo_5xx_error_threshold} 5xx responses within ${var.slo_alert_window_seconds} seconds. Inspect Cloud Tasks enqueue health and the fixed dispatch-route table; the signal contains no tenant or intent content."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Dispatch-broker 5xx responses over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.dispatch_broker_http_request_count[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.labels.status_class=\"5xx\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_5xx_error_threshold
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "${var.slo_alert_window_seconds}s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels            = local.common_labels
+}
+
+resource "google_logging_metric" "secret_broker_http_request_count" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-secret-broker-http-request-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.secret_broker.name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune secret-broker HTTP request count"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "method"
+      value_type  = "STRING"
+      description = "HTTP method."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "method"       = "EXTRACT(jsonPayload.method)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+}
+
+resource "google_logging_metric" "secret_broker_http_request_latency" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-secret-broker-http-request-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.secret_broker.name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune secret-broker HTTP request latency"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "secret_broker_5xx_error_rate" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} secret-broker 5xx error rate"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The secret broker returned more than ${var.slo_5xx_error_threshold} 5xx responses within ${var.slo_alert_window_seconds} seconds. This is distinct from secret_broker_use_anomaly above (denied/rate-limited/provider-failed credential USE); this alert is transport-layer health. The signal contains no tenant or provider data."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Secret-broker 5xx responses over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.secret_broker_http_request_count.name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.labels.status_class=\"5xx\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_5xx_error_threshold
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "${var.slo_alert_window_seconds}s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels            = local.common_labels
+}
+
+resource "google_logging_metric" "channel_broker_http_request_count" {
+  count   = var.enable_channel_broker ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-channel-broker-http-request-count"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.channel_broker[0].name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune channel-broker HTTP request count"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "method"
+      value_type  = "STRING"
+      description = "HTTP method."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "method"       = "EXTRACT(jsonPayload.method)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+}
+
+resource "google_logging_metric" "channel_broker_http_request_latency" {
+  count   = var.enable_channel_broker ? 1 : 0
+  project = local.foundation.project_id
+  name    = "${local.prefix}-channel-broker-http-request-latency"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_revision\"",
+    "resource.labels.service_name=\"${google_cloud_run_v2_service.channel_broker[0].name}\"",
+    "jsonPayload.metric=\"http_request\"",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "DISTRIBUTION"
+    unit         = "ms"
+    display_name = "Attune channel-broker HTTP request latency"
+
+    labels {
+      key         = "route"
+      value_type  = "STRING"
+      description = "Matched Flask URL rule template; never a raw path or identifier."
+    }
+    labels {
+      key         = "status_class"
+      value_type  = "STRING"
+      description = "Response status class (2xx..5xx)."
+    }
+  }
+
+  value_extractor = "EXTRACT(jsonPayload.duration_ms)"
+  label_extractors = {
+    "route"        = "EXTRACT(jsonPayload.route)"
+    "status_class" = "EXTRACT(jsonPayload.status_class)"
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 24
+      growth_factor      = 2.0
+      scale              = 5
+    }
+  }
+}
+
+resource "google_monitoring_alert_policy" "channel_broker_5xx_error_rate" {
+  count        = var.enable_channel_broker ? 1 : 0
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} channel-broker 5xx error rate"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The channel broker returned more than ${var.slo_5xx_error_threshold} 5xx responses within ${var.slo_alert_window_seconds} seconds. Inspect Google Chat/Slack provider health and the broker-egress NAT path; the signal contains no tenant, destination, or provider content."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Channel-broker 5xx responses over threshold"
+    condition_threshold {
+      filter = join(" AND ", [
+        "metric.type=\"logging.googleapis.com/user/${google_logging_metric.channel_broker_http_request_count[0].name}\"",
+        "resource.type=\"cloud_run_revision\"",
+        "metric.labels.status_class=\"5xx\"",
+      ])
+      comparison      = "COMPARISON_GT"
+      threshold_value = var.slo_5xx_error_threshold
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "${var.slo_alert_window_seconds}s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels            = local.common_labels
 }

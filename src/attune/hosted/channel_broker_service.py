@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 from uuid import UUID
 
 from .channel_broker import GoogleChatLinkBroker
+from .service_metrics import instrument_service_metrics
 from .slack_channel_broker import SlackInstallBroker
 from .task_envelope import _google_token_verifier, _verify_claims
 
@@ -51,6 +52,7 @@ def create_app(
             raise ValueError("channel broker callers must use distinct identities")
     verifier = token_verifier or _google_token_verifier
     app = Flask(__name__)
+    instrument_service_metrics(app, service="channel_broker")
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
     def authorized(expected_service_account: str) -> bool:
