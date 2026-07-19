@@ -6,7 +6,16 @@ import os
 
 from .audit import PostgresAuditProducerRepository
 from .audit_client import AuditWriterClient
+from .capability_admission import (
+    CapabilityAdmissionProducer,
+    PostgresCapabilityAdmissionRepository,
+)
+from .capability_gateway import PostgresCapabilityAuthorityRepository, TypedCapabilityGateway
 from .cloud_sql import iam_connection
+from .dispatch import PostgresDispatchProducerRepository
+from .dispatch_broker_client import DispatchBrokerClient
+from .gmail_draft_capability import build_draft_capability_registry
+from .google_gmail_draft_create_executor import GoogleGmailDraftCreateExecutor
 from .google_gmail_profile_executor import GoogleGmailProfileExecutor
 from .google_workspace_verification_executor import (
     GoogleWorkspaceVerificationExecutor,
@@ -25,7 +34,11 @@ from .web_conversation_executor import (
     WebConversationExecutor,
 )
 from .model_gateway_client import ModelGatewayClient
-from .repositories import PostgresJobRepository, PostgresMemoryRepository
+from .repositories import (
+    PostgresApprovalRepository,
+    PostgresJobRepository,
+    PostgresMemoryRepository,
+)
 from .reconciliation import PostgresJobReconciliationRepository
 from .secret_broker_client import SecretBrokerClient
 from .vault import PostgresCredentialIntentRepository
@@ -77,6 +90,46 @@ def create_production_app():
                 os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
             ),
         )
+    google_gmail_draft_create = None
+    capability_gateway = None
+    capability_admissions = None
+    draft_capability_enabled = os.environ.get(
+        "ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY", "false"
+    )
+    if draft_capability_enabled not in {"true", "false"}:
+        raise ValueError(
+            "ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY must be true or false"
+        )
+    if draft_capability_enabled == "true":
+        # Dormant even when this gate is on: no tenant holds an R2 autonomy
+        # grant for google.gmail.draft.create, and no OAuth flow ever
+        # requests gmail.compose, so TypedCapabilityGateway.authorize()
+        # always fails closed in production (docs/capability-gateway.md).
+        google_gmail_draft_create = GoogleGmailDraftCreateExecutor(
+            PostgresCredentialIntentRepository(
+                iam_connection, producer_kind="worker",
+            ),
+            SecretBrokerClient(
+                os.environ["ATTUNE_SECRET_BROKER_URL"],
+                os.environ["ATTUNE_SECRET_BROKER_AUDIENCE"],
+            ),
+        )
+        capability_gateway = TypedCapabilityGateway(
+            registry=build_draft_capability_registry(),
+            authority=PostgresCapabilityAuthorityRepository(iam_connection),
+        )
+        capability_admissions = CapabilityAdmissionProducer(
+            PostgresCapabilityAdmissionRepository(iam_connection),
+            PostgresApprovalRepository(iam_connection),
+            PostgresDispatchProducerRepository(
+                iam_connection, producer_kind="worker",
+            ),
+            DispatchBrokerClient(
+                os.environ["ATTUNE_DISPATCH_BROKER_URL"],
+                os.environ["ATTUNE_DISPATCH_BROKER_AUDIENCE"],
+            ),
+        )
+
     hosted_memory_enabled = os.environ.get("ATTUNE_ENABLE_HOSTED_MEMORY", "false")
     if hosted_memory_enabled not in {"true", "false"}:
         raise ValueError("ATTUNE_ENABLE_HOSTED_MEMORY must be true or false")
@@ -170,6 +223,8 @@ def create_production_app():
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
             memory=memory,
             memory_audit=memory_audit,
+            capability_gateway=capability_gateway,
+            capability_admissions=capability_admissions,
         )
     dispatcher = WorkerDispatcher(
         jobs=PostgresJobRepository(iam_connection),
@@ -178,6 +233,7 @@ def create_production_app():
         routes=registered_routes(
             google_gmail_profile=google_gmail_profile,
             google_workspace_verification=google_workspace_verification,
+            google_gmail_draft_create=google_gmail_draft_create,
             google_chat_conversation=google_chat_conversation,
             slack_conversation=slack_conversation,
             web_conversation=web_conversation,

@@ -1626,3 +1626,123 @@ recency listing.
   provisioned value outside tests, and there is no hosted approval workflow
   or signal-capture path — both explicitly out of scope for this stage
   (`docs/hosted-memory.md`).
+
+## 2026-07-19 — Draft-and-approve wired to dispatch (Phase 5 stage 3, G17)
+
+Wires the dormant `TypedCapabilityGateway`/`CapabilityRegistry`/
+`PostgresCapabilityAuthorityRepository` (implemented and tested since an
+earlier stage, imported by nothing) into the real dispatch spine, and
+registers the first hosted write capability, `google.gmail.draft.create` v1.
+Full detail lives in `docs/capability-gateway.md`; this entry records the
+choices and their reasoning.
+
+- **Risk tier: R2, not R1, because the security architecture is normative.**
+  `docs/security-architecture.md`'s risk-tier table (section 8.2) lists a
+  Gmail draft as its R2 example ("explicit approval by default"), and an
+  earlier draft of this stage's plan proposed registering it at R1 instead
+  (reasoning that an unsent, fully reversible draft fits R1's own
+  definition — "reversible Attune-owned state, private preparation"). That
+  reasoning does not license silently reclassifying a capability the
+  reviewed table already names: the implementation conforms to the
+  normative table, not the other way around. The capability is registered
+  with `risk = maximum_product_risk = RiskTier.R2` — a hard, construction-
+  time ceiling with no room to graduate this specific registration to a
+  higher tier without a code change. `docs/security-architecture.md` itself
+  is **not** edited; no parenthetical was added to its risk-tier table. Any
+  future stage that wants a different placement must change the normative
+  document first, then the registration, not the reverse.
+- **What R2 requires, checked against the actual SEC-500 through SEC-506
+  rows, not assumed.** SEC-500 (bind tenant/principal/approver/capability/
+  connector/destination/action-hash/source-version/policy-version/creation-
+  time/expiry/surface), SEC-501 (high-entropy, single-use, short-lived,
+  atomically-consumed, idempotent-replay), and SEC-502 (actor- and tenant-
+  bound; editing creates a new action hash) are implemented. SEC-503
+  ("reauthorize, refetch relevant state, check freshness, evaluate policy
+  again") is only **partially** implemented: the claim function rechecks
+  connector and policy liveness, but does not refetch the live Gmail
+  thread's own resource version before dispatch — an explicit, documented
+  remaining gate, not a silent gap. SEC-504 (fail closed or reconcile on
+  ambiguity) is inherited for free from `WorkerDispatcher`'s existing,
+  unmodified pre/post-effect audit and reconciliation, since this
+  capability is registered as an ordinary `TaskRoute`. SEC-505 (recent
+  authentication) is normatively **R3-specific** — it is correctly *not*
+  implemented here, and that is not a gap at R2; conflating "not required at
+  this tier" with "a requirement we skipped" would itself be a form of the
+  dishonesty this project's hosted discipline exists to prevent. Rate/
+  concurrency/cost budgets and admission/approval-decision audit through the
+  private writer (distinct from the job's own claim/execute audit, which is
+  unchanged) are genuine, undisguised remaining gates, listed in
+  `docs/capability-gateway.md`.
+- **Web-first approval surface.** The approval ceremony for this slice runs
+  entirely inside the web conversation flow the owner already has: a
+  deterministic grammar (`"draft reply <thread>: <body>"`, `"approve
+  draft"`, `"reject draft"`) mirroring the memory command grammar's own
+  deterministic-first routing exactly. Google Chat and Slack conversation
+  executors never receive the new `capability_gateway`/
+  `capability_admissions` dependencies at all — not gated off, structurally
+  absent — so their behavior for draft-shaped or "approve draft" text is
+  provably unchanged (pinned in
+  `test_draft_capability_is_never_wired_for_the_chat_surface`). A later
+  stage that wants Chat/Slack approval is new, separately reviewed work, not
+  a silent extension of this one.
+- **Admission, approval, and dispatch stay three separate steps, and
+  admission is never execution authority.** `TypedCapabilityGateway
+  .authorize()` only ever produces an `AuthorizedCapability`; a new
+  `PostgresCapabilityAdmissionRepository.record()` persists it as one
+  **truly immutable, append-only** `attune.capability_admissions` row
+  (forced RLS, and the same no-update/delete/truncate trigger
+  `attune.audit_events` already uses) plus one pending
+  `attune.approvals` row, in one transaction — and stops. No job and no
+  dispatch intent exist until a bound approver later decides. Only then does
+  `CapabilityAdmissionProducer.decide()` create the job and dispatch intent,
+  and it does so through the **existing, unmodified**
+  `PostgresDispatchProducerRepository` (`producer_kind="worker"`) and the
+  existing `DispatchBrokerClient` — deliberately reusing rather than
+  reinventing the producer-to-broker shape `WebConversationService.send()`
+  already established.
+- **`attune.approvals` (migration 0001, dormant since) stops being
+  scaffolding and becomes a real privilege boundary, not just an atomicity
+  convenience.** It previously supported only a job-first, already-created-
+  job approval shape (`job_id NOT NULL`) that no executor used yet, and its
+  `decide()`/`consume()` were plain UPDATEs available to any role holding
+  the table grant. This stage: (a) makes `job_id` nullable and adds
+  `admission_id` (exactly one of the two is set, enforced by a `CHECK`) so
+  an approval can bind to an admission *before* a job exists; (b) adds a
+  `surface` column (fixed to `'web'`, the only surface built) to satisfy
+  SEC-500's "originating surface" binding, which the original 0001 schema
+  never carried; (c) replaces `decide()`/`consume()` with one `claim()`
+  method backed by a new SECURITY DEFINER function,
+  `attune.claim_capability_approval`, owned by a new memberless, NOLOGIN,
+  BYPASSRLS role (`attune_capability_executor`) per the 0009 pattern; and
+  (d) revokes direct `UPDATE` on `attune.approvals` from **every** runtime
+  role (`attune_worker` and `attune_control_plane` both), so the claim
+  function is the only mutation path, full stop. Unlike
+  `attune_dispatch_executor`/`attune_audit_executor`/`attune_vault_executor`,
+  this new role's `BYPASSRLS` is not load-bearing for cross-tenant lookup —
+  the caller already runs inside a tenant transaction — it exists so a real
+  security transition goes through exactly one reviewed, atomic, actor-bound
+  path, matching the established convention rather than a weaker bespoke
+  one. The existing (previously job_id-only) `PostgresApprovalRepository`
+  test was rewritten to assert the new boundary directly: a plain `UPDATE`
+  by either runtime role fails with a permission error, the claim function
+  succeeds, and a replayed claim returns the same recorded outcome rather
+  than erroring or re-mutating (SEC-501) — no legacy direct-UPDATE path was
+  preserved to keep the old test shape.
+- **The gate, `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`** (`"true"`/`"false"`,
+  default `"false"`), read in `worker_app.py` exactly like the existing
+  conversation gates: an invalid value fails closed. Off — or on any surface
+  other than web — "draft reply ...: ..." still contains the deterministic
+  `_WRITE` keyword "reply", so it falls through to the exact pre-stage-3
+  mutation refusal unchanged (pinned by
+  `test_gate_off_draft_reply_falls_through_to_the_byte_identical_refusal`).
+  Like the existing hosted conversation gates, it is a worker-deployment
+  environment variable and does not enter `.env.example`.
+- **What remains dormant.** No worker deployment sets
+  `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY=true`; the fixed R0 policy
+  (`docs/hosted-policy.md`) grants no tenant any R2 authority; no Google
+  OAuth flow requests the `gmail.compose` scope this capability requires —
+  three independent reasons no production tenant can exercise it even if
+  one were true. Budgets, live Gmail thread source-freshness re-verification
+  before dispatch, and admission/approval-decision audit through the
+  private writer are genuine remaining gates before activation, listed in
+  `docs/capability-gateway.md`.

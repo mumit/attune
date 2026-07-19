@@ -12,6 +12,7 @@ from typing import Callable, Protocol, Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .capability_gateway import CapabilityDenied
 from .durable import HostedTurn
 from .model_gateway_client import ModelGatewayClient
 from .repositories import ConnectionFactory, HostedJob, HostedMemory
@@ -23,6 +24,7 @@ PURPOSE = "channel.google_chat.converse"
 CAPABILITY = "assistant.conversation.read"
 GMAIL_CAPABILITY = "google.gmail.threads.read"
 CALENDAR_CAPABILITY = "google.calendar.events.read"
+DRAFT_CAPABILITY = "google.gmail.draft.create"
 ROUTES = frozenset({"brief", "gmail", "calendar", "write", "general"})
 
 # Hosted conversational memory (docs/hosted-memory.md), dormant unless a
@@ -48,6 +50,14 @@ _CALENDAR = re.compile(
     re.IGNORECASE,
 )
 _BRIEF = re.compile(r"\b(brief|overview|what(?:'s| is) new|catch me up)\b", re.IGNORECASE)
+
+# Hosted draft-and-approve capability (docs/capability-gateway.md), dormant
+# unless a capability gateway/admission producer is injected under
+# ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY -- wired only for the web surface.
+# Checked before _WRITE, mirroring the memory grammar's own early, exact,
+# deterministic-first routing: a recognized draft command short-circuits
+# _respond entirely.
+_DRAFT_CREATE = re.compile(r"^draft reply (\S{1,180}):\s*(.+)$", re.IGNORECASE | re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -123,6 +133,29 @@ class MemoryAuditSink(Protocol):
     def record(
         self, context: TenantContext, *, action: str, outcome: str, job_id: str, count: int,
     ) -> None: ...
+
+
+class DraftCapabilityGateway(Protocol):
+    """The subset of ``TypedCapabilityGateway`` the executor uses. Dormant
+    unless injected (ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY), and only for
+    the web surface (docs/capability-gateway.md)."""
+
+    def authorize(
+        self, context: TenantContext, *, principal_id: UUID, proposal: object,
+    ) -> object: ...
+
+
+class DraftCapabilityAdmissions(Protocol):
+    """The subset of ``CapabilityAdmissionProducer`` the executor uses."""
+
+    def record(
+        self, context: TenantContext, *, authorized: object, destination_hash: bytes,
+    ) -> object: ...
+
+    def decide(
+        self, context: TenantContext, *, approval_id: UUID, principal_id: UUID,
+        decision: str,
+    ) -> str: ...
 
 
 class PostgresGoogleChatConversationWorkRepository:
@@ -321,12 +354,16 @@ class GoogleChatConversationExecutor:
         intent_key_prefix: str = "attune-google-chat-converse-v1:",
         memory: MemoryRepository | None = None,
         memory_audit: MemoryAuditSink | None = None,
+        capability_gateway: DraftCapabilityGateway | None = None,
+        capability_admissions: DraftCapabilityAdmissions | None = None,
     ):
         self._work = work
         self._intents = intents
         self._workspace = workspace
         self._models = models
         self._replies = replies
+        self._capability_gateway = capability_gateway
+        self._capability_admissions = capability_admissions
         self._reply_method = reply_method
         self._intent_key_prefix = intent_key_prefix
         self._memory = memory
@@ -372,6 +409,15 @@ class GoogleChatConversationExecutor:
             memory_reply = self._handle_memory_command(context, job, authority, user_text, turns)
             if memory_reply is not None:
                 answer, extra_provenance = memory_reply
+                answer = answer.strip()
+                if not 1 <= len(answer) <= 8_000:
+                    raise RuntimeError("assistant response is invalid")
+                return authority, answer, extra_provenance
+
+        if self._capability_gateway is not None and self._capability_admissions is not None:
+            draft_reply = self._handle_draft_command(context, job, authority, user_text, turns)
+            if draft_reply is not None:
+                answer, extra_provenance = draft_reply
                 answer = answer.strip()
                 if not 1 <= len(answer) <= 8_000:
                     raise RuntimeError("assistant response is invalid")
@@ -473,6 +519,88 @@ class GoogleChatConversationExecutor:
         if intent.state != "requested":
             raise RuntimeError("credential intent is unavailable")
         return intent.id
+
+    # -- Hosted draft-and-approve capability (docs/capability-gateway.md) --
+    # Dormant unless both ``capability_gateway`` and ``capability_admissions``
+    # were injected (ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY), and only ever
+    # injected for the web surface.
+
+    def _handle_draft_command(
+        self, context: TenantContext, job: HostedJob, authority, user_text: str,
+        turns: list[HostedTurn],
+    ) -> tuple[str, dict[str, object]] | None:
+        parsed = _parse_draft_command(user_text)
+        if parsed is None:
+            return None
+        kind, thread_ref, body = parsed
+        if kind == "create":
+            return self._draft_create_propose(context, authority, thread_ref, body)
+        previous_provenance: dict[str, object] = {}
+        if len(turns) >= 2 and turns[-2].actor_type == "assistant":
+            previous_provenance = turns[-2].provenance or {}
+        return self._draft_decide(context, authority, kind, previous_provenance)
+
+    def _draft_create_propose(
+        self, context: TenantContext, authority, thread_ref: str, body: str,
+    ) -> tuple[str, dict[str, object]]:
+        proposal = {
+            "version": 1,
+            "capability": DRAFT_CAPABILITY,
+            "arguments": {"thread_ref": thread_ref, "body": body},
+        }
+        try:
+            authorized = self._capability_gateway.authorize(
+                context, principal_id=authority.principal_id, proposal=proposal,
+            )
+        except CapabilityDenied:
+            return (
+                "I can't prepare that draft — Gmail drafting isn't "
+                "authorized by your current policy.",
+                {},
+            )
+        destination_hash = hashlib.sha256(thread_ref.encode()).digest()
+        recorded = self._capability_admissions.record(
+            context, authorized=authorized, destination_hash=destination_hash,
+        )
+        answer = (
+            f"I've prepared a draft reply in thread {thread_ref}: "
+            f"“{body[:500]}”\n"
+            "Reply “approve draft” to create it in Gmail, or "
+            "“reject draft” to discard it."
+        )
+        return answer, {"pending_draft_approval_id": str(recorded.approval_id)}
+
+    def _draft_decide(
+        self, context: TenantContext, authority, decision: str,
+        previous_provenance: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        pending = previous_provenance.get("pending_draft_approval_id")
+        approval_id: UUID | None = None
+        if isinstance(pending, str):
+            try:
+                approval_id = UUID(pending)
+            except ValueError:
+                approval_id = None
+        if approval_id is None:
+            verb = "approve" if decision == "approve" else "reject"
+            return f"There's no pending draft to {verb}.", {}
+        try:
+            status = self._capability_admissions.decide(
+                context, approval_id=approval_id,
+                principal_id=authority.principal_id,
+                decision="approved" if decision == "approve" else "rejected",
+            )
+        except Exception:
+            return (
+                "I approved that, but couldn't queue the draft creation "
+                "— please try again.",
+                {},
+            )
+        if status == "rejected":
+            return "Okay, I discarded that draft.", {}
+        if status == "consumed":
+            return "Approved — I'm creating that draft in Gmail now.", {}
+        return "That draft approval is no longer available.", {}
 
     # -- Hosted conversational memory (docs/hosted-memory.md) --------------
     # Dormant unless ``memory`` was injected (ATTUNE_ENABLE_HOSTED_MEMORY).
@@ -738,4 +866,26 @@ def _parse_memory_command(text: str) -> tuple[str, str | None] | None:
     if lower.startswith("remember "):
         fact = stripped[len("remember "):].strip()
         return ("remember", fact) if fact else None
+    return None
+
+
+def _parse_draft_command(text: str) -> tuple[str, str | None, str | None] | None:
+    """Deterministic-first draft-and-approve command grammar (docs/
+    capability-gateway.md), checked before ``_WRITE`` so a matched command
+    never reaches the generic mutation-refusal path. ``"draft reply
+    <thread>: <body>"`` proposes a draft; ``"approve draft"``/``"reject
+    draft"`` decide the most recently proposed one (tracked the same way
+    ``pending_forget_memory_id`` tracks a pending memory deletion --
+    conversation_turns.provenance, never worker-local state)."""
+    stripped = text.strip()
+    lower = stripped.lower()
+    if lower == "approve draft":
+        return ("approve", None, None)
+    if lower == "reject draft":
+        return ("reject", None, None)
+    match = _DRAFT_CREATE.match(stripped)
+    if match:
+        thread_ref, body = match.group(1), match.group(2).strip()
+        if body:
+            return ("create", thread_ref, body)
     return None

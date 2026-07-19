@@ -51,6 +51,21 @@ def test_google_profile_route_is_registered_only_with_explicit_executor():
     assert calls == [(context, profile_job)]
 
 
+def test_gmail_draft_create_route_requires_explicit_executor():
+    calls = []
+    assert "google.gmail.draft.create" not in registered_routes()
+    routes = registered_routes(
+        google_gmail_draft_create=lambda *args: calls.append(args)
+    )
+    assert set(routes) == {"platform.smoke", "google.gmail.draft.create"}
+    route = routes["google.gmail.draft.create"]
+    assert route.capability == "google.gmail.draft.create"
+    context = TenantContext(UUID("10000000-0000-4000-8000-000000000716"))
+    draft_job = job({"thread_ref": "thread_1"})
+    route.execute(context, draft_job)
+    assert calls == [(context, draft_job)]
+
+
 def test_workspace_verification_route_requires_explicit_executor():
     calls = []
     routes = registered_routes(

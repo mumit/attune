@@ -51,6 +51,7 @@ FUNCTION_OWNER_ROLES = (
     "attune_export_cleanup_coordinator",
     "attune_export_download_coordinator",
     "attune_web_message_executor",
+    "attune_capability_executor",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -353,6 +354,11 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
         ("attune_web_message_executor", "attune.audit_intents", "SELECT"),
         ("attune_web_message_executor", "attune.audit_intents", "INSERT"),
         ("attune_web_message_executor", "attune.audit_intents", "UPDATE"),
+        ("attune_capability_executor", "attune.approvals", "SELECT"),
+        ("attune_capability_executor", "attune.approvals", "UPDATE"),
+        ("attune_capability_executor", "attune.capability_admissions", "SELECT"),
+        ("attune_capability_executor", "attune.connectors", "SELECT"),
+        ("attune_capability_executor", "attune.policies", "SELECT"),
     }
 )
 
@@ -401,6 +407,7 @@ TENANT_TABLES = (
     "hosted_channel_credentials",
     "importance_signals",
     "attention_items",
+    "capability_admissions",
 )
 
 validate_relational_lifecycle_inventory(TENANT_TABLES)
@@ -673,6 +680,7 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             "attune_export_cleanup_coordinator": (True, False, True, False),
             "attune_export_download_coordinator": (True, False, True, False),
             "attune_web_message_executor": (True, False, True, False),
+            "attune_capability_executor": (True, False, False, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
@@ -915,6 +923,11 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune.complete_google_chat_conversation_delivery(uuid,bytea,boolean,bytea)",
                 "attune_channel_broker",
                 "attune_channel_link_executor",
+            ),
+            (
+                "attune.claim_capability_approval(uuid,uuid,text)",
+                "attune_worker",
+                "attune_capability_executor",
             ),
         )
         for signature, role, expected_owner in privileged_functions:

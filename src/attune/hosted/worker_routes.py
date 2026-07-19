@@ -18,6 +18,7 @@ def registered_routes(
     *,
     google_gmail_profile: JobExecutor | None = None,
     google_workspace_verification: JobExecutor | None = None,
+    google_gmail_draft_create: JobExecutor | None = None,
     google_chat_conversation: JobExecutor | None = None,
     slack_conversation: JobExecutor | None = None,
     web_conversation: JobExecutor | None = None,
@@ -31,6 +32,13 @@ def registered_routes(
             google_gmail_profile,
         )
         routes[profile.purpose] = profile
+    if google_gmail_draft_create is not None:
+        draft_create = TaskRoute(
+            "google.gmail.draft.create",
+            "google.gmail.draft.create",
+            google_gmail_draft_create,
+        )
+        routes[draft_create.purpose] = draft_create
     if google_workspace_verification is not None:
         verification = TaskRoute(
             "google.workspace.connection.verify",

@@ -17,6 +17,8 @@ from uuid import UUID
 
 from .durable import HostedTurn
 from .google_chat_conversation_executor import (
+    DraftCapabilityAdmissions,
+    DraftCapabilityGateway,
     GoogleChatConversationExecutor,
     MemoryAuditSink,
     MemoryRepository,
@@ -194,6 +196,8 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
         timezone_name: str = "UTC",
         memory: MemoryRepository | None = None,
         memory_audit: MemoryAuditSink | None = None,
+        capability_gateway: DraftCapabilityGateway | None = None,
+        capability_admissions: DraftCapabilityAdmissions | None = None,
     ):
         super().__init__(
             work, intents, workspace, models, None,
@@ -201,6 +205,8 @@ class WebConversationExecutor(GoogleChatConversationExecutor):
             reply_method="_web_conversation_has_no_reply_broker",
             intent_key_prefix="attune-web-converse-v1:",
             memory=memory, memory_audit=memory_audit,
+            capability_gateway=capability_gateway,
+            capability_admissions=capability_admissions,
         )
 
     def __call__(self, context: TenantContext, job: HostedJob) -> None:

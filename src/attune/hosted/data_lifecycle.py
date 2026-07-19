@@ -86,7 +86,8 @@ RELATIONAL_ASSETS = (
         customer_export=False,
     ),
     *_assets(
-        "jobs approvals provider_events job_retries workflow_checkpoints "
+        "jobs approvals capability_admissions provider_events job_retries "
+        "workflow_checkpoints "
         "usage_records dispatch_intents credential_intents job_reconciliations "
         "oauth_transactions identity_sessions hosted_channel_setup_transactions "
         "hosted_channel_routes hosted_channel_deliveries export_jobs "

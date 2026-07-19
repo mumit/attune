@@ -167,6 +167,25 @@ def test_mutation_request_is_refused_without_workspace_or_answer_model():
     assert replies.calls
 
 
+def test_draft_capability_is_never_wired_for_the_chat_surface():
+    """Pin: the draft-and-approve capability (docs/capability-gateway.md)
+    is wired only for the web surface -- worker_app.py never passes
+    capability_gateway/capability_admissions to this executor, so
+    "draft reply ...: ..." and "approve draft" on Google Chat stay exactly
+    what they were before this capability existed: ordinary write-shaped
+    or general text."""
+    work, intents, workspace, models, replies = execute(
+        "draft reply thread_1: catch you tomorrow", classification="general",
+    )
+    assert intents.calls == [] and workspace.calls == []
+    assert "does not perform" in work.appended[0]["content"]
+
+    work, intents, workspace, models, replies = execute(
+        "approve draft", classification="general",
+    )
+    assert [call["task"] for call in models.calls] == ["classify", "converse"]
+
+
 def test_workspace_intent_is_attempt_bound_and_consumed_intent_fails_closed():
     executor = GoogleChatConversationExecutor(
         Work("Check Gmail"), Intents("consumed"), Workspace(), Models(), Replies(),

@@ -14,10 +14,13 @@ GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 CALENDAR_PRIMARY_URL = "https://www.googleapis.com/calendar/v3/calendars/primary"
 GMAIL_THREADS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/threads"
+GMAIL_DRAFTS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
 CALENDAR_EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 MAX_PROVIDER_RESPONSE_BYTES = 32_768
 MAX_ACCESS_TOKEN_CHARS = 8_192
+MAX_DRAFT_BODY_CHARS = 10_000
 REQUEST_TIMEOUT = (3.05, 10)
 _GMAIL_RESOURCE = re.compile(r"^[A-Za-z0-9_-]{1,180}$")
 
@@ -68,6 +71,18 @@ class GmailThreadSummary:
             "date": self.date,
             "snippet": self.snippet,
         }
+
+
+@dataclass(frozen=True)
+class GmailDraftCreated:
+    draft_id: str
+
+    def response(self) -> dict[str, Any]:
+        # Response minimization (docs/secret-broker.md): the broker returns
+        # only the new draft's id. Gmail's own response also carries a
+        # nested "message" object (thread id, label ids, snippet, ...);
+        # none of it leaves the broker.
+        return {"draft_id": self.draft_id}
 
 
 @dataclass(frozen=True)
@@ -206,6 +221,41 @@ class GoogleProvider:
             raise ProviderFailure("invalid Calendar event listing")
         return tuple(_calendar_event_summary(item) for item in items)
 
+    def gmail_draft_create(
+        self, credential: Mapping[str, Any], *, thread_ref: str, body: str
+    ) -> GmailDraftCreated:
+        """Construct and send the exact Gmail ``drafts.create`` request.
+
+        The broker builds the request entirely from the canonical capability
+        arguments and the connector's own credential -- never from a caller-
+        supplied URL, recipient, or raw provider request. This capability's
+        schema carries only a thread reference and a body (docs/capability-
+        gateway.md): the MIME message therefore has no explicit To/Subject
+        headers and relies on Gmail's own thread-reply semantics to resolve
+        them from ``thread_ref``. That is a documented scope limit, not an
+        oversight -- see docs/capability-gateway.md's remaining bindings.
+        """
+
+        if not isinstance(thread_ref, str) or not _GMAIL_RESOURCE.fullmatch(thread_ref):
+            raise ValueError("Gmail thread reference is invalid")
+        if not isinstance(body, str) or not 1 <= len(body) <= MAX_DRAFT_BODY_CHARS:
+            raise ValueError("Gmail draft body is invalid")
+        oauth = _authorized_user_credential(credential, GMAIL_COMPOSE_SCOPE)
+        access_token = self._access_token(oauth)
+        raw = _encode_draft_message(body)
+        created = self._post_json(
+            GMAIL_DRAFTS_URL,
+            access_token,
+            body={"message": {"threadId": thread_ref, "raw": raw}},
+        )
+        draft_id = created.get("id")
+        if (
+            not isinstance(draft_id, str)
+            or not _GMAIL_RESOURCE.fullmatch(draft_id)
+        ):
+            raise ProviderFailure("invalid Gmail draft response")
+        return GmailDraftCreated(draft_id)
+
     def _access_token(self, oauth: Mapping[str, str]) -> str:
         try:
             token_response = self._session.post(
@@ -256,6 +306,26 @@ class GoogleProvider:
             raise ProviderFailure("provider read failed") from error
         return _json_response(response, expected_status=200)
 
+    def _post_json(
+        self, url: str, access_token: str, *, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            response = self._session.post(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {access_token}",
+                },
+                json=body,
+                allow_redirects=False,
+                timeout=REQUEST_TIMEOUT,
+                stream=True,
+            )
+        except Exception as error:
+            raise ProviderFailure("provider write failed") from error
+        return _json_response(response, expected_status=200)
+
 
 def _authorized_user_credential(
     value: Mapping[str, Any], required_scope: str
@@ -303,6 +373,20 @@ def _json_response(response: Any, *, expected_status: int) -> dict[str, Any]:
             response.close()
         except Exception:
             pass
+
+
+def _encode_draft_message(body: str) -> str:
+    """Deterministic, minimal RFC 5322 message, base64url-encoded for
+    Gmail's ``raw`` draft field. Only a plain-text body is constructed --
+    this capability's schema has no recipient/subject fields (see
+    ``gmail_draft_create``'s docstring)."""
+
+    from base64 import urlsafe_b64encode
+    from email.message import EmailMessage
+
+    message = EmailMessage()
+    message.set_content(body)
+    return urlsafe_b64encode(message.as_bytes()).decode("ascii")
 
 
 def _bounded_count(value: Any) -> bool:

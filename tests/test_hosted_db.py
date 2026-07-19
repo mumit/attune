@@ -66,6 +66,7 @@ from attune.hosted.google_chat_conversation_executor import (
     PostgresGoogleChatConversationWorkRepository,
 )
 from attune.hosted.capability_gateway import (
+    AuthorizedCapability,
     CapabilityDefinition,
     CapabilityDenied,
     CapabilityRegistry,
@@ -74,6 +75,7 @@ from attune.hosted.capability_gateway import (
     RiskTier,
     TypedCapabilityGateway,
 )
+from attune.hosted.capability_admission import PostgresCapabilityAdmissionRepository
 from attune.hosted.identity import VerifiedIdentity
 from attune.hosted.identity_session import (
     IdentitySessionSecrets,
@@ -145,7 +147,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0042_intelligence_persistence.sql"
+    assert migrations[-1].name == "0043_capability_admission.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -282,6 +284,17 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON attune.importance_signals, attune.attention_items" in intelligence
     assert "TO attune_worker" in intelligence
     assert "attune_control_plane" not in intelligence
+    capability_admission = sql_by_name["0043_capability_admission.sql"]
+    assert "CREATE TABLE attune.capability_admissions" in capability_admission
+    assert "capability_admissions_no_update_delete" in capability_admission
+    assert "ALTER TABLE attune.approvals ALTER COLUMN job_id DROP NOT NULL" in capability_admission
+    assert "ADD COLUMN admission_id uuid" in capability_admission
+    assert "attune_capability_executor" in capability_admission
+    assert "claim_capability_approval" in capability_admission
+    assert (
+        "REVOKE UPDATE ON attune.approvals FROM attune_worker, attune_control_plane"
+        in capability_admission
+    )
 
 
 def test_lifecycle_enums_preserve_string_behavior_on_python_310():
@@ -508,7 +521,7 @@ def initialized_database(database_url: str):
             cursor.execute(f'CREATE ROLE "{role}" NOLOGIN INHERIT')
     admin.autocommit = False
 
-    assert apply_migrations(admin) == 42
+    assert apply_migrations(admin) == 43
     with admin.cursor() as cursor:
         cursor.execute("GRANT attune_worker TO attune_test_stale_member")
     admin.commit()
@@ -1901,22 +1914,59 @@ def test_audit_outbox_is_idempotent_and_writer_accepts_only_intent_ids(
 def test_approval_repository_binds_actor_action_version_and_single_use(
     initialized_database, database_url
 ):
+    """attune.approvals now backs a real security transition (migration
+    0043): direct UPDATE is refused for every runtime role, and the sole
+    decide/consume path is the actor-bound, one-use, idempotent-replay
+    attune.claim_capability_approval SECURITY DEFINER function."""
+
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "SELECT version FROM attune.policies WHERE tenant_id = %s AND active",
+            (TENANT_A,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO attune.policies "
+                "(tenant_id, version, document, active, created_by) "
+                "VALUES (%s, 1, '{}'::jsonb, true, %s) RETURNING version",
+                (TENANT_A, PRINCIPAL_A),
+            )
+            row = cursor.fetchone()
+        policy_version = row[0]
+
     factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
-    jobs = PostgresJobRepository(factory)
+    connection = factory()
+    try:
+        with tenant_transaction(connection, TenantContext(TENANT_A)) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO attune.capability_admissions
+                    (tenant_id, principal_id, connector_id, capability,
+                     contract_version, risk, policy_version, arguments)
+                VALUES (%s, %s, %s, %s, 1, 2, %s, %s::jsonb)
+                RETURNING id
+                """,
+                (
+                    TENANT_A,
+                    PRINCIPAL_A,
+                    CONNECTOR_A,
+                    "gmail.draft",
+                    policy_version,
+                    '{"proposal": "opaque"}',
+                ),
+            )
+            admission_id = cursor.fetchone()[0]
+    finally:
+        connection.close()
+
     approvals = PostgresApprovalRepository(factory)
-    job = jobs.enqueue(
-        TenantContext(TENANT_A),
-        kind="gmail.draft",
-        capability="gmail.draft",
-        payload={"proposal": "opaque"},
-        idempotency_key=hashlib.sha256(b"approval-job").digest(),
-    )
     opaque_hash = hashlib.sha256(b"opaque-approval-reference").digest()
     action_hash = hashlib.sha256(b"canonical-action").digest()
     destination_hash = hashlib.sha256(b"destination").digest()
     approval = approvals.propose(
         TenantContext(TENANT_A),
-        job_id=job.id,
+        admission_id=admission_id,
         approver_id=PRINCIPAL_A,
         connector_id=CONNECTOR_A,
         opaque_ref_hash=opaque_hash,
@@ -1924,53 +1974,201 @@ def test_approval_repository_binds_actor_action_version_and_single_use(
         capability="gmail.draft",
         destination_hash=destination_hash,
         source_version="history-123",
-        policy_version=1,
+        policy_version=policy_version,
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
+    assert approval.status == "pending"
+    assert approval.surface == "web"
+    assert approval.job_id is None
+    assert approval.admission_id == admission_id
+
+    worker_connection = factory()
+    try:
+        with pytest.raises(Exception, match="permission denied"):
+            with tenant_transaction(worker_connection, TenantContext(TENANT_A)) as cursor:
+                cursor.execute(
+                    "UPDATE attune.approvals SET status = 'rejected' WHERE id = %s",
+                    (approval.id,),
+                )
+    finally:
+        worker_connection.close()
+
+    control_plane_factory = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )
+    control_plane_connection = control_plane_factory()
+    try:
+        with pytest.raises(Exception, match="permission denied"):
+            with tenant_transaction(
+                control_plane_connection, TenantContext(TENANT_A)
+            ) as cursor:
+                cursor.execute(
+                    "UPDATE attune.approvals SET status = 'rejected' WHERE id = %s",
+                    (approval.id,),
+                )
+    finally:
+        control_plane_connection.close()
+
+    # Wrong tenant, then wrong approver: neither can claim it.
     assert (
-        approvals.decide(
+        approvals.claim(
             TenantContext(TENANT_B),
-            opaque_ref_hash=opaque_hash,
-            approver_id=PRINCIPAL_A,
+            approval_id=approval.id,
+            principal_id=PRINCIPAL_A,
             decision="approved",
         )
         is None
     )
-    decided = approvals.decide(
-        TenantContext(TENANT_A),
-        opaque_ref_hash=opaque_hash,
-        approver_id=PRINCIPAL_A,
-        decision="approved",
-    )
-    assert decided is not None and decided.id == approval.id
     assert (
-        approvals.consume(
+        approvals.claim(
             TenantContext(TENANT_A),
             approval_id=approval.id,
-            expected_action_hash=hashlib.sha256(b"changed-action").digest(),
-            expected_source_version="history-123",
-            expected_policy_version=1,
+            principal_id=PRINCIPAL_B,
+            decision="approved",
         )
         is None
     )
-    consumed = approvals.consume(
+
+    claimed = approvals.claim(
         TenantContext(TENANT_A),
         approval_id=approval.id,
-        expected_action_hash=action_hash,
-        expected_source_version="history-123",
-        expected_policy_version=1,
+        principal_id=PRINCIPAL_A,
+        decision="approved",
     )
-    assert consumed is not None and consumed.status == "consumed"
-    assert (
-        approvals.consume(
-            TenantContext(TENANT_A),
-            approval_id=approval.id,
-            expected_action_hash=action_hash,
-            expected_source_version="history-123",
-            expected_policy_version=1,
+    assert claimed is not None
+    assert claimed.final_status == "consumed"
+    assert claimed.admission_id == admission_id
+    assert claimed.capability == "gmail.draft"
+    assert dict(claimed.arguments) == {"proposal": "opaque"}
+    assert claimed.connector_id == CONNECTOR_A
+    assert claimed.policy_version == policy_version
+
+    # One-use: replaying the same decision returns the recorded outcome
+    # rather than erroring or mutating anything again (SEC-501).
+    replay = approvals.claim(
+        TenantContext(TENANT_A),
+        approval_id=approval.id,
+        principal_id=PRINCIPAL_A,
+        decision="approved",
+    )
+    assert replay is not None
+    assert replay.final_status == "consumed"
+    assert dict(replay.arguments) == {"proposal": "opaque"}
+
+    # A pending approval that is instead rejected never returns arguments.
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            """
+            INSERT INTO attune.approvals
+                (tenant_id, admission_id, approver_id, connector_id,
+                 opaque_ref_hash, action_hash, capability, destination_hash,
+                 source_version, policy_version, surface, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'web', %s)
+            RETURNING id
+            """,
+            (
+                TENANT_A,
+                admission_id,
+                PRINCIPAL_A,
+                CONNECTOR_A,
+                hashlib.sha256(b"opaque-approval-reference-2").digest(),
+                action_hash,
+                "gmail.draft",
+                destination_hash,
+                "history-123",
+                policy_version,
+                datetime.now(timezone.utc) + timedelta(minutes=10),
+            ),
         )
-        is None
+        second_approval_id = cursor.fetchone()[0]
+    rejected = approvals.claim(
+        TenantContext(TENANT_A),
+        approval_id=second_approval_id,
+        principal_id=PRINCIPAL_A,
+        decision="rejected",
     )
+    assert rejected is not None
+    assert rejected.final_status == "rejected"
+    assert rejected.arguments is None
+
+
+def test_capability_admission_repository_persists_atomically_and_never_dispatches(
+    initialized_database, database_url
+):
+    """PostgresCapabilityAdmissionRepository.record() -- admission is never
+    execution authority: it inserts one immutable capability_admissions row
+    and one pending approvals row in the same transaction, and creates no
+    job or dispatch intent."""
+
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "SELECT version FROM attune.policies WHERE tenant_id = %s AND active",
+            (TENANT_A,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "INSERT INTO attune.policies "
+                "(tenant_id, version, document, active, created_by) "
+                "VALUES (%s, 1, '{}'::jsonb, true, %s) RETURNING version",
+                (TENANT_A, PRINCIPAL_A),
+            )
+            row = cursor.fetchone()
+        policy_version = row[0]
+
+    factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    repository = PostgresCapabilityAdmissionRepository(factory)
+    admitted = AuthorizedCapability(
+        context=TenantContext(TENANT_A),
+        principal_id=PRINCIPAL_A,
+        connector_id=CONNECTOR_A,
+        capability="google.gmail.draft.create",
+        contract_version=1,
+        risk=RiskTier.R2,
+        policy_version=policy_version,
+        arguments={"thread_ref": "thread_9", "body": "Ready to ship."},
+    )
+    recorded = repository.record(
+        TenantContext(TENANT_A),
+        authorized=admitted,
+        destination_hash=hashlib.sha256(b"thread_9").digest(),
+        now=datetime.now(timezone.utc),
+    )
+
+    connection = factory()
+    try:
+        with tenant_transaction(connection, TenantContext(TENANT_A)) as cursor:
+            cursor.execute(
+                "SELECT capability, contract_version, risk, policy_version, arguments "
+                "FROM attune.capability_admissions WHERE tenant_id = %s AND id = %s",
+                (TENANT_A, recorded.admission_id),
+            )
+            admission_row = cursor.fetchone()
+            cursor.execute(
+                "SELECT status, admission_id, job_id, surface, policy_version "
+                "FROM attune.approvals WHERE tenant_id = %s AND id = %s",
+                (TENANT_A, recorded.approval_id),
+            )
+            approval_row = cursor.fetchone()
+    finally:
+        connection.close()
+
+    assert admission_row[0] == "google.gmail.draft.create"
+    assert admission_row[1] == 1
+    assert admission_row[2] == 2
+    assert admission_row[3] == policy_version
+    assert dict(admission_row[4]) == {"thread_ref": "thread_9", "body": "Ready to ship."}
+    assert approval_row == (
+        "pending", recorded.admission_id, None, "web", policy_version,
+    )
+    # No job exists yet from this admission alone -- only an approval does.
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM attune.jobs "
+            "WHERE tenant_id = %s AND capability = 'google.gmail.draft.create'",
+            (TENANT_A,),
+        )
+        assert cursor.fetchone()[0] == 0
 
 
 def test_provider_events_and_checkpoints_are_idempotent_and_tenant_scoped(

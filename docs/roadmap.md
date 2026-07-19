@@ -52,11 +52,15 @@ order:
 The first slice of step 5 is live in development: a signed-in owner can start
 and resume a tenant-bound, versioned setup record whose Workspace status is
 derived from canonical connector state. Channels, policy, and activation still
-require fixed server-side ceremonies. Step 6 now has a tested, non-deployed
-admission core for exact proposals, tenant-scoped policy/grant and connector
-resolution, and risk ceilings. Its dispatch integration, execution budgets,
-freshness/idempotency, audit, and approval gates remain; this does not skip the
-remaining work or assurance gates in steps 2–5.
+require fixed server-side ceremonies. Step 6's admission core (exact
+proposals, tenant-scoped policy/grant and connector resolution, risk
+ceilings) is now wired to the real dispatch spine for one capability,
+`google.gmail.draft.create` at R2 -- implemented and tested, not deployed;
+see the Phase 5 stage 3 paragraph below. Rate/cost/concurrency budgets, live
+provider source-freshness re-verification, and admission/approval-decision
+audit remain before that capability's own activation gate can pass; this
+does not skip the remaining work or assurance gates in steps 2–5, and no
+other capability or write surface is wired.
 
 Step 5 also has a live development fixed R0 policy ceremony: recent owner
 authentication, content-free mandatory audit, exact function-owned policy and
@@ -242,6 +246,37 @@ rather than any shared worker process state (SEC-011). See
 pinned as byte-identical to pre-stage-2 conversation handling; there is no
 hosted approval workflow or signal-capture path yet, both deliberately out
 of scope.
+
+Stage 3 of the same effort — wiring the dormant typed capability gateway
+into the dispatch spine, then introducing the first hosted write capability
+(`docs/future-state.md` Phase 5 item 3; `docs/gap-analysis.md` G17; roadmap
+step 6's remaining half) — is implemented and tested behind a default-off
+gate, `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`, and not deployed. One
+capability is registered, `google.gmail.draft.create` v1, at product risk
+tier **R2** per the security architecture's own risk-tier table (not the R1
+this stage's plan initially proposed — see `decisions.md` for why the
+normative table governs). A new migration (0043) adds an immutable,
+append-only `attune.capability_admissions` table and turns the previously
+dormant `attune.approvals` (migration 0001) into a real privilege boundary:
+direct `UPDATE` is revoked from every runtime role, and a new one-use,
+actor-bound SECURITY DEFINER function (`attune.claim_capability_approval`,
+owned by a new memberless role) is the only decide/consume path. The
+approval surface is web-conversation-only, using a deterministic grammar
+mirroring the memory command grammar exactly; admission, approval, and
+dispatch stay three separate steps, and dispatch reuses the existing,
+unmodified dispatch producer and broker client rather than a new one. Gate-
+off (and every non-web surface) behavior is pinned as byte-identical to
+pre-stage-3 mutation refusal. Full detail, including precisely which
+section-8.1 execution-checklist items this slice does and does not satisfy,
+is in [`capability-gateway.md`](capability-gateway.md); the dated design
+record is in [`decisions.md`](decisions.md). No worker deployment sets the
+gate on, the fixed R0 policy grants no tenant R2 authority, and no OAuth
+flow requests the scope this capability requires — no production tenant can
+exercise it. Rate/cost/concurrency budgets, live Gmail thread source-
+freshness re-verification before dispatch, and content-free audit of the
+admission/approval-decision steps themselves (distinct from the job's own
+claim/execute audit, which is unchanged) are genuine remaining gates before
+this capability's activation gate can pass.
 
 ## Later
 

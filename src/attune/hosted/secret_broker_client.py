@@ -125,6 +125,34 @@ class SecretBrokerClient:
             response, key="events", limit=25, parser=_calendar_event
         )
 
+    def google_gmail_draft_create(
+        self, intent_id: UUID, *, thread_ref: str, body: str
+    ) -> str:
+        if not isinstance(intent_id, UUID):
+            raise TypeError("intent_id must be a UUID")
+        response = self._post_body(
+            "/v1/providers/google/gmail/drafts/create",
+            {"intent_id": str(intent_id), "thread_ref": thread_ref, "body": body},
+        )
+        try:
+            if response.status_code != 200:
+                raise RuntimeError("secret broker provider operation failed")
+            content_type = response.headers.get("Content-Type", "")
+            if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                raise RuntimeError("secret broker response type is invalid")
+            try:
+                parsed = json.loads(_bounded_body(response))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RuntimeError("secret broker response is invalid") from error
+            if not isinstance(parsed, dict) or set(parsed) != {"draft_id"}:
+                raise RuntimeError("secret broker response contract is invalid")
+            draft_id = parsed["draft_id"]
+            if not isinstance(draft_id, str) or not 1 <= len(draft_id) <= 180:
+                raise RuntimeError("secret broker response contract is invalid")
+            return draft_id
+        finally:
+            _close(response)
+
     def _post(self, path: str, intent_id: UUID):
         if not isinstance(intent_id, UUID):
             raise TypeError("intent_id must be a UUID")
