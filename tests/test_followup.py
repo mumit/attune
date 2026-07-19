@@ -133,6 +133,17 @@ def test_cooldown_survives_restart(tmp_path):
     assert JsonNudgeState(path).last_nudged("t1") == NOW
 
 
+def test_nudge_state_file_is_chmodded_owner_only(tmp_path):
+    """Security finding F5 (Low): not one of the stores the review named
+    explicitly, but the same class of gap — fixed for consistency."""
+    import os
+
+    path = tmp_path / "nudges.json"
+    JsonNudgeState(str(path)).record_nudge("t1", at=NOW)
+
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+
+
 # ---------------------------------------------------------------------------
 # importance-ranked candidates (Phase 3 stage 1, docs/future-state.md; G10)
 # ---------------------------------------------------------------------------

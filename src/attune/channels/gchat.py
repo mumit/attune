@@ -50,6 +50,22 @@ class GoogleChatChannel:
         send_fn: callable(space, payload) -> sends a Chat message. ``space``
             is a resource name like ``"spaces/AAAA…"``. Inject a fake for
             tests; use ``make_chat_send_fn(credentials)`` in production.
+        allowed_actors: security finding F8 (Low, docs/current-state.md's
+            2026-07-18 review). Before this, authorization for a Chat card
+            click lived only one layer up, in
+            ``dispatcher.handle_chat_interaction`` — this class itself had
+            no actor check, unlike :class:`~attune.channels.slack.SlackChannel`.
+            Mirrors ``SlackChannel``'s exact deny-by-default rule: ``None``
+            or empty refuses every actor (frozenset(allowed_actors or ())),
+            since Chat's transport (webhook verification, one layer further
+            out at the republisher) proves the request came from Google
+            Chat, not WHO clicked. The dispatcher-level check is unaffected
+            by this — it still runs, on the same allowlist, for the async
+            production path; this is defense in depth, not a replacement.
+        on_unauthorized: callable(actor, surface) invoked (in addition to
+            the warning log) whenever :meth:`handle_interaction` refuses an
+            actor — production wires this to the audit log, same as
+            ``SlackChannel``.
     """
 
     def __init__(
@@ -58,10 +74,28 @@ class GoogleChatChannel:
         graph: Any = None,
         resume_fn: Callable[[str, str, str | None], Any] | None = None,
         send_fn: Callable[[str, dict[str, Any]], Any] | None = None,
+        allowed_actors: frozenset[str] | set[str] | None = None,
+        on_unauthorized: Callable[[str, str], None] | None = None,
     ):
         self._graph = graph
         self._resume = resume_fn or self._default_resume
         self._send = send_fn or _no_send_fn
+        # Deny-by-default (finding F8, mirroring SlackChannel._authorized
+        # exactly): None/empty refuses every actor.
+        self._allowed_actors = frozenset(allowed_actors or ())
+        self._on_unauthorized = on_unauthorized
+
+    def _authorized(self, actor: str, surface: str) -> bool:
+        if actor and actor in self._allowed_actors:
+            return True
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "gchat: unauthorized actor %s on %s — refused", actor or "<none>", surface
+        )
+        if self._on_unauthorized is not None:
+            self._on_unauthorized(actor, surface)
+        return False
 
     # --- public surface ----------------------------------------------------
 
@@ -141,6 +175,14 @@ class GoogleChatChannel:
         if interaction is None:
             return None
 
+        # Finding F8: authenticate the human, not just the transport —
+        # webhook verification (the republisher, one layer further out)
+        # proves Google Chat called; only this allowlist proves WHO
+        # clicked. Checked before any resume, mirroring
+        # SlackChannel._authorized's placement in its own button handlers.
+        if not self._authorized(interaction.actor, interaction.decision):
+            return {"text": _REFUSAL.format(actor=interaction.actor or "<none>")}
+
         result = self._resume(
             interaction.thread_id, interaction.decision, interaction.text
         )
@@ -161,6 +203,13 @@ class GoogleChatChannel:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_REFUSAL = (
+    "⛔ I don't recognize you (your Chat user is {actor}). This assistant "
+    "acts for one person; ask the owner to add your id to "
+    "ATTUNE_CHAT_ALLOWED_USERS if this is a mistake."
+)
 
 
 def _get_param(action: dict[str, Any], key: str) -> str | None:

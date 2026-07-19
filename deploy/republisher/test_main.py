@@ -224,6 +224,115 @@ def test_verify_chat_request_rejects_invalid_token():
 
 
 # ---------------------------------------------------------------------------
+# Finding F4's negative matrix: malformed token, wrong audience, expired
+# token — each exercised through the same injected verify_fn seam real
+# ``google.auth``/``id_token.verify_oauth2_token`` sits behind in
+# production, since that's the only place these failure modes are
+# observable without a live Google-signed token. Combined with the tests
+# above (missing token, wrong email claim, generic invalid token) and below
+# (correct token accepted), this is the complete matrix Finding F4 asked
+# for; the one thing none of it proves is a live Chat app's own tokens
+# round-tripping — see main.py's module docstring.
+# ---------------------------------------------------------------------------
+
+
+def test_verify_chat_request_rejects_malformed_token():
+    """A token that isn't even JWT-shaped (no three dot-separated segments)
+    — google-auth's real verifier raises a DecodeError-style exception for
+    this; here the fake verifier raises the same shape of error so the
+    rejection path is exercised without needing a live JWT library call."""
+    verify_fn = _verify_fn(
+        raise_exc=ValueError("Wrong number of segments in token: b'not-a-jwt'")
+    )
+    ok = verify_chat_request(
+        {"Authorization": "Bearer not-a-jwt"}, audience="aud", verify_fn=verify_fn
+    )
+    assert ok is False
+
+
+def test_verify_chat_request_rejects_wrong_audience():
+    """google-auth's verify_oauth2_token itself raises when the token's
+    ``aud`` claim doesn't match the audience it was asked to verify against
+    — simulate that real behavior in the injected verifier rather than
+    relying on verify_chat_request to do its own audience comparison (it
+    doesn't; the audience check is the verifier's job, which is exactly why
+    this case matters as its own test)."""
+
+    def _fn(token, audience):
+        if audience != "https://correct-service.example/chat-interaction":
+            raise ValueError(
+                f"Wrong recipient, payload audience != requested audience, "
+                f"got {audience!r}"
+            )
+        return {"email": "chat@system.gserviceaccount.com"}
+
+    ok = verify_chat_request(
+        {"Authorization": "Bearer good-token"},
+        audience="https://attacker-controlled.example/chat-interaction",
+        verify_fn=_fn,
+    )
+    assert ok is False
+
+
+def test_verify_chat_request_rejects_expired_token():
+    """However google-auth surfaces expiry (its exact exception type isn't
+    this module's concern — verify_chat_request's ``except Exception``
+    catches whatever shape it takes), an expired token must not verify."""
+    verify_fn = _verify_fn(
+        raise_exc=ValueError("Token expired, 1700000000 < 1700003600")
+    )
+    ok = verify_chat_request(
+        {"Authorization": "Bearer expired-token"}, audience="aud", verify_fn=verify_fn
+    )
+    assert ok is False
+
+
+def test_chat_interaction_route_rejects_wrong_audience(client):
+    """Route-level companion to test_verify_chat_request_rejects_wrong_audience
+    — confirms the 403 actually surfaces through /chat-interaction, not just
+    through the unit-level helper."""
+    fake = _FakePublisher()
+    app.config["INTERACTION_PUBLISHER"] = fake
+    app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
+    app.config["CHAT_AUDIENCE"] = "https://correct-service.example/chat-interaction"
+
+    def _fn(token, audience):
+        if audience != "https://correct-service.example/chat-interaction":
+            raise ValueError("Wrong recipient")
+        return {"email": "chat@system.gserviceaccount.com"}
+
+    app.config["VERIFY_CHAT_FN"] = _fn
+    app.config["CHAT_AUDIENCE"] = "https://wrong-service.example/chat-interaction"
+
+    resp = client.post(
+        "/chat-interaction",
+        json=_chat_click("attune_approve", "t-1"),
+        headers=_authed(),
+    )
+
+    assert resp.status_code == 403
+    assert fake.calls == []
+
+
+def test_chat_interaction_route_rejects_expired_token(client):
+    fake = _FakePublisher()
+    app.config["INTERACTION_PUBLISHER"] = fake
+    app.config["INTERACTION_TOPIC"] = "projects/p/topics/chat-interaction"
+    app.config["VERIFY_CHAT_FN"] = _verify_fn(
+        raise_exc=ValueError("Token expired")
+    )
+
+    resp = client.post(
+        "/chat-interaction",
+        json=_chat_click("attune_approve", "t-1"),
+        headers=_authed(),
+    )
+
+    assert resp.status_code == 403
+    assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
 # /chat-interaction endpoint
 # ---------------------------------------------------------------------------
 

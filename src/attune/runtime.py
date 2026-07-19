@@ -1691,10 +1691,31 @@ def build_runtime(
     )
     if resolved_gchat is None and settings.chat_default_space and channel_uses_chat:
         from .channels import GoogleChatChannel, make_chat_send_fn
+
+        def _audit_unauthorized_gchat(actor: str, surface: str) -> None:
+            resolved_app.audit_log.record(
+                thread_id="ops:gchat",
+                workflow="ops",
+                events=[{
+                    "event": "unauthorized_actor",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "actor": actor,
+                    "surface": f"gchat:{surface}",
+                }],
+                domain="ops",
+                user_id=settings.user_id,
+            )
+
         resolved_gchat = GoogleChatChannel(
             graph=resolved_app.graph,
             resume_fn=_bound_resume,
             send_fn=make_chat_send_fn(load_google_chat_credentials(settings)),
+            # Security finding F8: in-class actor guard, same allowlist the
+            # dispatcher-level check (handle_chat_interaction's
+            # allowed_actors) already enforces one layer up — defense in
+            # depth, not a replacement for it.
+            allowed_actors=settings.chat_allowed_users,
+            on_unauthorized=_audit_unauthorized_gchat,
         )
 
     resolved_chat_events_service = chat_events_service

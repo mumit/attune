@@ -3890,3 +3890,303 @@ def test_phase3_exit_criterion_normal_day_all_four_proposal_kinds(tmp_path):
     assert invite_line.endswith("approval card pending")
     assert "approval card pending" not in accepted_line  # no card for this one
     assert waiting_line.endswith("approval card pending")
+
+
+# ---------------------------------------------------------------------------
+# Security finding F9 (Info): local rate ceilings — no model calls, both
+# bounded and deterministic. Two independent surfaces:
+#   1. InboundRateLimiter — per-(channel, user) sliding window, checked at
+#      the top of _respond_to_message (handle_chat_message/
+#      handle_slack_message's shared routing).
+#   2. handle_gmail_notification's per-run triage/draft batch ceiling.
+# ---------------------------------------------------------------------------
+
+
+from attune.dispatcher import (  # noqa: E402
+    DEFAULT_INBOUND_RATE_LIMIT,
+    DEFAULT_TRIAGE_BATCH_LIMIT,
+    RATE_LIMIT_WINDOW_SECONDS,
+    InboundRateLimiter,
+)
+
+
+# --- InboundRateLimiter: window math, in isolation ------------------------
+
+
+def test_rate_limiter_allows_up_to_the_ceiling():
+    limiter = InboundRateLimiter()
+    t0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+    for _ in range(5):
+        assert limiter.allow("chat", "u1", max_messages=5, now=t0) is True
+    assert limiter.allow("chat", "u1", max_messages=5, now=t0) is False
+
+
+def test_rate_limiter_is_per_channel_and_per_user():
+    limiter = InboundRateLimiter()
+    t0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+    assert limiter.allow("chat", "u1", max_messages=1, now=t0) is True
+    assert limiter.allow("chat", "u1", max_messages=1, now=t0) is False
+    # a different user, or a different channel for the same user, is a
+    # separate window
+    assert limiter.allow("chat", "u2", max_messages=1, now=t0) is True
+    assert limiter.allow("slack", "u1", max_messages=1, now=t0) is True
+
+
+def test_rate_limiter_slides_the_window_forward():
+    limiter = InboundRateLimiter()
+    t0 = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+    assert limiter.allow("chat", "u1", max_messages=1, now=t0) is True
+    assert limiter.allow("chat", "u1", max_messages=1, now=t0) is False
+
+    # just before the window elapses: still blocked
+    almost = t0 + timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS - 1)
+    assert limiter.allow("chat", "u1", max_messages=1, now=almost) is False
+
+    # once the window has fully elapsed: allowed again
+    later = t0 + timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS + 1)
+    assert limiter.allow("chat", "u1", max_messages=1, now=later) is True
+
+
+def test_rate_limiter_defaults_match_documented_constants():
+    assert DEFAULT_INBOUND_RATE_LIMIT == 20
+    assert RATE_LIMIT_WINDOW_SECONDS == 300
+
+
+# --- integration: handle_chat_message / handle_slack_message -------------
+
+
+def _rate_app_ctx(max_messages=None):
+    from attune.app import AppContext
+    from attune.config import Settings
+
+    env = {"ATTUNE_WORKSPACE_BACKEND": "mcp", "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": ""}
+    if max_messages is not None:
+        env["ATTUNE_INBOUND_RATE_LIMIT"] = str(max_messages)
+    settings = Settings.from_env(env)
+    return AppContext(
+        graph=_FakeGraph(),
+        client=_FakeClient(),
+        store=_FakeMemoryStore(),
+        settings=settings,
+        audit_log=_FakeAuditLog(),
+    )
+
+
+def test_settings_expose_inbound_rate_limit_and_triage_batch_limit():
+    from attune.config import Settings
+
+    defaults = Settings.from_env({})
+    assert defaults.inbound_rate_limit == 20
+    assert defaults.triage_batch_limit == 25
+
+    overridden = Settings.from_env({
+        "ATTUNE_INBOUND_RATE_LIMIT": "3",
+        "ATTUNE_TRIAGE_BATCH_LIMIT": "5",
+    })
+    assert overridden.inbound_rate_limit == 3
+    assert overridden.triage_batch_limit == 5
+
+
+def test_message_beyond_rate_limit_gets_fixed_refusal_and_content_free_audit():
+    app = _rate_app_ctx(max_messages=1)
+    audit_log = app.audit_log
+    limiter = InboundRateLimiter()
+    posted = []
+
+    handle_slack_message(
+        app, text="first message", user_id="u1", post_text=posted.append,
+        rate_limiter=limiter, audit_log=audit_log,
+    )
+    handle_slack_message(
+        app, text="second message — should be refused", user_id="u1",
+        post_text=posted.append, rate_limiter=limiter, audit_log=audit_log,
+    )
+
+    assert len(posted) == 2
+    assert "wait" in posted[1].lower()
+    # content-free: no message text anywhere in the audit event
+    rate_limited_events = [
+        e for rec in audit_log.records for e in rec["events"]
+        if e["event"] == "inbound_rate_limited"
+    ]
+    assert len(rate_limited_events) == 1
+    event = rate_limited_events[0]
+    assert event["channel"] == "slack"
+    assert event["max_messages"] == 1
+    assert "first message" not in str(event)
+    assert "second message" not in str(event)
+    assert "text" not in event
+
+
+def test_message_under_rate_limit_is_not_refused():
+    app = _rate_app_ctx(max_messages=20)
+    limiter = InboundRateLimiter()
+    posted = []
+
+    handle_chat_message(
+        app, _chat_event("brief"),
+        post_text=posted.append, user_id="u1", rate_limiter=limiter,
+        brief_fn=lambda: "all quiet",
+    )
+
+    assert posted == ["all quiet"]
+
+
+def test_rate_limit_is_scoped_per_channel_through_the_real_handlers():
+    """A user hitting the ceiling on Slack must not be refused on Chat —
+    the two entry points share _respond_to_message, but the limiter keys
+    on channel too."""
+    app = _rate_app_ctx(max_messages=1)
+    limiter = InboundRateLimiter()
+    posted = []
+
+    handle_slack_message(
+        app, text="hi", user_id="same-user", post_text=posted.append,
+        rate_limiter=limiter,
+    )
+    handle_chat_message(
+        app, _chat_event("brief"),
+        post_text=posted.append, user_id="same-user", rate_limiter=limiter,
+        brief_fn=lambda: "all quiet",
+    )
+
+    assert posted == ["assistant reply", "all quiet"]
+
+
+# --- handle_gmail_notification's per-run batch ceiling --------------------
+
+
+def _threads(n: int) -> dict:
+    return {
+        f"t{i}": _FakeThread(thread_id=f"t{i}", subject=f"Subject {i}")
+        for i in range(n)
+    }
+
+
+def test_batch_over_limit_enqueues_overflow_to_retry_queue():
+    class _Queue:
+        def __init__(self):
+            self.calls = []
+
+        def enqueue(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    total = DEFAULT_TRIAGE_BATCH_LIMIT + 3
+    thread_ids = [f"t{i}" for i in range(total)]
+    connector = _FakeConnector(_threads(total))
+    queue = _Queue()
+    audit_log = _FakeAuditLog()
+
+    submitted = handle_gmail_notification(
+        _fake_app_ctx(graph=_FakeGraph()),
+        {"emailAddress": "me@example.com", "historyId": "700"},
+        gmail_service=_FakeGmail(thread_ids),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        retry_queue=queue,
+        audit_log=audit_log,
+    )
+
+    # exactly the batch limit was actually submitted
+    assert len(submitted) == DEFAULT_TRIAGE_BATCH_LIMIT
+    # the 3 overflow threads were enqueued — reusing the same "gmail_thread"
+    # retry shape the fetch-failure path uses — NOT dropped
+    assert len(queue.calls) == 3
+    enqueued_refs = {call[0][1] for call in queue.calls}
+    assert enqueued_refs == {f"t{i}" for i in range(DEFAULT_TRIAGE_BATCH_LIMIT, total)}
+    for args, _ in queue.calls:
+        assert args[0] == "gmail_thread"
+        assert args[2] == {"history_id": "700"}
+
+    # audited
+    overflow_events = [
+        e for rec in audit_log.records for e in rec["events"]
+        if e["event"] == "batch_overflow_enqueued"
+    ]
+    assert len(overflow_events) == 3
+    assert all(e["enqueued"] is True for e in overflow_events)
+    assert all(e["batch_limit"] == DEFAULT_TRIAGE_BATCH_LIMIT for e in overflow_events)
+
+
+def test_batch_limit_is_configurable_via_settings():
+    from attune.app import AppContext
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_WORKSPACE_BACKEND": "mcp", "ATTUNE_MEM0_URL": "",
+        "ATTUNE_AUDIT_LOG_PATH": "", "ATTUNE_TRIAGE_BATCH_LIMIT": "2",
+    })
+    app = AppContext(
+        graph=_FakeGraph(), client=_FakeClient(), store=_FakeMemoryStore(),
+        settings=settings, audit_log=_FakeAuditLog(),
+    )
+    thread_ids = ["t0", "t1", "t2"]
+    connector = _FakeConnector(_threads(3))
+
+    submitted = handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "701"},
+        gmail_service=_FakeGmail(thread_ids),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+    )
+
+    assert len(submitted) == 2
+
+
+def test_batch_overflow_without_retry_queue_is_still_audited():
+    """No retry_queue configured is the same accepted limitation the
+    fetch-failure path already has — but the overflow must still be
+    visible in the audit trail, not silently swallowed."""
+    total = DEFAULT_TRIAGE_BATCH_LIMIT + 1
+    thread_ids = [f"t{i}" for i in range(total)]
+    connector = _FakeConnector(_threads(total))
+    audit_log = _FakeAuditLog()
+
+    handle_gmail_notification(
+        _fake_app_ctx(graph=_FakeGraph()),
+        {"emailAddress": "me@example.com", "historyId": "702"},
+        gmail_service=_FakeGmail(thread_ids),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        audit_log=audit_log,
+    )
+
+    overflow_events = [
+        e for rec in audit_log.records for e in rec["events"]
+        if e["event"] == "batch_overflow_enqueued"
+    ]
+    assert len(overflow_events) == 1
+    assert overflow_events[0]["enqueued"] is False
+
+
+def test_batch_within_limit_is_unaffected():
+    """Regression pin: a notification at or under the batch limit behaves
+    exactly as before this change — nothing enqueued, nothing audited as
+    overflow."""
+    thread_ids = [f"t{i}" for i in range(5)]
+    connector = _FakeConnector(_threads(5))
+    audit_log = _FakeAuditLog()
+
+    submitted = handle_gmail_notification(
+        _fake_app_ctx(graph=_FakeGraph()),
+        {"emailAddress": "me@example.com", "historyId": "703"},
+        gmail_service=_FakeGmail(thread_ids),
+        watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+        audit_log=audit_log,
+    )
+
+    assert len(submitted) == 5
+    overflow_events = [
+        e for rec in audit_log.records for e in rec["events"]
+        if e["event"] == "batch_overflow_enqueued"
+    ]
+    assert overflow_events == []

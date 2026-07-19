@@ -1961,3 +1961,155 @@ choices and their reasoning.
   before dispatch, and admission/approval-decision audit through the
   private writer are genuine remaining gates before activation, listed in
   `docs/capability-gateway.md`.
+
+## 2026-07-19 — Phase 6 security hardening: F3, F4, F5, F6, F8, F9
+
+Closes the remaining local-runtime findings from the 2026-07-18 security
+review (`docs/current-state.md`; `docs/future-state.md`'s Phase 6 backlog,
+gap G21) except F7, which the hosted memory design already satisfied. F1
+(audit hash chain) and F2 (fslock) shipped earlier. Each of the six below
+is intentionally small and honest about its own limits — none of this
+claims to close a class of vulnerability, only the specific finding named.
+
+- **F3 — a log-redaction filter, paired with the discipline, not a
+  replacement for it.** `logging_setup.py`'s docstring said redaction was
+  "a writing discipline, not a filter" — true, and, on its own,
+  insufficient (SEC-304): one careless `logger.info(f"token={token}")`
+  slips past review once. `RedactionFilter` (a `logging.Filter` installed
+  on the root handler by `configure()`) now scrubs six secret shapes —
+  `Bearer` tokens, `ya29.` Google access tokens, `refresh_token`
+  JSON/kwarg fields, PEM private-key blocks, Slack `xoxb-`/`xoxp-`/`xapp-`
+  tokens, `sk-`-prefixed API keys — from both the rendered message and any
+  `%`-style args, replacing each with `[REDACTED:<kind>]`. Every pattern is
+  a bounded, anchored regex (a length-capped, lazy quantifier for the
+  multi-line PEM case) verified against a 100KB adversarial line so
+  catastrophic backtracking isn't a new footgun. This is explicitly
+  defense in depth: the filter only catches shapes it recognizes — a
+  token embedded in a full response body, or an unfamiliar credential
+  format, still depends on the writing discipline the docstring already
+  demanded. Logging a secret is still a bug; the filter is a safety net,
+  not a license.
+- **F4 — the republisher's OIDC negative matrix is now complete; the live
+  exercise is not, and the docstring still says so.** `deploy/republisher/
+  main.py` self-reported the Chat-caller verification path as "not yet
+  exercised against a live Chat app." That sentence stays true and stays
+  in the docstring — no amount of offline testing substitutes for pointing
+  a real Chat app's Connection settings at a deployed instance and
+  confirming a genuine interaction round-trips; that remains operator
+  work. What changed is the offline side: `test_main.py` now has explicit
+  cases for a missing token, a malformed (non-JWT-shaped) token, a wrong
+  audience, a wrong email claim, an expired token, and correct-token
+  acceptance — each through the same injected `verify_fn` seam the real
+  `google.auth`/`id_token.verify_oauth2_token` call sits behind, since
+  that's the only place these failure modes are observable without a live
+  Google-signed token.
+- **F5 — fail closed on unset `ATTUNE_DATA_DIR`, at the Doctor/run-preflight
+  boundary, not at `Settings` construction.** `config._path()`'s fallback
+  to `./{filename}` under the process's default umask meant an operator
+  who forgot to set `ATTUNE_DATA_DIR` would get conversation text, the
+  audit log, and credentials landing in whatever directory the process
+  happened to start in — potentially world-readable. `Settings.data_dir`
+  was already `None` exactly when unset, so no new field was needed;
+  Doctor's existing (but previously non-fatal) `data-dir` check now FAILs
+  when it's unset, with a message naming the fix, and PASSes only once a
+  real directory is configured, chmod-ing it to `0700` the same way
+  `attune init` already does. `data-dir` was already in `FATAL_CHECKS`, so
+  `attune run`'s preflight (`run_cmd.run_run` → `run_doctor(fatal_only=
+  True)`) inherits the fail-closed behavior with no additional wiring —
+  confirmed by inspection and by the existing generic
+  `test_run_gates_on_fatal_doctor_checks` pin. `Settings` construction
+  itself is deliberately NOT hardened to refuse an unset `data_dir` — tests
+  and tooling construct `Settings` from fake dicts throughout the suite,
+  and licensing that would break offline testability for no security
+  benefit (the runtime never starts without clearing Doctor's gate).
+  Additionally, every JSON/SQLite state store the review named — the audit
+  log, pending approvals, the retry queue, and graduation state — now
+  chmods its file to `0600` explicitly after write, rather than trusting
+  the umask; importance/attention/autonomy-grants already got this for
+  free from `tempfile.mkstemp`'s own `0600` default, and the brief snapshot
+  already chmod'd itself. The follow-up nudge state wasn't named in the
+  review but has the identical gap, so it received the same one-line fix
+  for consistency.
+- **F6 — correction-derived memories are provenance-framed at retrieval,
+  not filtered, and the adversarial test pins the plumbing, not the
+  model.** `capture_correction` already stamped `signal: "correction"` and
+  `remember_fact` already stamped `signal: "explicit"`, but nothing at
+  retrieval time treated them differently — a memory whose capture touched
+  untrusted content (an edited-then-approved draft, where the edit
+  followed a prompt-injection attempt) would read exactly like something
+  the principal deliberately taught. `memory.signals.frame_memory_text`
+  is a new, pure, presentation-level function: correction-derived text
+  gets a `"(learned from an edit — lower confidence than explicit
+  teaching)"` suffix, explicit teaching gets `"(explicitly taught)"`,
+  anything else (including records with no metadata at all — back-compat)
+  renders unchanged. It's wired into every site that turns a retrieved
+  `MemoryRecord` into prompt text: `draft_approve.py`'s `retrieve` node,
+  `triage.py`'s `_past_reactions` (the annotation stays INSIDE the
+  trusted PAST REACTIONS block — it reframes confidence, it does not
+  relocate trust), and `dispatcher.py`'s `_converse`. `interaction.py`'s
+  planner does not frame memories into a prompt anywhere, so it needed no
+  change. This is deliberately filtering-free: retrieval, ranking, and
+  consolidation are untouched — only what a human or model READS about a
+  memory's provenance changes.
+  `tests/test_signals.py::test_adversarial_two_stage_correction_provenance`
+  is the SEC-605 adversarial test: stage one scripts a fake model that
+  (deliberately, simulating a successful injection) embeds attacker
+  phrasing in a draft, has a human edit-then-approve while preserving some
+  of that text, and runs it through the REAL `capture_correction`/
+  `Mem0Store` code path; stage two asserts the stored record carries
+  `signal: correction`, that `frame_memory_text` marks it lower-confidence,
+  and that `triage_thread`'s rendered system prompt keeps the annotated
+  line inside the PAST REACTIONS section. The test's own docstring says
+  plainly what it does NOT prove: a real model's actual injection
+  resistance, or that a human editor would actually catch and scrub
+  attacker text. It only pins that IF a poisoned correction lands in
+  memory, retrieval marks it provenance-suspect rather than presenting it
+  as equal to explicit teaching.
+- **F8 — `GoogleChatChannel` gets its own actor guard, mirroring
+  `SlackChannel._authorized` exactly.** Chat card-click authorization
+  previously lived only one layer up, in `dispatcher.handle_chat_
+  interaction`; the channel class itself had no internal check, unlike
+  `SlackChannel`. `GoogleChatChannel.__init__` now takes the same optional
+  `allowed_actors`/`on_unauthorized` pair Slack does, with the identical
+  deny-by-default rule (`frozenset(allowed_actors or ())` — `None` or
+  empty refuses every actor, since Chat's webhook verification proves the
+  request came from Google, not WHO clicked). The check runs inside
+  `handle_interaction`, after `decode_chat_interaction` succeeds and
+  before any `resume_fn` call — mirroring Slack's placement in its own
+  button handlers — so the edit dialog's OPEN click (no state to protect;
+  the dispatcher's async path never even routes it here — see
+  `ingestion/chat_interactions.py`) is deliberately not gated, exactly
+  like the dispatcher-level check already treats it. The runtime
+  construction site (`runtime.py`) now passes the existing
+  `settings.chat_allowed_users` allowlist and an audit-recording
+  `on_unauthorized` hook, the same shape already used for Slack. The
+  dispatcher-level check is unchanged and unremoved — this is defense in
+  depth, two independent checks on the same allowlist, not a replacement.
+- **F9 — two local rate ceilings, both process-local, neither a model
+  call.** (1) `InboundRateLimiter` (`dispatcher.py`) is a sliding-window
+  counter per `(channel, user_id)`, checked first in `_respond_to_message`
+  before any memory/autonomy/planner/model work: beyond
+  `ATTUNE_INBOUND_RATE_LIMIT` (default 20) messages per 300-second window,
+  the sender gets a fixed "please wait" refusal and a content-free audit
+  event (channel/limits only, never message text). (2)
+  `handle_gmail_notification` now processes at most
+  `ATTUNE_TRIAGE_BATCH_LIMIT` (default 25) threads per notification;
+  anything beyond that is enqueued onto the existing `SqliteRetryQueue`
+  with the identical `"gmail_thread"` shape the fetch-failure path already
+  uses, so `Runtime.drain_source_retries` replays it on its own schedule
+  instead of it being dropped or blocking the run indefinitely — and it's
+  audited whether or not a retry queue happens to be configured. Both
+  ceilings are the one deliberate exception to "avoid new configuration
+  variables": a ceiling nobody can tune for a deployment's real traffic
+  isn't a usable ceiling. Both are honestly scoped as courtesy limits, not
+  security boundaries — the in-memory limiter state is PROCESS-LOCAL (a
+  restart resets every window, and nothing coordinates across multiple
+  runtime processes), and it bounds *volume* from a sender the actor
+  allowlists (F8, `SlackChannel._authorized`) already authorized; it does
+  not authenticate anyone.
+
+`docs/current-state.md`'s findings table is a point-in-time review
+document and is not rewritten — a "Status" footnote below the table
+records what shipped where for F1 through F9, dated to this entry, so the
+review itself stays an honest snapshot of 2026-07-18 while the current
+state of each finding remains discoverable.

@@ -212,6 +212,15 @@ class JsonlAuditLog:
                     line = {**payload, "prev_hash": prev_hash, "entry_hash": entry_hash}
                     fh.write(json.dumps(line) + "\n")
                     prev_hash = entry_hash
+            # Security finding F5 (Low): append mode creates the file under
+            # the process's umask the first time it's touched, which can be
+            # more permissive than owner-only. Re-assert 0600 after every
+            # append — cheap, and it self-heals a file that was created
+            # before this fix shipped.
+            try:
+                os.chmod(self._path, 0o600)
+            except OSError:
+                pass
 
     def _last_hash(self) -> str:
         """The hash to chain the next appended entry from: the last

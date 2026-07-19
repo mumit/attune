@@ -82,6 +82,14 @@ class JsonNudgeState:
             os.makedirs(parent, exist_ok=True)
         with open(self._path, "w") as fh:
             json.dump(data, fh)
+        # Security finding F5 (Low): not one of the stores named in the
+        # review's list, but the same class of gap (a plain ``open(..., "w")``
+        # under the process's umask) — fixed for consistency with the other
+        # JSON state stores under ATTUNE_DATA_DIR.
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
 
 
 def _rank_by_counterpart_tier(

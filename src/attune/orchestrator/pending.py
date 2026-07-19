@@ -205,6 +205,13 @@ class JsonPendingApprovals:
         temp = f"{self._path}.tmp"
         with open(temp, "w") as fh:
             json.dump(data, fh)
+        # Security finding F5 (Low): pending approvals sit under
+        # ATTUNE_DATA_DIR — chmod explicitly rather than trust the
+        # process's umask, same defense-in-depth as the other JSON state
+        # stores (see importance.py/attention.py's tempfile.mkstemp, which
+        # already gets 0600 for free; this file's plain-open temp file did
+        # not).
+        os.chmod(temp, 0o600)
         os.replace(temp, self._path)
 
 

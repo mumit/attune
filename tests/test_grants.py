@@ -530,6 +530,24 @@ def test_graduation_state_card_round_trips(tmp_path):
     assert state.get_card("demotion:draft_reply:mail:propose") is None
 
 
+def test_graduation_state_file_is_chmodded_owner_only(tmp_path):
+    """Security finding F5 (Low): graduation-state bookkeeping must be
+    owner-only regardless of the process umask."""
+    import os
+
+    path = tmp_path / "graduation_state.json"
+    state = JsonGraduationState(str(path))
+    scope = GrantScope(priorities=frozenset({"routine"}))
+    state.record_card(
+        "demotion:draft_reply:mail:propose", kind="demotion",
+        action=Action.DRAFT_REPLY, domain=Domain.MAIL, to_rung=Rung.PROPOSE,
+        scope=scope,
+    )
+
+    assert path.exists()
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+
+
 def test_graduation_state_missing_card_is_none(tmp_path):
     state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
     assert state.get_card("graduation:draft_reply:mail:act_notify") is None

@@ -15,7 +15,12 @@ from .base import (
     Scope,
 )
 from .mem0_store import Mem0Store, build_mem0_config
-from .signals import ActionSignal, capture_action_signal, capture_correction
+from .signals import (
+    ActionSignal,
+    capture_action_signal,
+    capture_correction,
+    frame_memory_text,
+)
 
 __all__ = [
     "MemoryStore",
@@ -28,4 +33,5 @@ __all__ = [
     "ActionSignal",
     "capture_correction",
     "capture_action_signal",
+    "frame_memory_text",
 ]

@@ -36,7 +36,12 @@ from typing import Any, Callable
 
 from ..llm import Task, create_chat_completion, model_for
 from ..memory.base import MemoryStore, Message
-from ..memory.signals import ActionSignal, capture_action_signal, capture_correction
+from ..memory.signals import (
+    ActionSignal,
+    capture_action_signal,
+    capture_correction,
+    frame_memory_text,
+)
 from .autonomy import Action, Domain, PermissionMatrix, Rung, default_matrix
 from .state import DraftApproveState
 
@@ -123,11 +128,21 @@ def build_draft_approve_graph(
     apply_fn = apply_fn or _noop_apply_fn
 
     def retrieve(state: DraftApproveState) -> dict[str, Any]:
-        """Pull relevant preferences/context before drafting."""
+        """Pull relevant preferences/context before drafting.
+
+        Each snippet is provenance-framed (security finding F6, SEC-605)
+        before it ever reaches the draft prompt: a memory captured from an
+        edited-then-approved draft touched whatever the incoming mail/chat
+        said, so it's annotated as lower-confidence than something the
+        principal explicitly taught. Presentation only — retrieval and
+        ranking are unaffected; see ``memory.signals.frame_memory_text``.
+        """
         mems = store.search(
             state["incoming_summary"], user_id=state["user_id"], limit=8
         )
-        snippets = [m.text for m in mems]
+        snippets = [
+            frame_memory_text(m.text, getattr(m, "metadata", None)) for m in mems
+        ]
         return {
             "retrieved_memories": snippets,
             "iteration_count": state.get("iteration_count", 0) + 1,

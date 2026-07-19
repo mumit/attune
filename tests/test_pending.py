@@ -62,6 +62,19 @@ def test_register_and_lookup_by_source(tmp_path):
     assert reg.get_pending_for_source("t2") is None
 
 
+def test_registry_file_is_chmodded_owner_only(tmp_path):
+    """Security finding F5 (Low): pending-approval state must be owner-only
+    regardless of the process umask."""
+    import os
+
+    reg = _registry(tmp_path)
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+
+    path = tmp_path / "pending.json"
+    assert path.exists()
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+
+
 def test_register_stores_sender_when_given(tmp_path):
     reg = _registry(tmp_path)
     reg.register(

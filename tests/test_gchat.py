@@ -122,8 +122,12 @@ def test_approval_card_no_rationale_widget_when_absent():
 # ---------------------------------------------------------------------------
 
 
+AUTHORIZED_ACTOR = "users/OWNER"
+
+
 def _channel(**kwargs):
     resumes = []
+    kwargs.setdefault("allowed_actors", {AUTHORIZED_ACTOR})
     ch = GoogleChatChannel(
         resume_fn=lambda tid, decision, text: resumes.append((tid, decision, text)),
         **kwargs,
@@ -131,13 +135,14 @@ def _channel(**kwargs):
     return ch, resumes
 
 
-def _click(fn: str, thread_id: str) -> dict:
+def _click(fn: str, thread_id: str, actor: str = AUTHORIZED_ACTOR) -> dict:
     return {
         "type": "CARD_CLICKED",
         "action": {
             "actionMethodName": fn,
             "parameters": [{"key": "thread_id", "value": thread_id}],
         },
+        "user": {"name": actor},
     }
 
 
@@ -209,6 +214,78 @@ def test_edit_submit_resumes_edited_with_text():
 
     assert resumes == [("t-7", "edited", "My rewrite.")]
     assert "Edited" in response["text"]
+
+
+# ---------------------------------------------------------------------------
+# In-class actor guard (security finding F8) — mirrors test_slack.py's
+# authorization tests exactly (deny-by-default, refusal message, the
+# on_unauthorized hook, and that an unauthorized click never resumes).
+# ---------------------------------------------------------------------------
+
+
+def test_unauthorized_actor_click_does_not_resume():
+    ch, resumes = _channel()  # default allowlist = {AUTHORIZED_ACTOR}
+    response = ch.handle_interaction(
+        _click(ACTION_APPROVE, "t-7", actor="users/STRANGER")
+    )
+    assert resumes == []
+    assert "users/STRANGER" in response["text"]
+    assert "ATTUNE_CHAT_ALLOWED_USERS" in response["text"]
+
+
+def test_unauthorized_reject_does_not_resume():
+    ch, resumes = _channel()
+    response = ch.handle_interaction(
+        _click(ACTION_REJECT, "t-9", actor="users/STRANGER")
+    )
+    assert resumes == []
+    assert "users/STRANGER" in response["text"]
+
+
+def test_unauthorized_edit_submit_does_not_resume():
+    from attune.channels import ACTION_EDIT_SUBMIT
+
+    ch, resumes = _channel()
+    event = _click(ACTION_EDIT_SUBMIT, "t-7", actor="users/STRANGER")
+    event["common"] = {
+        "formInputs": {"attune_edit_text": {"stringInputs": {"value": ["hijack"]}}}
+    }
+    response = ch.handle_interaction(event)
+    assert resumes == []
+    assert "users/STRANGER" in response["text"]
+
+
+def test_empty_allowlist_denies_everyone():
+    """Deny-by-default (finding F8, mirroring SlackChannel exactly): no
+    allowed_actors at all refuses even the actor a caller might expect to
+    be trusted."""
+    ch, resumes = _channel(allowed_actors=None)
+    response = ch.handle_interaction(_click(ACTION_APPROVE, "t-7"))
+    assert resumes == []
+    assert AUTHORIZED_ACTOR in response["text"]
+
+
+def test_on_unauthorized_hook_invoked():
+    unauthorized = []
+    ch, _ = _channel(
+        on_unauthorized=lambda actor, surface: unauthorized.append((actor, surface))
+    )
+    ch.handle_interaction(_click(ACTION_REJECT, "t-9", actor="users/STRANGER"))
+    assert unauthorized == [("users/STRANGER", "rejected")]
+
+
+def test_edit_dialog_open_does_not_require_authorization():
+    """Dialog-open never touches the graph (no state to protect) — unlike
+    approve/reject/edit-submit, it is deliberately NOT gated by
+    allowed_actors (mirrors handle_interaction's own "before any resume"
+    placement, and the dispatcher's handle_chat_interaction, which never
+    even sees this action — see ingestion/chat_interactions.py)."""
+    ch, resumes = _channel(allowed_actors=None)  # would deny every resume
+    response = ch.handle_interaction(
+        _click(ACTION_EDIT, "t-7", actor="users/STRANGER")
+    )
+    assert resumes == []  # nothing to resume either way
+    assert "actionResponse" in response  # dialog still opened, not refused
 
 
 def test_handle_non_card_clicked_returns_none():

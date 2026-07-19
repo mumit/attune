@@ -182,6 +182,15 @@ class Settings:
     # JsonGraduationState.
     graduation_state_path: str = "./graduation_state.json"
 
+    # Security finding F9 (Info, docs/current-state.md's 2026-07-18
+    # review): two local, bounded, deterministic ceilings — no model calls,
+    # no coordination across processes (see dispatcher.py's module
+    # docstring for the full rationale). Both are the one exception to
+    # "avoid new variables": a ceiling that can't be tuned for a
+    # deployment's real traffic isn't a usable ceiling.
+    inbound_rate_limit: int = 20
+    triage_batch_limit: int = 25
+
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -328,6 +337,8 @@ class Settings:
             graduation_state_path=_path(
                 "ATTUNE_GRADUATION_STATE_PATH", "graduation_state.json"
             ),
+            inbound_rate_limit=int(e.get("ATTUNE_INBOUND_RATE_LIMIT", "20")),
+            triage_batch_limit=int(e.get("ATTUNE_TRIAGE_BATCH_LIMIT", "25")),
         )
 
     def validate(self) -> None:
