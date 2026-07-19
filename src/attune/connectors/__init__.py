@@ -31,11 +31,13 @@ def make_connector(settings, **kwargs) -> WorkspaceConnector:
     """Select the connector implementation from a config.Settings.
 
     MCP mode builds a Streamable HTTP caller unless ``mcp_call`` is injected;
-    google_oauth mode accepts ``credentials``, ``send_enabled``,
-    ``labels_enabled`` (Phase 3 stage 1, G9 — mirrors ``send_enabled``'s
-    double-gate: set only alongside the gmail.modify scope), and
-    ``calendar_writes_enabled`` (Phase 3 stage 2 — same discipline, set only
-    alongside the calendar.events scope).
+    google_oauth mode accepts ``credentials``, ``send_enabled`` (Phase 4
+    stage 2, G15 — now actually wired from ``settings.mail_send_enabled`` by
+    ``runtime.build_runtime``, alongside a real gmail.send scope and an
+    explicit autonomy grant), ``labels_enabled`` (Phase 3 stage 1, G9 —
+    mirrors ``send_enabled``'s double-gate: set only alongside the
+    gmail.modify scope), and ``calendar_writes_enabled`` (Phase 3 stage 2 —
+    same discipline, set only alongside the calendar.events scope).
     """
     from ..config import WorkspaceBackend
 

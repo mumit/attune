@@ -23,7 +23,7 @@ CheckFn = Callable[[], tuple[str, str]]
 # Checks that must pass before `attune run` will start (see run_cmd.py).
 FATAL_CHECKS = (
     "installation", "env", "data-dir", "llm", "workspace", "channels",
-    "source-channels", "mail-labels", "calendar-writes",
+    "source-channels", "mail-labels", "calendar-writes", "mail-send",
 )
 
 
@@ -185,6 +185,30 @@ def check_calendar_writes(settings) -> tuple[str, str]:
     return PASS, (
         "google_oauth backend supports calendar writes (requires the "
         "calendar.events scope on the authorized credential)"
+    )
+
+
+def check_mail_send(settings) -> tuple[str, str]:
+    """Validate the opt-in SEND_REPLY write path (Phase 4 stage 2, G15):
+    mirrors :func:`check_mail_labels`/:func:`check_calendar_writes` exactly
+    — a deployment that flips ``ATTUNE_MAIL_SEND_ENABLED`` on a backend
+    that structurally cannot send would otherwise silently never send an
+    autonomous reply — fail fast instead."""
+    if not settings.mail_send_enabled:
+        return SKIP, "ATTUNE_MAIL_SEND_ENABLED=0 (sending disabled)"
+
+    from ..config import WorkspaceBackend
+
+    if settings.workspace_backend == WorkspaceBackend.MCP:
+        return FAIL, (
+            "MCP backend cannot send mail (contract v1 deliberately has no "
+            "send tool — see docs/mcp-contract.md); disable "
+            "ATTUNE_MAIL_SEND_ENABLED or set ATTUNE_WORKSPACE_BACKEND=google_oauth"
+        )
+    return PASS, (
+        "google_oauth backend supports sending (requires the gmail.send "
+        "scope on the authorized credential, AND an explicit send_reply "
+        "autonomy grant via `attune autonomy grant`)"
     )
 
 
@@ -441,6 +465,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("source-channels", lambda: check_source_channels(settings)),
         Check("mail-labels", lambda: check_mail_labels(settings)),
         Check("calendar-writes", lambda: check_calendar_writes(settings)),
+        Check("mail-send", lambda: check_mail_send(settings)),
         Check("audit-chain", lambda: check_audit_chain(settings)),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),

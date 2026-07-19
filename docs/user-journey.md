@@ -299,7 +299,47 @@ Like the archive proposal, approving a decline or reschedule does not count
 as positive engagement with the organizer — these are hygiene/logistics
 judgments, not "this person matters."
 
-Free-form conversation does not bypass that workflow. For example:
+### Earned autonomy: graduation and demotion cards
+
+Every autonomous rung starts CLI-only (`attune autonomy grant ...`), but
+after a demonstrable track record (Phase 4 stage 2, G13), Attune's weekly
+autonomy digest posts each earned graduation as its own approval card in the
+approval channel — titled something like "Autonomy graduation suggestion:
+draft_reply → ACT_NOTIFY (mail)" — alongside the existing informational
+digest text. Tap approve and the grant takes effect immediately, exactly as
+if you'd typed the CLI command yourself; reject and the same suggestion
+won't reappear for 30 days; ignore it and the normal pending-card sweep
+eventually expires it, with nothing granted either way.
+
+Two things never change no matter how clean the track record is: a
+graduation card can never offer `send_reply`, and it can never offer
+anything above act-notify autonomy. Sending, and any rung above act-notify,
+are earned only by explicitly running the CLI command yourself — no card,
+however earned, can grant either one. Every grant made this way is revocable
+the same way a CLI grant is: `attune autonomy revoke <action> <domain>`.
+
+The ladder also runs backwards: a granted action that starts collecting
+rejections — two or more in its last ten decisions, or even a single
+rejection of something that was auto-applied — surfaces a **demotion**
+card ("Autonomy demotion suggestion: ... → PROPOSE"). Approving one always
+drops that grant all the way back to requiring your approval on every item,
+never a partial step down, and it's never applied automatically.
+
+### Autonomous sending
+
+With an explicit `send_reply` grant (CLI-only — `attune autonomy grant`
+refuses outright if `ATTUNE_MAIL_SEND_ENABLED` isn't set) at act-notify or
+above, a routine reply from a sender/context the grant covers is sent
+outright rather than drafted, and the notification route gets a short
+"Sent reply to \<sender\>: \<subject\>" heads-up. At the propose rung, the
+approval card itself says so up front — titled "Approve to SEND this
+reply" — so approving it sends immediately rather than creating a draft
+for you to send yourself. An urgent message always still produces an
+approval card, even with an act-notify (or higher) send grant in place —
+the urgent-interrupt rule (Phase 4 stage 1) is structural, not a per-grant
+opt-in.
+
+Free-form conversation does not bypass any of this. For example:
 
 > Move tomorrow's meeting to 3 PM.
 

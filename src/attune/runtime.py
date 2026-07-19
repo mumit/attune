@@ -76,13 +76,26 @@ from .ingestion import (
     slack_message_to_source,
 )
 from .orchestrator import (
+    DEMOTION_PREFIX,
+    GRADUATION_CARD_EXCLUDED_ACTIONS,
+    GRADUATION_CARD_MAX_RUNG,
+    GRADUATION_PREFIX,
+    GRADUATION_REJECTION_COOLDOWN_DAYS,
+    MAX_AUTONOMY_CARDS_PER_RUN,
     JsonAttentionStore,
+    JsonGraduationState,
     JsonNudgeState,
     JsonPendingApprovals,
+    JsonPermissionMatrixStore,
+    demotion_thread_id,
+    graduation_thread_id,
     make_calendar_action_apply_fn,
     make_connector_apply_fn,
     make_label_apply_fn,
+    resolve_autonomy_card,
     resume_workflow,
+    suggest_demotions,
+    suggest_graduations,
     sweep_ignored,
 )
 from .ingestion.calendar_sync import SyncState
@@ -258,6 +271,11 @@ class Runtime:
     # brief snapshot (brief.BriefSnapshotStore). Only ``post_brief`` (the
     # daily posted brief) reads/writes it — see ``_assemble_runtime_brief``.
     brief_snapshot: Any = None       # brief.JsonBriefSnapshot
+    # Phase 4 stage 2 (docs/future-state.md, G13): graduation/demotion
+    # approval-card bookkeeping (orchestrator.grants.JsonGraduationState) —
+    # posted-card snapshots + rejection cooldowns. See post_autonomy_digest
+    # and _post_autonomy_card.
+    graduation_state: Any = None
 
     # --- event processing (testable) ---------------------------------------
 
@@ -278,6 +296,7 @@ class Runtime:
             notify=self._notify_all,
             retry_queue=self.retry_queue,
             mail_labels_enabled=self.settings.mail_labels_enabled,
+            mail_send_enabled=self.settings.mail_send_enabled,
         )
 
     def process_chat_event(self, event: dict[str, Any]) -> None:
@@ -364,12 +383,15 @@ class Runtime:
             thread_id: str, decision: str, text: str | None, *,
             actor: str | None = None,
         ) -> Any:
-            return resume_workflow(
-                self.app.graph, thread_id, decision, text,
-                pending=self.pending,
-                audit_log=self.app.audit_log,
-                user_id=self.settings.user_id,
-                actor=actor,
+            # Shares _resolve_resume with build_runtime's _bound_resume
+            # (Phase 4 stage 2 fix, docs/decisions.md): this IS the real
+            # production Chat resume path (async, over Pub/Sub) — it had
+            # the SAME always-resume-via-self.app.graph bug, so the fix
+            # lives in one function both paths call, not duplicated here.
+            return _resolve_resume(
+                thread_id, decision, text, actor=actor,
+                app=self.app, pending=self.pending,
+                graduation_state=self.graduation_state, settings=self.settings,
             )
 
         def _post_text(text: str) -> None:
@@ -558,6 +580,7 @@ class Runtime:
                             notify=self._notify_all,
                             connector=self.connector,
                             mail_labels_enabled=self.settings.mail_labels_enabled,
+                            mail_send_enabled=self.settings.mail_send_enabled,
                         )
                 elif item.kind == "calendar_event":
                     event = self.connector.get_event(item.source_ref)
@@ -731,20 +754,142 @@ class Runtime:
         )
 
     def post_autonomy_digest(self) -> list:
-        """Weekly: post track-record graduation suggestions to the default
-        channels (information only — a human makes any grant via the CLI,
-        rule 3). Returns the suggestions for tests/logging."""
-        from .orchestrator import suggest_graduations
+        """Weekly: post track-record graduation AND demotion suggestions as
+        digest text (information only — same as before Phase 4 stage 2),
+        and additionally post each as a real approval card in the approval
+        channel (G13) — capped at ``MAX_AUTONOMY_CARDS_PER_RUN`` per kind,
+        skipping any suggestion already covered by a still-pending card or
+        a 30-day rejection cooldown.
+
+        The HARD CEILING (``GRADUATION_CARD_EXCLUDED_ACTIONS``/
+        ``GRADUATION_CARD_MAX_RUNG``) applies ONLY to which suggestions
+        become CARDS — a SEND_REPLY or above-ACT_NOTIFY graduation
+        suggestion still appears in the informational text (nothing about
+        the text claims it will be offered for one-tap acceptance); it is
+        simply never built into something a click could grant. Demotion
+        needs no such ceiling (it only ever lowers to PROPOSE).
+
+        Returns every suggestion (graduations then demotions) for
+        tests/logging, matching this method's pre-stage-2 return shape for
+        graduations.
+        """
+        from datetime import datetime as _dt, timezone as _tz
 
         matrix = self.app.current_matrix()
-        suggestions = suggest_graduations(self.app.audit_log, matrix)
-        if not suggestions:
+        graduations = suggest_graduations(self.app.audit_log, matrix)
+        demotions = suggest_demotions(self.app.audit_log, matrix)
+        if not graduations and not demotions:
             return []
-        text = "Autonomy digest — earned-graduation suggestions:\n" + "\n".join(
-            f"- {s.render()}" for s in suggestions
+
+        lines: list[str] = []
+        if graduations:
+            lines.append("Autonomy digest — earned-graduation suggestions:")
+            lines += [f"- {s.render()}" for s in graduations]
+        if demotions:
+            lines.append(
+                "Autonomy digest — demotion suggestions (a rejection streak):"
+            )
+            lines += [f"- {s.render()}" for s in demotions]
+        self._notify_all("\n".join(lines))
+
+        now = _dt.now(_tz.utc)
+        posted = 0
+        for s in graduations:
+            if posted >= MAX_AUTONOMY_CARDS_PER_RUN:
+                break
+            action, domain, to_rung = s.record.action, s.record.domain, s.to_rung
+            if (
+                action in GRADUATION_CARD_EXCLUDED_ACTIONS
+                or to_rung > GRADUATION_CARD_MAX_RUNG
+            ):
+                continue  # the ceiling — never offered as a card, ever
+            if self._post_autonomy_card(
+                kind="graduation", action=action, domain=domain,
+                to_rung=to_rung, scope=None, rendered=s.render(), now=now,
+            ):
+                posted += 1
+
+        posted = 0
+        for s in demotions:
+            if posted >= MAX_AUTONOMY_CARDS_PER_RUN:
+                break
+            if self._post_autonomy_card(
+                kind="demotion", action=s.action, domain=s.domain,
+                to_rung=s.to_rung, scope=s.scope, rendered=s.render(), now=now,
+            ):
+                posted += 1
+
+        return list(graduations) + list(demotions)
+
+    def _post_autonomy_card(
+        self, *, kind: str, action, domain, to_rung, scope, rendered: str, now,
+    ) -> bool:
+        """Post one graduation/demotion approval card (G13), or decline to
+        (cooldown/dedupe) and report that via the return value so the
+        per-run cap in ``post_autonomy_digest`` only counts real posts.
+
+        Reuses the SAME approval-channel/pending machinery as every other
+        card in this codebase; the thread_id namespace
+        (``graduation:``/``demotion:``) is what routes its eventual
+        resolution to ``resolve_autonomy_card`` instead of a graph resume
+        (see ``_bound_resume`` in ``build_runtime``)."""
+        thread_id = (
+            graduation_thread_id(action, domain, to_rung) if kind == "graduation"
+            else demotion_thread_id(action, domain, to_rung)
         )
-        self._notify_all(text)
-        return suggestions
+        if self.graduation_state is not None and self.graduation_state.in_cooldown(
+            thread_id, now=now, cooldown_days=GRADUATION_REJECTION_COOLDOWN_DAYS,
+        ):
+            return False
+        if (
+            self.pending is not None
+            and self.pending.get_pending_for_source(thread_id) is not None
+        ):
+            return False
+
+        title = (
+            f"Autonomy graduation suggestion: {action.value} → {to_rung.name} "
+            f"({domain.value})"
+            if kind == "graduation"
+            else (
+                f"Autonomy demotion suggestion: {action.value} on "
+                f"{domain.value} → {to_rung.name}"
+            )
+        )
+        posted = False
+        if (
+            self.settings.approval_channel == "slack"
+            and self.slack is not None and self.slack_say is not None
+        ):
+            self.slack.post_approval(
+                self.slack_say, thread_id=thread_id, domain="autonomy",
+                proposed_draft=rendered, rationale=None, title=title,
+            )
+            posted = True
+        if (
+            self.settings.approval_channel == "google_chat"
+            and self.gchat is not None and self.settings.chat_default_space
+        ):
+            self.gchat.post_approval(
+                self.settings.chat_default_space, thread_id=thread_id,
+                domain="autonomy", proposed_draft=rendered, rationale=None,
+                title=title,
+            )
+            posted = True
+        if not posted:
+            return False
+
+        if self.pending is not None:
+            self.pending.register(
+                lg_tid=thread_id, source_ref=thread_id, domain="autonomy",
+                posted_at=now, sender=None,
+            )
+        if self.graduation_state is not None:
+            self.graduation_state.record_card(
+                thread_id, kind=kind, action=action, domain=domain,
+                to_rung=to_rung, scope=scope,
+            )
+        return True
 
     def build_scheduler(self) -> Any:
         """Assemble the standard job set from settings (roadmap prompt 05):
@@ -880,6 +1025,7 @@ class Runtime:
                         notify=self._notify_all,
                         connector=self.connector,
                         mail_labels_enabled=self.settings.mail_labels_enabled,
+                        mail_send_enabled=self.settings.mail_send_enabled,
                     )
                 for event in events:
                     submit_calendar_event(
@@ -1257,6 +1403,76 @@ class Runtime:
             threading.Event().wait()
 
 
+def _graph_for_thread_id(
+    thread_id: str, *, graph: Any, label_graph: Any, calendar_action_graph: Any,
+) -> Any:
+    """Namespace-keyed graph selection for a resume (Phase 4 stage 2 fix —
+    see ``_resolve_resume``'s docstring for why this matters): every
+    proposal graph other than the shared draft/follow-up/hold one uses its
+    own thread-id prefix, so the same string that dispatcher.py used to
+    CHOOSE which graph to invoke() originally is also enough to choose
+    which one to resume() with. Falls back to ``graph`` for an
+    unrecognized/missing specific graph rather than raising, so a thread_id
+    this function doesn't yet know about still resumes SOMEWHERE instead of
+    crashing the resume path outright."""
+    if thread_id.startswith("archive:"):
+        return label_graph or graph
+    if thread_id.startswith("decline:") or thread_id.startswith("calendar:reschedule:"):
+        return calendar_action_graph or graph
+    return graph
+
+
+def _resolve_resume(
+    thread_id: str, decision: str, text: str | None, *,
+    actor: str | None, app: AppContext, pending: Any, graduation_state: Any,
+    settings: Settings,
+) -> Any:
+    """Shared resume-routing logic (Phase 4 stage 2 fix — a pre-existing
+    gap found during this stage; see docs/decisions.md), used by BOTH real
+    production resume paths: Slack/Chat's synchronous button-click resume
+    (``build_runtime``'s ``_bound_resume``, wired into both ``SlackChannel``
+    and ``GoogleChatChannel``) and Chat's async card-interaction path
+    (``Runtime.process_chat_interaction``). Sharing one function means a
+    routing fix here (or a future one) can't silently apply to only one
+    transport, the way the graph-selection bug did before this stage.
+
+    Two cases, checked in order:
+
+    1. A ``graduation:``/``demotion:`` thread_id has no LangGraph workflow
+       behind it at all — routed to ``resolve_autonomy_card`` instead of a
+       graph resume (Phase 4 stage 2, G13).
+    2. Everything else resumes via ``_graph_for_thread_id``'s namespace-
+       keyed graph selection: ``"archive:"`` → ``label_graph``,
+       ``"decline:"``/``"calendar:reschedule:"`` → ``calendar_action_graph``,
+       everything else (Gmail draft/follow-up/hold proposals, and
+       SEND_REPLY, which rides the SHARED graph via the action branch in
+       ``make_connector_apply_fn``) → the shared ``graph``.
+    """
+    if thread_id.startswith((GRADUATION_PREFIX, DEMOTION_PREFIX)):
+        return resolve_autonomy_card(
+            thread_id, decision,
+            store=JsonPermissionMatrixStore(settings.autonomy_state_path),
+            matrix=app.current_matrix(),
+            cooldown_state=graduation_state,
+            audit_log=app.audit_log,
+            user_id=settings.user_id,
+            pending=pending,
+            actor=actor,
+        )
+
+    target_graph = _graph_for_thread_id(
+        thread_id, graph=app.graph, label_graph=app.label_graph,
+        calendar_action_graph=app.calendar_action_graph,
+    )
+    return resume_workflow(
+        target_graph, thread_id, decision, text,
+        pending=pending,
+        audit_log=app.audit_log,
+        user_id=settings.user_id,
+        actor=actor,
+    )
+
+
 def build_runtime(
     settings: Settings | None = None,
     *,
@@ -1284,6 +1500,7 @@ def build_runtime(
     source_poll_state: Any = None,
     slack_client: Any = None,
     brief_snapshot: Any = None,
+    graduation_state: Any = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -1319,10 +1536,16 @@ def build_runtime(
     resolved_connector = connector or make_connector(
         settings,
         credentials=resolved_credentials,
-        # Phase 3 stage 1 (G9): mirrors how send_enabled would be wired —
-        # the deployment's ATTUNE_MAIL_LABELS_ENABLED flag reaches the
-        # connector directly; label_thread's own double gate (this flag AND
-        # the gmail.modify scope) still applies underneath.
+        # Phase 4 stage 2 (G15): the deployment's ATTUNE_MAIL_SEND_ENABLED
+        # flag reaches the connector directly; send_reply's own structural
+        # gate (this flag AND a real gmail.send scope) still applies
+        # underneath — this is the flag Phase 3's comment (below) said
+        # would eventually be wired.
+        send_enabled=settings.mail_send_enabled,
+        # Phase 3 stage 1 (G9): the deployment's ATTUNE_MAIL_LABELS_ENABLED
+        # flag reaches the connector directly; label_thread's own double
+        # gate (this flag AND the gmail.modify scope) still applies
+        # underneath.
         labels_enabled=settings.mail_labels_enabled,
         # Phase 3 stage 2: same wiring again for
         # ATTUNE_CALENDAR_WRITES_ENABLED; decline_invite/reschedule_event's
@@ -1350,18 +1573,27 @@ def build_runtime(
         max_turns=settings.converse_window_turns,
         ttl_minutes=settings.converse_ttl_minutes,
     )
+    resolved_graduation_state = graduation_state or JsonGraduationState(
+        settings.graduation_state_path
+    )
 
-    # The one shared resume path, bound to the pending registry so every
-    # decision — whichever channel it arrives on — marks its card resolved.
+    # The one shared resume path for Slack's synchronous button clicks and
+    # GoogleChatChannel's (test-only) synchronous handler, bound to the
+    # pending registry so every decision marks its card resolved. Delegates
+    # to ``_resolve_resume`` — see that function's docstring for the
+    # namespace-keyed graph selection fix (Phase 4 stage 2) this closure
+    # used to get wrong (always ``resolved_app.graph``, regardless of which
+    # compiled graph a card's thread_id actually belonged to). The SAME
+    # shared function also backs ``process_chat_interaction``'s resume path
+    # below, so the fix (and the graduation-card routing) applies to both
+    # production transports, not just this one.
     def _bound_resume(
         thread_id: str, decision: str, text: str | None, *, actor: str | None = None
     ) -> Any:
-        return resume_workflow(
-            resolved_app.graph, thread_id, decision, text,
-            pending=resolved_pending,
-            audit_log=resolved_app.audit_log,
-            user_id=settings.user_id,
-            actor=actor,
+        return _resolve_resume(
+            thread_id, decision, text, actor=actor,
+            app=resolved_app, pending=resolved_pending,
+            graduation_state=resolved_graduation_state, settings=settings,
         )
 
     resolved_gmail_service = gmail_service
@@ -1542,4 +1774,5 @@ def build_runtime(
         source_poll_state=resolved_source_poll_state,
         slack_client=resolved_slack_client,
         brief_snapshot=resolved_brief_snapshot,
+        graduation_state=resolved_graduation_state,
     )

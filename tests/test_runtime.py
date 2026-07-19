@@ -20,6 +20,7 @@ from attune.app import AppContext
 from attune.config import Settings
 from attune.connectors.base import Provenance
 from attune.ingestion.state import JsonChatSubscriptionState, JsonGmailWatchState
+from attune.orchestrator import JsonGraduationState
 from attune.runtime import Runtime, build_runtime
 
 
@@ -247,13 +248,19 @@ def _settings(**overrides):
     return Settings.from_env(base)
 
 
-def _app_ctx(graph=None, client=None, store=None, audit_log=None):
+def _app_ctx(
+    graph=None, client=None, store=None, audit_log=None, *,
+    label_graph=None, calendar_action_graph=None, matrix=None,
+):
     return AppContext(
         graph=graph or _FakeGraph(),
         client=client or _FakeClient(),
         store=store or _FakeMemoryStore(),
         settings=_settings(),
         audit_log=audit_log or _FakeAuditLog(),
+        label_graph=label_graph,
+        calendar_action_graph=calendar_action_graph,
+        matrix=matrix,
     )
 
 
@@ -1506,6 +1513,796 @@ def test_autonomy_digest_silent_when_nothing_earned():
     runtime = _runtime(slack_say=lambda **kw: said.append(kw))
     assert runtime.post_autonomy_digest() == []
     assert said == []
+
+
+# ---------------------------------------------------------------------------
+# Graduation/demotion approval cards (Phase 4 stage 2, docs/future-state.md;
+# G13) — the digest posts real cards, not just informational text.
+# ---------------------------------------------------------------------------
+
+
+def _clean_track_record_log(path, *, action="draft_reply", domain="mail", n=12):
+    """A JsonlAuditLog whose (action, domain) pair clears the graduation
+    bar: n/n approved-unedited, every one applied, zero rejections."""
+    from datetime import datetime, timezone as _tz
+
+    from attune.audit.log import JsonlAuditLog
+
+    log = JsonlAuditLog(str(path))
+    now = datetime.now(_tz.utc).isoformat()
+    for i in range(n):
+        tid = f"gmail:{action}:{domain}:{i}:100"
+        log.record(
+            thread_id=tid, workflow="draft_approve",
+            events=[{"event": "autonomy_gate", "ts": now, "action": action,
+                     "domain": domain, "routed_to": "approve"}],
+            domain=domain, user_id="u1",
+        )
+        log.record(
+            thread_id=tid, workflow="draft_approve",
+            events=[
+                {"event": "human_decision", "ts": now, "decision": "approved"},
+                {"event": "applied", "ts": now, "ref": f"d{i}"},
+            ],
+            domain=domain, user_id="u1",
+        )
+    return log
+
+
+def test_post_autonomy_digest_posts_graduation_card(tmp_path):
+    from attune.orchestrator import Action, Domain, Rung, graduation_thread_id
+
+    log = _clean_track_record_log(tmp_path / "audit.jsonl")
+    slack = _FakeSlackChannel()
+    pending = _FakePending()
+    runtime = _runtime(
+        app=_app_ctx(audit_log=log), slack=slack,
+        slack_say=lambda **kw: None, pending=pending,
+    )
+    runtime.graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+
+    suggestions = runtime.post_autonomy_digest()
+
+    assert len(suggestions) == 1
+    assert len(slack.approvals) == 1
+    card = slack.approvals[0]
+    expected_tid = graduation_thread_id(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    assert card["thread_id"] == expected_tid
+    assert card["domain"] == "autonomy"
+    assert "Autonomy graduation suggestion" in card["title"]
+    assert pending.registered[0]["source_ref"] == expected_tid
+    assert runtime.graduation_state.get_card(expected_tid) is not None
+
+
+def test_post_autonomy_digest_never_offers_send_reply_as_a_card_even_with_perfect_record(tmp_path):
+    """The ceiling pin (Deliverable B): a perfect SEND_REPLY track record
+    still appears in the informational digest TEXT (nothing suppresses the
+    suggestion itself) but NEVER becomes a card — sending is CLI-only,
+    always, regardless of how clean the history is."""
+    from attune.orchestrator import Action, Domain, Rung, default_matrix
+
+    log = _clean_track_record_log(
+        tmp_path / "audit.jsonl", action="send_reply", domain="mail",
+    )
+    matrix = default_matrix().grant(Action.SEND_REPLY, Domain.MAIL, Rung.PROPOSE)
+    slack = _FakeSlackChannel()
+    said: list[dict] = []
+    runtime = _runtime(
+        app=_app_ctx(audit_log=log, matrix=matrix), slack=slack,
+        slack_say=lambda **kw: said.append(kw), pending=_FakePending(),
+    )
+    runtime.graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+
+    suggestions = runtime.post_autonomy_digest()
+
+    assert len(suggestions) == 1  # the suggestion IS produced ...
+    assert "send_reply" in said[0]["text"]  # ... and named in the digest text ...
+    assert slack.approvals == []  # ... but NEVER offered as a card
+
+
+def test_post_autonomy_digest_posts_demotion_card(tmp_path):
+    from attune.orchestrator import (
+        Action, Domain, Rung, default_matrix, demotion_thread_id,
+    )
+
+    rows = [("rejected", "approve"), ("rejected", "approve")] + [
+        ("approved", "approve") for _ in range(8)
+    ]
+    from datetime import datetime, timezone as _tz
+
+    from attune.audit.log import JsonlAuditLog
+
+    log = JsonlAuditLog(str(tmp_path / "audit.jsonl"))
+    now = datetime.now(_tz.utc).isoformat()
+    for i, (decision, routed_to) in enumerate(rows):
+        tid = f"gmail:draft_reply:{i}:100"
+        log.record(
+            thread_id=tid, workflow="draft_approve",
+            events=[{"event": "autonomy_gate", "ts": now, "action": "draft_reply",
+                     "domain": "mail", "routed_to": routed_to}],
+            domain="mail", user_id="u1",
+        )
+        log.record(
+            thread_id=tid, workflow="draft_approve",
+            events=[{"event": "human_decision", "ts": now, "decision": decision}],
+            domain="mail", user_id="u1",
+        )
+    matrix = default_matrix().grant(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    slack = _FakeSlackChannel()
+    pending = _FakePending()
+    runtime = _runtime(
+        app=_app_ctx(audit_log=log, matrix=matrix), slack=slack,
+        slack_say=lambda **kw: None, pending=pending,
+    )
+    runtime.graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+
+    suggestions = runtime.post_autonomy_digest()
+
+    assert len(suggestions) == 1
+    assert len(slack.approvals) == 1
+    card = slack.approvals[0]
+    expected_tid = demotion_thread_id(Action.DRAFT_REPLY, Domain.MAIL, Rung.PROPOSE)
+    assert card["thread_id"] == expected_tid
+    assert "Autonomy demotion suggestion" in card["title"]
+    assert pending.registered[0]["source_ref"] == expected_tid
+
+
+def test_post_autonomy_digest_respects_rejection_cooldown(tmp_path):
+    """Reject a graduation card, then run the digest again: the same
+    suggestion must NOT get a second card for 30 days."""
+    from attune.orchestrator import Action, Domain, Rung, graduation_thread_id
+    from attune.runtime import _resolve_resume
+
+    log = _clean_track_record_log(tmp_path / "audit.jsonl")
+    graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+    thread_id = graduation_thread_id(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+
+    slack = _FakeSlackChannel()
+    pending = _FakePending()
+    app = _app_ctx(audit_log=log)
+    runtime = _runtime(app=app, slack=slack, slack_say=lambda **kw: None, pending=pending)
+    runtime.graduation_state = graduation_state
+
+    runtime.post_autonomy_digest()
+    assert len(slack.approvals) == 1
+
+    # Reject it via the SAME resolution path a real button click uses.
+    settings = runtime.settings
+    result = _resolve_resume(
+        thread_id, "rejected", None, actor="U1", app=app, pending=pending,
+        graduation_state=graduation_state, settings=settings,
+    )
+    assert result["resolution"] == "rejected"
+
+    # A second digest run (still a clean, qualifying track record) must not
+    # repost the same suggestion — the 30-day cooldown suppresses it.
+    slack.approvals.clear()
+    runtime.post_autonomy_digest()
+    assert slack.approvals == []
+
+
+def test_post_autonomy_digest_caps_cards_per_kind(tmp_path):
+    """MAX_AUTONOMY_CARDS_PER_RUN caps how many NEW cards a single digest
+    run posts, even when more suggestions qualify — same posture as every
+    other per-run cap in this codebase (archive/decline/hold offers)."""
+    from attune.orchestrator import MAX_AUTONOMY_CARDS_PER_RUN
+    from datetime import datetime, timezone as _tz
+
+    from attune.audit.log import JsonlAuditLog
+
+    log = JsonlAuditLog(str(tmp_path / "audit.jsonl"))
+    now = datetime.now(_tz.utc).isoformat()
+    # Four distinct (action, domain) pairs, each with a clean 12/12 record
+    # (DRAFT_REPLY on mail/chat/slack, and FOLLOW_UP on mail — all default
+    # to PROPOSE, so all four clear the graduation bar).
+    pairs = [
+        ("draft_reply", "mail"), ("draft_reply", "chat"),
+        ("draft_reply", "slack"), ("follow_up", "mail"),
+    ]
+    for action, domain in pairs:
+        for i in range(12):
+            tid = f"gmail:{action}:{domain}:{i}:100"
+            log.record(
+                thread_id=tid, workflow="draft_approve",
+                events=[{"event": "autonomy_gate", "ts": now, "action": action,
+                         "domain": domain, "routed_to": "approve"}],
+                domain=domain, user_id="u1",
+            )
+            log.record(
+                thread_id=tid, workflow="draft_approve",
+                events=[
+                    {"event": "human_decision", "ts": now, "decision": "approved"},
+                    {"event": "applied", "ts": now, "ref": f"d{i}"},
+                ],
+                domain=domain, user_id="u1",
+            )
+
+    slack = _FakeSlackChannel()
+    runtime = _runtime(
+        app=_app_ctx(audit_log=log), slack=slack,
+        slack_say=lambda **kw: None, pending=_FakePending(),
+    )
+    runtime.graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+
+    suggestions = runtime.post_autonomy_digest()
+
+    assert len(suggestions) == 4        # every suggestion is still reported ...
+    assert len(slack.approvals) == MAX_AUTONOMY_CARDS_PER_RUN  # ... cards are capped
+
+
+# ---------------------------------------------------------------------------
+# THE EXIT-CRITERION TEST — docs/future-state.md, Phase 4 ("Measured
+# autonomy that actually graduates"):
+#
+#   "Exit criteria: after a demonstrable track record, the principal taps
+#   'accept' on a graduation card, and Attune quietly files newsletter
+#   noise and sends routine acknowledgments with notification — every
+#   effect audited and reversible from chat or CLI."
+#
+# Drives that exact sequence end to end (dispatcher + runtime level, every
+# collaborator a fake, a REAL compiled LangGraph graph underneath) to close
+# out Phase 4 stage 2 (G13/G15).
+# ---------------------------------------------------------------------------
+
+
+def test_phase4_exit_criterion_graduation_card_to_auto_send_with_notification(tmp_path):
+    pytest.importorskip("langgraph")
+    from datetime import datetime, timezone as _tz
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from attune.app import build_app
+    from attune.audit.log import JsonlAuditLog
+    from attune.dispatcher import handle_gmail_notification
+    from attune.orchestrator import (
+        Action,
+        Domain,
+        GrantScope,
+        JsonPendingApprovals,
+        JsonPermissionMatrixStore,
+        Rung,
+        default_matrix,
+        grant,
+        graduation_thread_id,
+        make_connector_apply_fn,
+        revoke,
+        suggest_graduations,
+    )
+    from attune.orchestrator.importance import ImportanceTier, TierAssessment
+    from attune.orchestrator.triage import Priority, TriageResult
+    from attune.runtime import _resolve_resume
+
+    audit_log = JsonlAuditLog(str(tmp_path / "audit.jsonl"))
+    now = datetime.now(_tz.utc).isoformat()
+
+    def _clean_pair(action, domain, n=12):
+        """A clean n/n approved-unedited-and-applied track record."""
+        for i in range(n):
+            tid = f"gmail:{action}:{domain}:{i}:100"
+            audit_log.record(
+                thread_id=tid, workflow="draft_approve",
+                events=[{"event": "autonomy_gate", "ts": now, "action": action,
+                         "domain": domain, "routed_to": "approve"}],
+                domain=domain, user_id="me@example.com",
+            )
+            audit_log.record(
+                thread_id=tid, workflow="draft_approve",
+                events=[
+                    {"event": "human_decision", "ts": now, "decision": "approved"},
+                    {"event": "applied", "ts": now, "ref": f"d{i}"},
+                ],
+                domain=domain, user_id="me@example.com",
+            )
+
+    # --- Step 1: build a clean track record in a JsonlAuditLog -------------
+    _clean_pair("draft_reply", "mail")
+
+    # --- Step 2: suggest_graduations yields a DRAFT_REPLY -> ACT_NOTIFY ----
+    suggestions = suggest_graduations(audit_log, default_matrix())
+    assert len(suggestions) == 1
+    assert suggestions[0].record.action == Action.DRAFT_REPLY
+    assert suggestions[0].to_rung == Rung.ACT_NOTIFY
+
+    class _Profile:
+        """Every sender assesses NORMAL — the exit criterion's "routine
+        acknowledgments" don't depend on the sender being specially known."""
+
+        def assess(self, sender, *, now=None):
+            return TierAssessment(ImportanceTier.NORMAL, "test fixture", False)
+
+    class _Connector:
+        def __init__(self):
+            self.drafts: list[dict] = []
+            self.sent: list[str] = []
+
+        def get_thread(self, thread_id):
+            return type("T", (), {
+                "subject": "Q3 numbers", "from_addr": "client@x.com",
+                "body": "Following up on Q3 numbers.",
+                "last_message_at": None, "reply_to": "client@x.com",
+                "last_from_addr": "client@x.com",
+            })()
+
+        def create_draft(self, *, to, subject, body, thread_id=None):
+            ref = type("R", (), {"draft_id": f"d-{len(self.drafts)}"})()
+            self.drafts.append({"to": to, "subject": subject, "body": body})
+            return ref
+
+        def send_reply(self, *, draft_id):
+            self.sent.append(draft_id)
+
+        def supports_sending(self):
+            return True
+
+    class _AppClient:
+        def chat_completions_create(self, **kw):
+            class M:
+                content = "Thanks, sounds good."
+            class C:
+                message = M()
+            class R:
+                choices = [C()]
+            return R()
+
+    class _AppStore:
+        def search(self, *a, **kw):
+            return []
+
+        def add(self, *a, **kw):
+            return []
+
+    connector = _Connector()
+    checkpointer = InMemorySaver()
+    settings = Settings.from_env({
+        "ATTUNE_WORKSPACE_BACKEND": "mcp", "ATTUNE_MEM0_URL": "",
+        "ATTUNE_MCP_URL": "https://mcp.example/mcp",
+        "ATTUNE_USER_ID": "me@example.com",
+        "ATTUNE_AUDIT_LOG_PATH": str(tmp_path / "audit.jsonl"),
+        "ATTUNE_AUTONOMY_STATE_PATH": str(tmp_path / "grants.json"),
+        "ATTUNE_GRADUATION_STATE_PATH": str(tmp_path / "graduation_state.json"),
+        "ATTUNE_PENDING_STATE_PATH": str(tmp_path / "pending.json"),
+        "ATTUNE_MAIL_SEND_ENABLED": "1",
+        "ATTUNE_APPROVAL_CHANNEL": "slack",
+        "ATTUNE_NOTIFICATION_CHANNELS": "slack",
+        "ATTUNE_BRIEF_CHANNELS": "",
+        "ATTUNE_INTERACTION_CHANNELS": "slack",
+        "SLACK_BOT_TOKEN": "xoxb-test",
+        "ATTUNE_SLACK_ALLOWED_USERS": "U1",
+        "ATTUNE_ACK_DESTINATION_VISIBILITY": "1",
+    })
+    app = build_app(
+        settings, client=_AppClient(), store=_AppStore(),
+        checkpointer=checkpointer, audit_log=audit_log,
+        apply_fn=make_connector_apply_fn(connector),
+        importance_profile=_Profile(),
+    )
+
+    slack = _FakeSlackChannel()
+    said: list[dict] = []
+    pending = JsonPendingApprovals(settings.pending_state_path)
+    runtime = build_runtime(
+        settings, app=app, connector=connector,
+        gmail_service=object(), watch_state=_FakeWatchState(),
+        chat_state=_FakeChatState(), chat_events_service=object(),
+        calendar_service=object(), pending=pending,
+        conversation=_FakeConversation(), retry_queue=_FakeRetryQueue(),
+        slack=slack, slack_say=lambda **kw: said.append(kw),
+    )
+
+    def _triage(priority: Priority, reason: str):
+        return lambda client, summary: TriageResult(priority, reason)
+
+    # --- Step 3: the digest run posts a graduation card --------------------
+    runtime.post_autonomy_digest()
+    assert len(slack.approvals) == 1
+    card = slack.approvals[0]
+    expected_tid = graduation_thread_id(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    assert card["thread_id"] == expected_tid
+    assert "Autonomy graduation suggestion" in card["title"]
+
+    # --- Step 4: allowlisted approve applies the grant ----------------------
+    # (suggest_graduations only ever operates on the UNSCOPED grant — see
+    # docs/decisions.md — so this grants unscoped ACT_NOTIFY. Combined with
+    # the stage 1 urgent-interrupt rule, an unscoped ACT_NOTIFY grant
+    # auto-applies ROUTINE mail but still interrupts URGENT mail, which is
+    # exactly the "--priority routine equivalent" behavior the exit
+    # criterion describes, without needing the grant itself to be scoped.)
+    result = _resolve_resume(
+        expected_tid, "approved", None, actor="U1",
+        app=runtime.app, pending=runtime.pending,
+        graduation_state=runtime.graduation_state, settings=runtime.settings,
+    )
+    assert result["resolution"] == "granted"
+    assert runtime.app.current_matrix().max_rung(
+        Action.DRAFT_REPLY, Domain.MAIL,
+    ) == Rung.ACT_NOTIFY
+
+    # --- Step 5: next ROUTINE mail from a NORMAL sender auto-applies, with
+    # notification -----------------------------------------------------------
+    notices: list[str] = []
+    handle_gmail_notification(
+        runtime.app, {"emailAddress": "me@example.com", "historyId": "500"},
+        gmail_service=_FakeGmailService(thread_ids=("t1",)),
+        watch_state=_FakeWatchState(email="me@example.com", history_id="100"),
+        connector=connector, post_approval=runtime._post_mail_approval,
+        user_id="me@example.com", audit_log=runtime.app.audit_log,
+        pending=runtime.pending, notify=notices.append,
+        triage_fn=_triage(Priority.ROUTINE, "routine ack"),
+        mail_send_enabled=False,
+    )
+    assert len(slack.approvals) == 1  # no NEW card — it auto-applied
+    assert len(notices) == 1
+    assert "Acted autonomously" in notices[0]  # DRAFT_REPLY's generic ACT_NOTIFY text
+    assert len(connector.drafts) == 1  # a Gmail draft WAS created
+
+    # --- Step 6: an URGENT mail from the SAME sender still produces an
+    # approval card (stage 1's structural urgent-interrupt cap) -------------
+    notices.clear()
+    handle_gmail_notification(
+        runtime.app, {"emailAddress": "me@example.com", "historyId": "501"},
+        gmail_service=_FakeGmailService(thread_ids=("t1",)),
+        watch_state=_FakeWatchState(email="me@example.com", history_id="500"),
+        connector=connector, post_approval=runtime._post_mail_approval,
+        user_id="me@example.com", audit_log=runtime.app.audit_log,
+        pending=runtime.pending, notify=notices.append,
+        triage_fn=_triage(Priority.URGENT, "client escalation"),
+        mail_send_enabled=False,
+    )
+    assert len(slack.approvals) == 2  # a real card THIS time, not an auto-apply
+    assert slack.approvals[-1]["domain"] == "mail"
+    assert "URGENT" in (slack.approvals[-1]["title"] or "")
+
+    # --- Step 7: a CLI-granted, scoped SEND_REPLY ACT_NOTIFY auto-SENDS a
+    # ROUTINE thread, with the "Sent reply" notification --------------------
+    grant(
+        JsonPermissionMatrixStore(settings.autonomy_state_path),
+        runtime.app.current_matrix(), Action.SEND_REPLY, Domain.MAIL,
+        Rung.ACT_NOTIFY, scope=GrantScope(priorities=frozenset({"routine"})),
+        audit_log=audit_log, user_id="me@example.com",
+    )
+    # A different Gmail thread ("t3") — "t1" still carries an unresolved
+    # pending card from step 6's URGENT interrupt, and the pending
+    # registry's real dedupe would otherwise skip a second notification
+    # for the same source thread while a card is still unanswered.
+    notices.clear()
+    handle_gmail_notification(
+        runtime.app, {"emailAddress": "me@example.com", "historyId": "600"},
+        gmail_service=_FakeGmailService(thread_ids=("t3",)),
+        watch_state=_FakeWatchState(email="me@example.com", history_id="501"),
+        connector=connector, post_approval=runtime._post_mail_approval,
+        user_id="me@example.com", audit_log=runtime.app.audit_log,
+        pending=runtime.pending, notify=notices.append,
+        triage_fn=_triage(Priority.ROUTINE, "routine ack"),
+        mail_send_enabled=True,
+    )
+    assert notices == ["Sent reply to client@x.com: Q3 numbers"]
+    assert len(connector.sent) == 1  # send_reply was actually called
+
+    # --- Step 8: the ceiling pin — a graduation card for SEND_REPLY is
+    # NEVER produced, even with a perfect send track record ------------------
+    _clean_pair("send_reply", "mail")
+    slack.approvals.clear()
+    graduations_now = suggest_graduations(audit_log, runtime.app.current_matrix())
+    assert any(s.record.action == Action.SEND_REPLY for s in graduations_now)  # the suggestion IS real
+    runtime.post_autonomy_digest()
+    assert all(
+        Action.SEND_REPLY.value not in c["thread_id"] for c in slack.approvals
+    )
+
+    # --- Step 9: revoke returns behavior to cards ---------------------------
+    # (revoke with no scope claws back EVERY grant held for the pair —
+    # stage 1's documented semantics — so this falls all the way to the
+    # bare READ_ONLY floor, not back to default_matrix()'s original PROPOSE
+    # baseline; the live file-backed matrix has no notion of that baseline
+    # once a key has been explicitly revoked.)
+    revoke(
+        JsonPermissionMatrixStore(settings.autonomy_state_path),
+        runtime.app.current_matrix(), Action.DRAFT_REPLY, Domain.MAIL,
+        audit_log=audit_log, user_id="me@example.com",
+    )
+    assert runtime.app.current_matrix().max_rung(
+        Action.DRAFT_REPLY, Domain.MAIL,
+    ) == Rung.READ_ONLY
+
+    posted_after_revoke: list[tuple] = []
+    handle_gmail_notification(
+        runtime.app, {"emailAddress": "me@example.com", "historyId": "700"},
+        gmail_service=_FakeGmailService(thread_ids=("t2",)),
+        watch_state=_FakeWatchState(email="me@example.com", history_id="600"),
+        connector=connector,
+        post_approval=lambda *a, **kw: posted_after_revoke.append(a),
+        user_id="me@example.com", audit_log=runtime.app.audit_log,
+        pending=runtime.pending, notify=lambda t: None,
+        triage_fn=_triage(Priority.ROUTINE, "routine ack"),
+        mail_send_enabled=False,
+    )
+    assert len(posted_after_revoke) == 1  # a card again — revoked, not auto-applied
+
+
+# ---------------------------------------------------------------------------
+# _resolve_resume — namespace-keyed graph selection (Phase 4 stage 2 fix)
+#
+# A pre-existing gap found during this stage: production always resumed via
+# the shared draft graph regardless of which compiled graph a card's
+# thread_id actually belonged to. Approving an archive/decline/reschedule
+# card would therefore have applied the WRONG effect (create_draft instead
+# of label_thread/decline_invite/reschedule_event) — exactly the bug class
+# this project's approval spine exists to prevent. See docs/decisions.md.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_resume_regression_archive_card_applies_label_not_draft(tmp_path):
+    """THE regression pin: resuming an archive: thread must call
+    connector.label_thread, and must NEVER call connector.create_draft —
+    the exact wrong-effect bug this stage fixed."""
+    pytest.importorskip("langgraph")
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from attune.orchestrator import (
+        archive_draft_fn,
+        build_draft_approve_graph,
+        make_connector_apply_fn,
+        make_label_apply_fn,
+    )
+    from attune.runtime import _resolve_resume
+
+    class _Connector:
+        def __init__(self):
+            self.drafts: list[dict] = []
+            self.labels: list[dict] = []
+
+        def get_thread(self, thread_id):
+            return type("T", (), {
+                "subject": "Sale!", "from_addr": "deals@x.com",
+                "last_message_at": None,
+            })()
+
+        def create_draft(self, **kw):
+            self.drafts.append(kw)
+            return type("R", (), {"draft_id": "d-wrong"})()
+
+        def label_thread(self, thread_id, *, label, archive):
+            self.labels.append(
+                {"thread_id": thread_id, "label": label, "archive": archive}
+            )
+
+    connector = _Connector()
+    checkpointer = InMemorySaver()
+    shared_graph = build_draft_approve_graph(
+        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
+        apply_fn=make_connector_apply_fn(connector),
+    )
+    label_graph = build_draft_approve_graph(
+        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
+        draft_fn=archive_draft_fn, apply_fn=make_label_apply_fn(connector),
+    )
+    app = _app_ctx(graph=shared_graph, label_graph=label_graph)
+
+    thread_id = "archive:t1:nosnap"
+    text = "Archive 'Sale!' from deals@x.com — triaged noise: newsletter"
+    label_graph.invoke(
+        {
+            "user_id": "u1", "domain": "mail", "action": "label",
+            "incoming_ref": "t1", "incoming_summary": text,
+            "label_name": "Attune/Noise", "audit_events": [], "iteration_count": 0,
+        },
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+    _resolve_resume(
+        thread_id, "approved", None, actor="U1", app=app, pending=None,
+        graduation_state=None, settings=_settings(),
+    )
+
+    assert connector.labels == [
+        {"thread_id": "t1", "label": "Attune/Noise", "archive": True}
+    ]
+    assert connector.drafts == []
+
+
+def test_resolve_resume_regression_decline_card_applies_decline_invite_not_draft(tmp_path):
+    """Same regression pin for decline-invite proposals: resuming a
+    decline: thread must call connector.decline_invite, never
+    connector.create_draft."""
+    pytest.importorskip("langgraph")
+    from datetime import datetime, timezone as _tz
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from attune.orchestrator import (
+        build_draft_approve_graph,
+        calendar_action_draft_fn,
+        make_calendar_action_apply_fn,
+        make_connector_apply_fn,
+    )
+    from attune.runtime import _resolve_resume
+
+    class _Connector:
+        def __init__(self):
+            self.drafts: list[dict] = []
+            self.declined: list[str] = []
+
+        def get_thread(self, thread_id):
+            return type("T", (), {
+                "subject": "x", "from_addr": "a@b.com", "last_message_at": None,
+            })()
+
+        def create_draft(self, **kw):
+            self.drafts.append(kw)
+            return type("R", (), {"draft_id": "d-wrong"})()
+
+        def get_event(self, event_id):
+            return type("E", (), {
+                "event_id": event_id,
+                "start": datetime(2026, 7, 10, 14, tzinfo=_tz.utc),
+                "response_status": "needsAction",
+            })()
+
+        def decline_invite(self, event_id):
+            self.declined.append(event_id)
+
+    connector = _Connector()
+    checkpointer = InMemorySaver()
+    shared_graph = build_draft_approve_graph(
+        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
+        apply_fn=make_connector_apply_fn(connector),
+    )
+    calendar_action_graph = build_draft_approve_graph(
+        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
+        draft_fn=calendar_action_draft_fn,
+        apply_fn=make_calendar_action_apply_fn(connector),
+    )
+    app = _app_ctx(graph=shared_graph, calendar_action_graph=calendar_action_graph)
+
+    snapshot = "2026-07-10T14:00:00+00:00"
+    thread_id = f"decline:e1:{snapshot}"
+    calendar_action_graph.invoke(
+        {
+            "user_id": "u1", "domain": "calendar", "action": "decline_invite",
+            "incoming_ref": "e1", "incoming_summary": "Decline 'X'",
+            "source_snapshot": snapshot, "audit_events": [], "iteration_count": 0,
+        },
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+    _resolve_resume(
+        thread_id, "approved", None, actor="U1", app=app, pending=None,
+        graduation_state=None, settings=_settings(),
+    )
+
+    assert connector.declined == ["e1"]
+    assert connector.drafts == []
+
+
+def test_resolve_resume_falls_through_to_shared_graph_for_gmail_thread(tmp_path):
+    """Back-compat: an ordinary "gmail:" (DRAFT_REPLY/SEND_REPLY/FOLLOW_UP)
+    thread_id still resumes via the shared graph, unaffected by the
+    namespace-keyed routing added for archive/decline/reschedule."""
+
+    class _RecordingGraph:
+        def __init__(self):
+            self.invoked = 0
+
+        def invoke(self, arg, config):
+            self.invoked += 1
+            return {"domain": "mail", "audit_events": [], "applied_ref": "shared"}
+
+    shared_graph = _RecordingGraph()
+    label_graph = _RecordingGraph()
+    calendar_action_graph = _RecordingGraph()
+    app = _app_ctx(
+        graph=shared_graph, label_graph=label_graph,
+        calendar_action_graph=calendar_action_graph,
+    )
+
+    from attune.runtime import _resolve_resume
+
+    _resolve_resume(
+        "gmail:t1:100", "approved", None, actor="U1", app=app, pending=None,
+        graduation_state=None, settings=_settings(),
+    )
+
+    assert shared_graph.invoked == 1
+    assert label_graph.invoked == 0
+    assert calendar_action_graph.invoked == 0
+
+
+def test_resolve_resume_routes_reschedule_thread_to_calendar_action_graph():
+    class _RecordingGraph:
+        def __init__(self):
+            self.invoked = 0
+
+        def invoke(self, arg, config):
+            self.invoked += 1
+            return {"domain": "calendar", "audit_events": [], "applied_ref": "ok"}
+
+    shared_graph = _RecordingGraph()
+    calendar_action_graph = _RecordingGraph()
+    app = _app_ctx(graph=shared_graph, calendar_action_graph=calendar_action_graph)
+
+    from attune.runtime import _resolve_resume
+
+    _resolve_resume(
+        "calendar:reschedule:e1:202607101400", "approved", None, actor="U1",
+        app=app, pending=None, graduation_state=None, settings=_settings(),
+    )
+
+    assert calendar_action_graph.invoked == 1
+    assert shared_graph.invoked == 0
+
+
+def test_resolve_resume_routes_graduation_thread_to_resolve_autonomy_card(tmp_path):
+    from attune.orchestrator import (
+        Action,
+        Domain,
+        JsonPermissionMatrixStore,
+        Rung,
+        default_matrix,
+        graduation_thread_id,
+    )
+    from attune.runtime import _resolve_resume
+
+    settings = _settings(ATTUNE_AUTONOMY_STATE_PATH=str(tmp_path / "grants.json"))
+    graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+    thread_id = graduation_thread_id(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    graduation_state.record_card(
+        thread_id, kind="graduation", action=Action.DRAFT_REPLY,
+        domain=Domain.MAIL, to_rung=Rung.ACT_NOTIFY,
+    )
+    app = _app_ctx(matrix=default_matrix())
+
+    result = _resolve_resume(
+        thread_id, "approved", None, actor="U1", app=app, pending=None,
+        graduation_state=graduation_state, settings=settings,
+    )
+
+    assert result["resolution"] == "granted"
+    loaded = JsonPermissionMatrixStore(settings.autonomy_state_path).load()
+    assert loaded.max_rung(Action.DRAFT_REPLY, Domain.MAIL) == Rung.ACT_NOTIFY
+
+
+def test_process_chat_interaction_routes_graduation_card_via_shared_resolve(tmp_path):
+    """The async Google Chat interaction path (process_chat_interaction)
+    shares _resolve_resume with build_runtime's _bound_resume — this proves
+    the fix applies to BOTH production resume paths, not just Slack's."""
+    from attune.orchestrator import (
+        Action,
+        Domain,
+        JsonPermissionMatrixStore,
+        Rung,
+        default_matrix,
+        graduation_thread_id,
+    )
+
+    settings = _settings(
+        ATTUNE_AUTONOMY_STATE_PATH=str(tmp_path / "grants.json"),
+        ATTUNE_CHAT_SPACE="spaces/ABC",
+    )
+    thread_id = graduation_thread_id(Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY)
+    gchat = _FakeGChatChannel()
+    runtime = _runtime(
+        app=_app_ctx(matrix=default_matrix()), gchat=gchat,
+    )
+    runtime.settings = settings
+    runtime.graduation_state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+    runtime.graduation_state.record_card(
+        thread_id, kind="graduation", action=Action.DRAFT_REPLY,
+        domain=Domain.MAIL, to_rung=Rung.ACT_NOTIFY,
+    )
+
+    event = {
+        "type": "CARD_CLICKED",
+        "user": {"name": "users/1"},
+        "action": {
+            "actionMethodName": "attune_approve",
+            "parameters": [{"key": "thread_id", "value": thread_id}],
+        },
+    }
+    runtime.process_chat_interaction(event)
+
+    loaded = JsonPermissionMatrixStore(settings.autonomy_state_path).load()
+    assert loaded.max_rung(Action.DRAFT_REPLY, Domain.MAIL) == Rung.ACT_NOTIFY
+    assert gchat.texts  # a confirmation was posted back
 
 
 def test_gmail_notification_registers_pending_card():
