@@ -145,6 +145,21 @@
         </button>
         <div id="customer-export-list" aria-live="polite"></div>
       </section>
+      <section id="account-deletion" hidden>
+        <h2>Delete your Attune account</h2>
+        <p>
+          This permanently erases your Attune-held content and account data
+          after a grace period. It does not delete your Google or Slack
+          source data.
+        </p>
+        <p id="account-deletion-state" aria-live="polite"></p>
+        <button id="account-deletion-request" class="secondary danger" type="button">
+          Delete account
+        </button>
+        <button id="account-deletion-cancel" class="secondary" type="button" hidden>
+          Cancel deletion
+        </button>
+      </section>
       <button id="session-sign-out" class="secondary" type="button" hidden>
         Sign out
       </button>

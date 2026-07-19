@@ -176,6 +176,50 @@ class CustomerExports:
         )()
 
 
+class TenantDeletion:
+    def __init__(self, existing=None, cancellable=True, failure=None):
+        self.calls = []
+        self.existing = existing
+        self.cancellable = cancellable
+        self.failure = failure
+
+    def status(self, context, **kwargs):
+        self.calls.append(("status", context, kwargs))
+        if self.failure:
+            raise self.failure
+        return self.existing
+
+    def request(self, context, **kwargs):
+        self.calls.append(("request", context, kwargs))
+        if self.failure:
+            raise self.failure
+        now = datetime.now(timezone.utc)
+        return type(
+            "Requested",
+            (),
+            {
+                "id": JOB_ID,
+                "status": "pending",
+                "requested_at": now,
+                "grace_expires_at": now + timedelta(days=14),
+                "created": self.existing is None,
+            },
+        )()
+
+    def cancel(self, context, **kwargs):
+        self.calls.append(("cancel", context, kwargs))
+        if self.failure:
+            raise self.failure
+        return type(
+            "Cancelled",
+            (),
+            {
+                "cancelled": self.cancellable,
+                "status": "cancelled" if self.cancellable else "claimed",
+            },
+        )()
+
+
 class Policies:
     def __init__(self, onboarding, status="validated", failure=None):
         self.onboarding = onboarding
@@ -1167,6 +1211,148 @@ def test_customer_export_mutations_require_recent_auth_and_exact_body():
     assert response.status_code == 409
     assert response.get_json() == {"error": "recent_authentication_required"}
     assert exports.calls == []
+
+
+def test_tenant_deletion_gate_off_pins_404():
+    client = identity_client()
+    assert (
+        client.get(
+            "/v1/account/deletion-request", base_url=f"https://{HOST}"
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/v1/account/deletion-requests",
+            json={"confirmation": "delete my account"},
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(
+            "/v1/account/deletion-requests",
+            json={"confirmation": "cancel deletion"},
+            base_url=f"https://{HOST}",
+        ).status_code
+        == 404
+    )
+
+
+def test_tenant_deletion_requires_identity_when_enabled():
+    with pytest.raises(ValueError, match="deletion"):
+        identity_client(hosted_deletion_enabled=True)
+    with pytest.raises(ValueError):
+        create_app(HOST, hosted_deletion_enabled=True, hosted_deletion=TenantDeletion())
+
+
+def test_tenant_deletion_status_reports_none_when_unrequested():
+    deletion = TenantDeletion(existing=None)
+    client, _sessions = signed_in_client(
+        hosted_deletion_enabled=True, hosted_deletion=deletion
+    )
+    response = client.get("/v1/account/deletion-request", base_url=f"https://{HOST}")
+    assert response.status_code == 200
+    assert response.get_json() == {"schema_version": 1, "status": "none"}
+
+
+def test_tenant_deletion_status_requires_a_session():
+    deletion = TenantDeletion(existing=None)
+    client = identity_client(
+        sessions=Sessions(opened=False),
+        hosted_deletion_enabled=True,
+        hosted_deletion=deletion,
+    )
+    response = client.get("/v1/account/deletion-request", base_url=f"https://{HOST}")
+    assert response.status_code == 401
+    assert deletion.calls == []
+
+
+def test_tenant_deletion_request_requires_recent_auth_csrf_and_exact_body():
+    deletion = TenantDeletion()
+    client, _sessions = signed_in_client(
+        sessions=Sessions(recent=False),
+        hosted_deletion_enabled=True,
+        hosted_deletion=deletion,
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+
+    # Wrong confirmation body is refused before any auth/CSRF check runs.
+    wrong_body = client.post(
+        "/v1/account/deletion-requests",
+        json={"confirmation": "delete"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert wrong_body.status_code == 400
+    assert deletion.calls == []
+
+    # Missing CSRF header is refused (invalid_session, not the recency 409).
+    no_csrf = client.post(
+        "/v1/account/deletion-requests",
+        json={"confirmation": "delete my account"},
+        headers=same_origin(),
+        base_url=f"https://{HOST}",
+    )
+    assert no_csrf.status_code == 401
+    assert deletion.calls == []
+
+    # A valid but non-recent session gets the distinguishable 409.
+    stale = client.post(
+        "/v1/account/deletion-requests",
+        json={"confirmation": "delete my account"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert stale.status_code == 409
+    assert stale.get_json() == {"error": "recent_authentication_required"}
+    assert deletion.calls == []
+
+
+def test_tenant_deletion_request_succeeds_with_recent_auth():
+    deletion = TenantDeletion(existing=None)
+    client, _sessions = signed_in_client(
+        hosted_deletion_enabled=True, hosted_deletion=deletion
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    response = client.post(
+        "/v1/account/deletion-requests",
+        json={"confirmation": "delete my account"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["deletion_request"]["status"] == "pending"
+    assert deletion.calls[-1][0] == "request"
+    assert deletion.calls[-1][2] == {
+        "principal_id": PRINCIPAL_ID,
+        "session_id": SESSION_ID,
+    }
+
+
+def test_tenant_deletion_cancel_requires_recent_auth_and_reports_conflict():
+    deletion = TenantDeletion(cancellable=False)
+    client, _sessions = signed_in_client(
+        hosted_deletion_enabled=True, hosted_deletion=deletion
+    )
+    csrf = client.get_cookie("__Host-attune_csrf", domain=HOST).value
+    response = client.delete(
+        "/v1/account/deletion-requests",
+        json={"confirmation": "cancel deletion"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "deletion_not_cancellable"}
+
+    invalid_body = client.delete(
+        "/v1/account/deletion-requests",
+        json={"confirmation": "nope"},
+        headers={**same_origin(), "X-Attune-CSRF": csrf},
+        base_url=f"https://{HOST}",
+    )
+    assert invalid_body.status_code == 400
 
 
 def test_hosted_channels_are_bounded_recent_auth_and_effect_free():

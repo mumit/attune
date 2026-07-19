@@ -108,8 +108,15 @@ RELATIONAL_ASSETS = (
         DeletionRule.DEIDENTIFY,
         customer_export=True,
     ),
+    # deletion_requests (docs/future-state.md Phase 6 "hosted operations";
+    # G19; see docs/data-lifecycle.md's "Content retention and tenant
+    # deletion design" section, dated 2026-07-19) is the durable
+    # right-to-be-forgotten ceremony ledger: it must survive the tenant's own
+    # deletion long enough to prove the ceremony happened, the same
+    # class/rule/export triple as `deletion_markers`. It is never a target of
+    # its own tenant's erase walk (see `erase_tenant_deletion_relation`).
     *_assets(
-        "deletion_markers",
+        "deletion_markers deletion_requests",
         DataClass.DELETION_LEDGER,
         DeletionRule.RETAIN_TOMBSTONE,
         customer_export=False,

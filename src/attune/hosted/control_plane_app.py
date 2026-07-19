@@ -32,6 +32,8 @@ from .secret_broker_mutation_client import SecretBrokerMutationClient
 from .customer_export import PostgresCustomerExportRequests
 from .customer_export_service import CustomerExportService
 from .export_download import PostgresExportDownloadAuthorizations
+from .tenant_deletion import PostgresTenantDeletionRequests
+from .tenant_deletion_service import TenantDeletionService
 from .web_conversation import PostgresWebConversationRepository, WebConversationService
 
 
@@ -122,6 +124,12 @@ def create_production_app():
     signup_enabled = signup_enabled_value == "true"
     if signup_enabled and not identity_enabled:
         raise ValueError("hosted signup requires identity")
+    deletion_enabled_value = os.environ.get("ATTUNE_HOSTED_DELETION_ENABLED", "false")
+    if deletion_enabled_value not in {"true", "false"}:
+        raise ValueError("ATTUNE_HOSTED_DELETION_ENABLED must be true or false")
+    deletion_enabled = deletion_enabled_value == "true"
+    if deletion_enabled and not identity_enabled:
+        raise ValueError("hosted deletion requires identity")
     google_oauth = (
         PostgresGoogleOAuthStartRepository(iam_connection) if oauth_enabled else None
     )
@@ -149,12 +157,20 @@ def create_production_app():
         )
     audit = (
         PostgresAuditProducerRepository(iam_connection, producer_kind="control_plane")
-        if policy_enabled or channels_enabled or channel_setup_enabled or signup_enabled
+        if policy_enabled
+        or channels_enabled
+        or channel_setup_enabled
+        or signup_enabled
+        or deletion_enabled
         else None
     )
     audit_writer = (
         AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"])
-        if policy_enabled or channels_enabled or channel_setup_enabled or signup_enabled
+        if policy_enabled
+        or channels_enabled
+        or channel_setup_enabled
+        or signup_enabled
+        or deletion_enabled
         else None
     )
     return create_app(
@@ -240,6 +256,16 @@ def create_production_app():
                 PostgresExportDownloadAuthorizations(iam_connection),
             )
             if customer_exports_enabled
+            else None
+        ),
+        hosted_deletion_enabled=deletion_enabled,
+        hosted_deletion=(
+            TenantDeletionService(
+                PostgresTenantDeletionRequests(iam_connection),
+                audit,
+                audit_writer,
+            )
+            if deletion_enabled
             else None
         ),
         hosted_web_conversation_enabled=web_conversation_enabled,
