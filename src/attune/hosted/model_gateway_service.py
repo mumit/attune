@@ -6,11 +6,17 @@ import logging
 import time
 from typing import Any, Callable, Mapping
 
-from .model_gateway import HostedModelGateway
+from .model_gateway import PROFILE_NAME, HostedModelGateway
 from .task_envelope import _google_token_verifier, _verify_claims
 
 LOG = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 40_000
+
+
+def _usage_body(usage) -> dict[str, int] | None:
+    if usage is None:
+        return None
+    return {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens}
 
 
 def create_app(
@@ -19,6 +25,7 @@ def create_app(
     expected_audience: str,
     expected_worker: str,
     token_verifier: Callable[[str, str], Mapping[str, Any]] | None = None,
+    profiles_enabled: bool = False,
 ):
     from flask import Flask, jsonify, request
 
@@ -53,6 +60,23 @@ def create_app(
     def health():
         return jsonify({"status": "ok"})
 
+    def _profile_from(body: dict) -> str | None:
+        """Extracts the optional bounded ``profile`` field. Returns ``None``
+        when absent (byte-identical to the pre-profile envelope). The field
+        is only ever accepted when THIS gateway instance's own
+        ATTUNE_ENABLE_TENANT_MODEL_PROFILES gate is on -- independent
+        defense-in-depth from the worker's own gate, so a request carrying
+        the field while this gate is off is refused as invalid_request
+        rather than silently honored or silently ignored."""
+        if "profile" not in body:
+            return None
+        if not profiles_enabled:
+            raise ValueError("model profile field is not enabled")
+        profile = body["profile"]
+        if not isinstance(profile, str) or not PROFILE_NAME.fullmatch(profile):
+            raise ValueError("model profile field is invalid")
+        return profile
+
     @app.post("/v1/models/complete")
     def complete():
         if not authorized():
@@ -62,18 +86,22 @@ def create_app(
         body = request.get_json(silent=True)
         if (
             not isinstance(body, dict)
-            or set(body) != {"version", "task", "messages"}
             or body.get("version") != 1
+            or set(body) not in ({"version", "task", "messages"}, {"version", "task", "messages", "profile"})
+            or (not profiles_enabled and "profile" in body)
         ):
             return jsonify({"error": "invalid_request"}), 400
         try:
-            result = gateway.complete(task=body["task"], messages=body["messages"])
+            profile = _profile_from(body)
+            result = gateway.complete(
+                task=body["task"], messages=body["messages"], profile=profile
+            )
         except ValueError:
             return jsonify({"error": "invalid_request"}), 400
         except Exception as error:
             LOG.warning("model completion failed (%s)", type(error).__name__)
             return jsonify({"error": "model_unavailable"}), 503
-        return jsonify({"text": result.text})
+        return jsonify({"text": result.text, "usage": _usage_body(result.usage)})
 
     @app.post("/v1/models/embed")
     def embed():
@@ -84,18 +112,20 @@ def create_app(
         body = request.get_json(silent=True)
         if (
             not isinstance(body, dict)
-            or set(body) != {"version", "task", "input"}
             or body.get("version") != 1
             or body.get("task") != "embed"
+            or set(body) not in ({"version", "task", "input"}, {"version", "task", "input", "profile"})
+            or (not profiles_enabled and "profile" in body)
         ):
             return jsonify({"error": "invalid_request"}), 400
         try:
-            result = gateway.embed(text=body["input"])
+            profile = _profile_from(body)
+            result = gateway.embed(text=body["input"], profile=profile)
         except ValueError:
             return jsonify({"error": "invalid_request"}), 400
         except Exception as error:
             LOG.warning("model embedding failed (%s)", type(error).__name__)
             return jsonify({"error": "model_unavailable"}), 503
-        return jsonify({"vector": list(result.vector)})
+        return jsonify({"vector": list(result.vector), "usage": _usage_body(result.usage)})
 
     return app

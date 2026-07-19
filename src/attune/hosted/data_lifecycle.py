@@ -57,10 +57,15 @@ def _assets(
 
 
 RELATIONAL_ASSETS = (
+    # tenant_model_preferences (Phase 6 "hosted operations"; per-tenant model
+    # configuration) is a bounded owner preference -- one row per tenant, a
+    # named profile chosen from a fixed vocabulary -- the same shape as
+    # `hosted_channel_preferences`, so it gets that table's exact
+    # class/rule/export triple.
     *_assets(
         "tenants principals installations connectors policies autonomy_grants "
         "hosted_onboarding_states hosted_channel_preferences "
-        "hosted_channel_destinations",
+        "hosted_channel_destinations tenant_model_preferences",
         DataClass.ACCOUNT,
         DeletionRule.ERASE,
         customer_export=True,
@@ -91,13 +96,18 @@ RELATIONAL_ASSETS = (
         DeletionRule.CRYPTO_ERASE,
         customer_export=False,
     ),
+    # model_usage_daily (Phase 6 "hosted operations"; per-tenant model usage
+    # metering) is a content-free per (tenant, task, profile, day) aggregate
+    # counter feeding future billing -- never prompt/response text, never a
+    # per-message row -- the same class/rule/export triple as the pre-existing
+    # generic `usage_records` table it sits alongside.
     *_assets(
         "jobs approvals capability_admissions provider_events job_retries "
         "workflow_checkpoints "
         "usage_records dispatch_intents credential_intents job_reconciliations "
         "oauth_transactions identity_sessions hosted_channel_setup_transactions "
         "hosted_channel_routes hosted_channel_deliveries export_jobs "
-        "export_object_attempts export_download_grants",
+        "export_object_attempts export_download_grants model_usage_daily",
         DataClass.OPERATIONAL,
         DeletionRule.ERASE,
         customer_export=False,

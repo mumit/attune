@@ -134,6 +134,16 @@ class HostedBrief(Protocol):
     def run(self, context, **kwargs): ...
 
 
+class HostedModelProfile(Protocol):
+    def read(self, context): ...
+
+    def configure(self, context, **kwargs): ...
+
+
+class HostedUsage(Protocol):
+    def recent(self, context): ...
+
+
 class HostedSignup(Protocol):
     def provision(self, identity: VerifiedIdentity) -> SignupResult: ...
 
@@ -172,6 +182,10 @@ def create_app(
     web_conversation: WebConversation | None = None,
     hosted_brief_enabled: bool = False,
     hosted_brief: HostedBrief | None = None,
+    hosted_model_profile_enabled: bool = False,
+    hosted_model_profile: HostedModelProfile | None = None,
+    hosted_usage_enabled: bool = False,
+    hosted_usage: HostedUsage | None = None,
     hosted_signup_enabled: bool = False,
     hosted_signup: HostedSignup | None = None,
     hosted_signup_throttle: SignupThrottle | None = None,
@@ -272,6 +286,16 @@ def create_app(
     if hosted_brief_enabled and (not identity_enabled or hosted_brief is None):
         raise ValueError(
             "enabled hosted brief requires identity and a dispatching service"
+        )
+    if hosted_model_profile_enabled and (
+        not identity_enabled or hosted_model_profile is None
+    ):
+        raise ValueError(
+            "enabled hosted model profile requires identity and an audited service"
+        )
+    if hosted_usage_enabled and (not identity_enabled or hosted_usage is None):
+        raise ValueError(
+            "enabled hosted usage requires identity and a usage service"
         )
     if hosted_signup_enabled and (not identity_enabled or hosted_signup is None):
         raise ValueError(
@@ -529,6 +553,12 @@ def create_app(
                     ),
                     "hosted_brief": (
                         "available" if hosted_brief_enabled else "not_configured"
+                    ),
+                    "hosted_model_profile": (
+                        "available" if hosted_model_profile_enabled else "not_configured"
+                    ),
+                    "hosted_usage": (
+                        "available" if hosted_usage_enabled else "not_configured"
                     ),
                 }
             )
@@ -1120,6 +1150,73 @@ def create_app(
                     }
                 ), 202
 
+        if hosted_model_profile_enabled:
+
+            @app.get("/v1/model-profile")
+            def read_model_profile():
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    current = hosted_model_profile.read(  # type: ignore[union-attr]
+                        session.context
+                    )
+                except Exception:
+                    return jsonify({"error": "model_profile_unavailable"}), 503
+                return jsonify(_public_model_profile(current))
+
+            @app.put("/v1/model-profile")
+            def configure_model_profile():
+                """A bounded owner preference, not an authority change --
+                ordinary session, same-origin, and CSRF proofs, the same bar
+                as ``POST /v1/conversation/messages``/``POST /v1/brief/run``
+                (see the dated 'Web conversation acceptance uses ordinary
+                proofs, not recency' entry in decisions.md), not the
+                ten-minute recency window ``PUT /v1/onboarding/channels``
+                reserves for a channel-authority change."""
+                if not request.is_json:
+                    return jsonify({"error": "invalid_request"}), 400
+                payload = request.get_json(silent=True)
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != {"schema_version", "profile"}
+                    or payload.get("schema_version") != 1
+                ):
+                    return jsonify({"error": "invalid_request"}), 400
+                session = _authorize_mutation(
+                    request, expected_origin, sessions,  # type: ignore[arg-type]
+                )
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    result = hosted_model_profile.configure(  # type: ignore[union-attr]
+                        session.context,
+                        principal_id=session.principal_id,
+                        session_id=session.id,
+                        profile=payload["profile"],
+                    )
+                except (TypeError, ValueError):
+                    return jsonify({"error": "invalid_model_profile"}), 400
+                except Exception:
+                    return jsonify({"error": "model_profile_unavailable"}), 503
+                return jsonify(_public_model_profile(result))
+
+        if hosted_usage_enabled:
+
+            @app.get("/v1/usage")
+            def read_model_usage():
+                """The customer-facing half of metering: the tenant's own
+                bounded 30-day daily aggregates, content-free by
+                construction. Ordinary session, no CSRF needed (a read)."""
+                session = _read_session(request, sessions)  # type: ignore[arg-type]
+                if session is None:
+                    return jsonify({"error": "invalid_session"}), 401
+                try:
+                    items = hosted_usage.recent(session.context)  # type: ignore[union-attr]
+                except Exception:
+                    return jsonify({"error": "usage_unavailable"}), 503
+                return jsonify(_public_usage(items))
+
         if hosted_channels_enabled:
 
             @app.get("/v1/onboarding/channels")
@@ -1652,6 +1749,37 @@ def _public_export(item) -> dict:
         "expires_at": item.expires_at.isoformat() if item.expires_at else None,
         "archive_bytes": item.archive_bytes,
         "download_available": item.state == "ready",
+    }
+
+
+def _public_model_profile(item) -> dict:
+    return {
+        "schema_version": 1,
+        "profile": item.profile if item is not None else "standard",
+        "revision": item.revision if item is not None else 0,
+        "options": [
+            {"id": "standard", "label": "Standard"},
+            {"id": "premium", "label": "Premium"},
+        ],
+    }
+
+
+def _public_usage(items) -> dict:
+    return {
+        "schema_version": 1,
+        "window_days": 30,
+        "items": [
+            {
+                "date": item.usage_date.isoformat(),
+                "task": item.task,
+                "profile": item.profile,
+                "request_count": item.request_count,
+                "input_tokens": item.input_tokens,
+                "output_tokens": item.output_tokens,
+                "failure_count": item.failure_count,
+            }
+            for item in items
+        ],
     }
 
 

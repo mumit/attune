@@ -42,6 +42,8 @@ from .web_conversation_executor import (
     WebConversationExecutor,
 )
 from .model_gateway_client import ModelGatewayClient
+from .model_profile import PostgresTenantModelProfileRepository
+from .model_usage import PostgresModelUsageMeterRepository
 from .repositories import (
     PostgresApprovalRepository,
     PostgresJobRepository,
@@ -179,6 +181,32 @@ def create_production_app():
             AuditWriterClient(os.environ["ATTUNE_AUDIT_WRITER_URL"]),
         )
 
+    # Per-tenant model profiles and usage metering (docs/future-state.md
+    # Phase 6 "hosted operations"), each independently gated and dormant by
+    # default. Neither repository is constructed at all unless its own gate
+    # is on, so a conversation executor whose gates are both off receives
+    # ``model_profiles=None, usage=None`` -- the pinned byte-identical path.
+    model_profiles_enabled = os.environ.get(
+        "ATTUNE_ENABLE_TENANT_MODEL_PROFILES", "false"
+    )
+    if model_profiles_enabled not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_TENANT_MODEL_PROFILES must be true or false")
+    model_profiles = (
+        PostgresTenantModelProfileRepository(iam_connection)
+        if model_profiles_enabled == "true"
+        else None
+    )
+    usage_metering_enabled = os.environ.get(
+        "ATTUNE_ENABLE_MODEL_USAGE_METERING", "false"
+    )
+    if usage_metering_enabled not in {"true", "false"}:
+        raise ValueError("ATTUNE_ENABLE_MODEL_USAGE_METERING must be true or false")
+    usage_meter = (
+        PostgresModelUsageMeterRepository(iam_connection)
+        if usage_metering_enabled == "true"
+        else None
+    )
+
     google_chat_conversation = None
     conversation_enabled = os.environ.get(
         "ATTUNE_ENABLE_GOOGLE_CHAT_CONVERSATION", "false"
@@ -208,6 +236,8 @@ def create_production_app():
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
             memory=memory,
             memory_audit=memory_audit,
+            model_profiles=model_profiles,
+            usage=usage_meter,
         )
     slack_conversation = None
     slack_conversation_enabled = os.environ.get(
@@ -236,6 +266,8 @@ def create_production_app():
             timezone_name=os.environ.get("ATTUNE_HOSTED_TIMEZONE", "UTC"),
             memory=memory,
             memory_audit=memory_audit,
+            model_profiles=model_profiles,
+            usage=usage_meter,
         )
     web_conversation = None
     web_conversation_enabled = os.environ.get(
@@ -263,6 +295,8 @@ def create_production_app():
             capability_gateway=capability_gateway,
             capability_admissions=capability_admissions,
             importance_signals=importance_signals,
+            model_profiles=model_profiles,
+            usage=usage_meter,
         )
 
     hosted_brief = None

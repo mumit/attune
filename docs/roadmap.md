@@ -373,6 +373,41 @@ work (the Cloud Armor edge rule, a live probe, abuse monitoring), is in
 [`hosted-signup.md`](hosted-signup.md); the dated decision record is in
 [`decisions.md`](decisions.md).
 
+Phase 6's "hosted operations" item (`docs/future-state.md` Phase 6;
+hosted-review gaps #1/#2 -- no billing/usage metering existed, and the model
+gateway was one fixed config for every tenant) has its per-tenant model
+configuration and usage metering half implemented and tested behind two
+independent default-off gates, `ATTUNE_ENABLE_TENANT_MODEL_PROFILES` and
+`ATTUNE_ENABLE_MODEL_USAGE_METERING`, and not deployed. Migration 0047 adds
+`attune.tenant_model_preferences` (one row per tenant, a profile name from a
+fixed `standard`/`premium` vocabulary, mutated only through a SECURITY
+DEFINER function under the same ordinary session/CSRF bar as
+`POST /v1/conversation/messages` -- a bounded preference, not an authority
+change) and `attune.model_usage_daily` (content-free per tenant/task/
+profile/UTC-day counters -- request count, provider-reported input/output
+tokens, a bounded failure count -- mutated only through a SECURITY DEFINER
+accumulate function, since the worker holds no direct UPDATE grant that
+could let it rewrite its own billing history). The gateway's own
+configuration gains a `{profile: {task: model}}` map that a tenant profile
+name resolves against -- never a raw endpoint, model string, or API key --
+and the gate-off "standard" path resolves byte-identically to today's fixed
+config, pinned by a dedicated test. The worker's conversation executor
+resolves the tenant's stored preference itself (never trusting a
+provider-event or message-content field) and reports usage through the
+model gateway client, which parses provider-reported token counts from the
+gateway's own versioned response envelope; a metering write failure is
+logged and never breaks the model call, the same dual-write posture every
+other best-effort write in this codebase already has. `GET`/`PUT
+/v1/model-profile` and the customer-facing `GET /v1/usage` (a bounded
+30-day window) follow the exact 404-gate-off pin every other gated route
+has. Neither gate has been turned on in any real deployment, and Cloud Run/
+Terraform wiring for the two new premium-route environment variables on the
+model gateway service remains separate operator work, mirroring how
+`ATTUNE_ENABLE_HOSTED_BRIEF` shipped implemented-and-tested well before its
+own deployment evidence. The dated design record is in
+[`decisions.md`](decisions.md); the ceremony and gates are documented in
+[`hosted-model-profiles.md`](hosted-model-profiles.md).
+
 ## Later
 
 - richer calendar negotiation and follow-up workflows

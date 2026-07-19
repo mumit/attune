@@ -73,6 +73,20 @@ window plus a total item cap for attention), mirroring the local JSON stores
 they persist alongside. This stage is dormant: no executor reads or writes
 either table yet.
 
+Two further tenant-bearing relations added for per-tenant model
+configuration and usage metering (`docs/future-state.md` Phase 6 "hosted
+operations"; see `docs/decisions.md` 2026-07-19 and
+`docs/hosted-model-profiles.md`): `attune.tenant_model_preferences` (the
+owner's chosen operator-defined model profile, one row per tenant) is
+classified `account` / `erase` / exportable, the same triple as
+`hosted_channel_preferences` — a bounded owner preference, not customer
+content. `attune.model_usage_daily` (content-free per tenant/task/profile/
+UTC-day aggregate counters feeding future billing) is classified
+`operational` / `erase` / not exportable, the same triple as the existing
+generic `usage_records` table it sits alongside. Neither relation is
+pruned by the content-retention executor described below; both are swept
+by the account-deletion walk like every other `erase`-classified relation.
+
 Relational coverage is necessary but not sufficient. Every release must also
 review these non-relational locations:
 

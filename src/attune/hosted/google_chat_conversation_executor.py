@@ -17,6 +17,7 @@ from ..memory.signals import ActionSignal
 from .capability_gateway import CapabilityDenied
 from .durable import HostedTurn
 from .intelligence import ImportanceSignalRecorder
+from .model_gateway import STANDARD_PROFILE, TokenUsage
 from .model_gateway_client import ModelGatewayClient
 from .repositories import ConnectionFactory, HostedJob, HostedMemory
 from .secret_broker_client import SecretBrokerClient
@@ -98,8 +99,32 @@ class WorkspaceBroker(Protocol):
 
 
 class ModelGateway(Protocol):
-    def complete(self, *, task: str, messages: object) -> str: ...
-    def embed(self, *, text: str) -> Sequence[float]: ...
+    def complete(
+        self, *, task: str, messages: object, profile: str | None = None,
+        usage_sink: Callable[[TokenUsage | None], None] | None = None,
+    ) -> str: ...
+    def embed(
+        self, *, text: str, profile: str | None = None,
+        usage_sink: Callable[[TokenUsage | None], None] | None = None,
+    ) -> Sequence[float]: ...
+
+
+class TenantModelProfiles(Protocol):
+    """Dormant unless injected (ATTUNE_ENABLE_TENANT_MODEL_PROFILES). Reads
+    the tenant's own stored preference -- the model itself never chooses; the
+    executor resolves this trusted, DB-sourced value and passes it to the
+    gateway."""
+
+    def read_profile_name(self, context: TenantContext) -> str: ...
+
+
+class ModelUsageMeter(Protocol):
+    """Dormant unless injected (ATTUNE_ENABLE_MODEL_USAGE_METERING)."""
+
+    def accumulate(
+        self, context: TenantContext, *, task: str, profile: str,
+        success: bool, input_tokens: int, output_tokens: int,
+    ) -> None: ...
 
 
 class ReplyBroker(Protocol):
@@ -362,6 +387,8 @@ class GoogleChatConversationExecutor:
         capability_gateway: DraftCapabilityGateway | None = None,
         capability_admissions: DraftCapabilityAdmissions | None = None,
         importance_signals: ImportanceSignalRecorder | None = None,
+        model_profiles: TenantModelProfiles | None = None,
+        usage: ModelUsageMeter | None = None,
     ):
         self._work = work
         self._intents = intents
@@ -375,6 +402,8 @@ class GoogleChatConversationExecutor:
         self._intent_key_prefix = intent_key_prefix
         self._memory = memory
         self._memory_audit = memory_audit
+        self._model_profiles = model_profiles
+        self._usage = usage
         self._now = now or (lambda: datetime.now(timezone.utc))
         if not isinstance(timezone_name, str) or not 1 <= len(timezone_name) <= 255:
             raise ValueError("hosted timezone is invalid")
@@ -383,6 +412,67 @@ class GoogleChatConversationExecutor:
         except (ZoneInfoNotFoundError, ValueError) as error:
             raise ValueError("hosted timezone is invalid") from error
         self._timezone_name = timezone_name
+
+    # -- Per-tenant model profiles + usage metering (docs/future-state.md
+    # Phase 6 "hosted operations"). Both dormant unless injected; every
+    # existing call site is unaffected when neither is (the kwargs dict
+    # built below stays exactly {"task"/"text", "messages"} in that case,
+    # matching every pre-existing fake gateway's signature byte-for-byte).
+
+    def _resolve_profile(self, context: TenantContext) -> str | None:
+        if self._model_profiles is None:
+            return None
+        try:
+            return self._model_profiles.read_profile_name(context)
+        except Exception:
+            LOG.warning("tenant model profile lookup failed", exc_info=True)
+            return None
+
+    def _record_usage(
+        self, context: TenantContext, *, task: str, profile: str | None,
+        success: bool, usage: TokenUsage | None,
+    ) -> None:
+        if self._usage is None:
+            return
+        try:
+            self._usage.accumulate(
+                context, task=task, profile=profile or STANDARD_PROFILE,
+                success=success,
+                input_tokens=usage.input_tokens if usage is not None else 0,
+                output_tokens=usage.output_tokens if usage is not None else 0,
+            )
+        except Exception:
+            LOG.warning("model usage metering failed (%s)", task, exc_info=True)
+
+    def _complete(self, context: TenantContext, *, task: str, messages: object) -> str:
+        profile = self._resolve_profile(context)
+        kwargs: dict[str, object] = {"task": task, "messages": messages}
+        if profile is not None:
+            kwargs["profile"] = profile
+        if self._usage is not None:
+            kwargs["usage_sink"] = lambda usage: self._record_usage(
+                context, task=task, profile=profile, success=True, usage=usage,
+            )
+        try:
+            return self._models.complete(**kwargs)
+        except Exception:
+            self._record_usage(context, task=task, profile=profile, success=False, usage=None)
+            raise
+
+    def _embed(self, context: TenantContext, *, text: str) -> Sequence[float]:
+        profile = self._resolve_profile(context)
+        kwargs: dict[str, object] = {"text": text}
+        if profile is not None:
+            kwargs["profile"] = profile
+        if self._usage is not None:
+            kwargs["usage_sink"] = lambda usage: self._record_usage(
+                context, task="embed", profile=profile, success=True, usage=usage,
+            )
+        try:
+            return self._models.embed(**kwargs)
+        except Exception:
+            self._record_usage(context, task="embed", profile=profile, success=False, usage=None)
+            raise
 
     def __call__(self, context: TenantContext, job: HostedJob) -> None:
         authority, answer, extra_provenance = self._respond(context, job)
@@ -432,7 +522,8 @@ class GoogleChatConversationExecutor:
 
         route = _deterministic_route(user_text)
         if route is None:
-            classified = self._models.complete(
+            classified = self._complete(
+                context,
                 task="classify",
                 messages=[
                     {"role": "system", "content": (
@@ -502,7 +593,7 @@ class GoogleChatConversationExecutor:
                         source, sort_keys=True, separators=(",", ":")
                     )[:7_000],
                 })
-            answer = self._models.complete(task="converse", messages=messages)
+            answer = self._complete(context, task="converse", messages=messages)
         answer = answer.strip()
         if not 1 <= len(answer) <= 8_000:
             raise RuntimeError("assistant response is invalid")
@@ -668,7 +759,7 @@ class GoogleChatConversationExecutor:
         if self._memory is not None:
             try:
                 text = f"[{signal.value}] gmail_write: draft decision for thread {thread_ref}"
-                vector = self._models.embed(text=text)
+                vector = self._embed(context, text=text)
                 self._memory.add(
                     context, principal_id=authority.principal_id, creator_id=None,
                     content=text,
@@ -688,7 +779,7 @@ class GoogleChatConversationExecutor:
     def _retrieve_memory_context(
         self, context: TenantContext, job: HostedJob, authority, user_text: str
     ) -> str | None:
-        vector = self._models.embed(text=user_text[:MAX_MEMORY_QUERY_CHARS])
+        vector = self._embed(context, text=user_text[:MAX_MEMORY_QUERY_CHARS])
         memories = self._memory.search(
             context, principal_id=authority.principal_id,
             model=HOSTED_MEMORY_EMBED_LABEL, embedding=vector,
@@ -730,7 +821,7 @@ class GoogleChatConversationExecutor:
         self, context: TenantContext, job: HostedJob, authority, fact: str
     ) -> tuple[str, dict[str, object]]:
         fact = fact[:MAX_TAUGHT_FACT_CHARS]
-        vector = self._models.embed(text=fact)
+        vector = self._embed(context, text=fact)
         self._memory.add(
             context,
             principal_id=authority.principal_id,
@@ -749,7 +840,7 @@ class GoogleChatConversationExecutor:
         self, context: TenantContext, job: HostedJob, authority, query: str | None
     ) -> tuple[str, dict[str, object]]:
         if query:
-            vector = self._models.embed(text=query[:MAX_MEMORY_QUERY_CHARS])
+            vector = self._embed(context, text=query[:MAX_MEMORY_QUERY_CHARS])
             memories = self._memory.search(
                 context, principal_id=authority.principal_id,
                 model=HOSTED_MEMORY_EMBED_LABEL, embedding=vector,

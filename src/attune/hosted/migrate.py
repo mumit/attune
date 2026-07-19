@@ -57,6 +57,8 @@ FUNCTION_OWNER_ROLES = (
     "attune_content_retention_executor",
     "attune_deletion_request_executor",
     "attune_deletion_executor",
+    "attune_model_profile_executor",
+    "attune_usage_meter_executor",
 )
 
 FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
@@ -537,6 +539,43 @@ FUNCTION_OWNER_TABLE_PRIVILEGES = frozenset(
         ("attune_deletion_executor", "attune.export_download_grants", "DELETE"),
         ("attune_deletion_executor", "attune.audit_intents", "SELECT"),
         ("attune_deletion_executor", "attune.audit_intents", "INSERT"),
+        (
+            "attune_deletion_executor",
+            "attune.tenant_model_preferences",
+            "SELECT",
+        ),
+        (
+            "attune_deletion_executor",
+            "attune.tenant_model_preferences",
+            "DELETE",
+        ),
+        ("attune_deletion_executor", "attune.model_usage_daily", "SELECT"),
+        ("attune_deletion_executor", "attune.model_usage_daily", "DELETE"),
+        ("attune_model_profile_executor", "attune.tenants", "SELECT"),
+        ("attune_model_profile_executor", "attune.principals", "SELECT"),
+        (
+            "attune_model_profile_executor",
+            "attune.identity_sessions",
+            "SELECT",
+        ),
+        (
+            "attune_model_profile_executor",
+            "attune.tenant_model_preferences",
+            "SELECT",
+        ),
+        (
+            "attune_model_profile_executor",
+            "attune.tenant_model_preferences",
+            "INSERT",
+        ),
+        (
+            "attune_model_profile_executor",
+            "attune.tenant_model_preferences",
+            "UPDATE",
+        ),
+        ("attune_usage_meter_executor", "attune.model_usage_daily", "SELECT"),
+        ("attune_usage_meter_executor", "attune.model_usage_daily", "INSERT"),
+        ("attune_usage_meter_executor", "attune.model_usage_daily", "UPDATE"),
     }
 )
 
@@ -588,6 +627,8 @@ TENANT_TABLES = (
     "capability_admissions",
     "hosted_brief_deliveries",
     "deletion_requests",
+    "tenant_model_preferences",
+    "model_usage_daily",
 )
 
 validate_relational_lifecycle_inventory(TENANT_TABLES)
@@ -864,6 +905,8 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
             "attune_content_retention_executor": (True, False, True, False),
             "attune_deletion_request_executor": (True, False, True, False),
             "attune_deletion_executor": (True, False, True, False),
+            "attune_model_profile_executor": (True, False, False, False),
+            "attune_usage_meter_executor": (True, False, False, False),
         }:
             raise RuntimeError("function owner schema privileges do not match policy")
 
@@ -1146,6 +1189,16 @@ def verify_database_boundary(connection: Any, bindings: dict[str, str]) -> None:
                 "attune.fail_tenant_deletion(uuid,uuid,uuid,text)",
                 "attune_deletion",
                 "attune_deletion_executor",
+            ),
+            (
+                "attune.set_tenant_model_profile(uuid,uuid,text)",
+                "attune_control_plane",
+                "attune_model_profile_executor",
+            ),
+            (
+                "attune.accumulate_model_usage(text,text,boolean,integer,integer)",
+                "attune_worker",
+                "attune_usage_meter_executor",
             ),
         )
         for signature, role, expected_owner in privileged_functions:

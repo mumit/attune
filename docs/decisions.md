@@ -2,6 +2,157 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-19 — Per-tenant model configuration and usage metering (Phase 6, hosted review gaps #1/#2)
+
+Closes `docs/future-state.md` Phase 6's "per-tenant model configuration and
+usage metering" bullet: the hosted review found no billing/usage metering
+anywhere in the platform, and a single fixed model-gateway configuration
+served every tenant identically. Both slices are implemented and tested,
+behind two independent default-off gates, and not deployed. Migration 0047
+adds `attune.tenant_model_preferences` and `attune.model_usage_daily`.
+
+- **Named profiles, never raw endpoints.** A tenant selects among
+  OPERATOR-DEFINED model profile names (`standard`, `premium` -- the fixed
+  vocabulary shipped) that the gateway's OWN configuration maps to concrete
+  model ids per task. A tenant's choice is a bounded string from that
+  vocabulary; it never carries a base URL, API key, or model string into the
+  gateway, and BYO endpoints/keys were explicitly rejected -- they would
+  reopen exactly the fixed-egress and credential-boundary posture the
+  "Provider credentials stay behind fixed broker operations" entry
+  established (a tenant-supplied base URL is an unbounded egress
+  destination the runtime holding user credentials would have to reach,
+  which this codebase's whole network posture exists to prevent). Extending
+  the vocabulary (adding a third profile) is a reviewed code change plus a
+  paired migration for the `CHECK` constraint, never a data-only edit.
+- **The model never chooses a profile, and neither does the wire.** The
+  gateway's HTTP request envelope gained an optional bounded `profile`
+  field, but ONLY the WORKER may populate it, from `tenant_model_preferences`
+  read directly under the tenant's own RLS context -- the conversation
+  executor's new `_resolve_profile` reads this once per model call and
+  passes the result through; nothing from a provider event or the
+  principal's own message text is ever consulted. Pinned by a dedicated
+  test that plants a forged `{"profile": "premium", ...}`-shaped string
+  inside ordinary user message content and proves it travels as inert
+  conversation text, never as the gateway envelope's distinct `profile`
+  argument.
+- **Gate-off is byte-identical, pinned, not merely "should be."**
+  `HostedModelGateway`'s constructor keeps its original `models: Mapping[str,
+  str]` parameter completely unchanged and adds an optional `profiles:
+  Mapping[str, Mapping[str, str]] | None = None`. With `profiles=None` (the
+  gate-off state everywhere: the model gateway app never builds a profile
+  map unless `ATTUNE_ENABLE_TENANT_MODEL_PROFILES` is true), `_resolve_model`
+  returns `self._models[task]` for every task regardless of what a caller
+  passes as `profile` -- `None` or the literal string `"standard"` resolve
+  identically. A profile name outside `{None, "standard"}` still fails
+  closed with `ValueError` even in the gate-off state (never a silent
+  default to the fixed config) -- "unknown profile" and "gate off" are
+  deliberately different code paths with the same practical floor.
+  Independently, the gateway's own Flask app and the worker's `ModelGatewayClient`
+  each carry their OWN copy of the same named gate
+  (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`): the HTTP schema only ever accepts
+  the extra `profile` key when THIS process's gate is on, so a compromised
+  or misconfigured worker cannot smuggle a profile choice past a gateway
+  that was deployed with the feature off, mirroring how `ATTUNE_ENABLE_HOSTED_BRIEF`
+  already gates both the control plane and the worker route/executor
+  together rather than trusting one side alone.
+- **Metering is content-free by construction, and the writer role holds no
+  raw UPDATE.** `attune.model_usage_daily` stores exactly one aggregate row
+  per (tenant, task, profile, UTC day): request count, input/output token
+  counts as the provider reported them, and a bounded failure count --
+  never prompt or response text, never a per-message row. The worker is
+  already trusted for ordinary INSERT/UPDATE on several of its own tenant's
+  rows elsewhere in this schema (e.g. `hosted_brief_deliveries`, 0044), but
+  this table is different: it is OPERATIONAL data that will feed real
+  billing, and a bare UPDATE grant would let a compromised or merely buggy
+  worker overwrite these counters to an arbitrary absolute value --
+  including quietly zeroing out a tenant's own overage. `attune.
+  accumulate_model_usage` is therefore SECURITY DEFINER, owned by a new
+  memberless `attune_usage_meter_executor` (the same memberless-owner
+  pattern every other privileged mutation in this schema already uses), and
+  is the ONLY mutation path: it exposes nothing but an atomic "add one
+  request, add these bounded token counts, add this bounded failure count"
+  operation via `ON CONFLICT ... DO UPDATE SET count = count + ...`, so even
+  a fully compromised worker can only ever move the counters forward by
+  bounded amounts, never rewrite history. `attune.tenant_model_preferences`'
+  own mutation (`attune.set_tenant_model_profile`) is SECURITY DEFINER for
+  the ordinary reason every other owner-preference table in this schema is
+  (`configure_hosted_channels`, 0020): the control-plane role gets SELECT
+  only, and the audited ceremony below is the only writer.
+- **The ceremony is an ordinary-session bounded preference, not a
+  recent-authentication authority change.** `GET`/`PUT /v1/model-profile`
+  use exactly the same bar as `POST /v1/conversation/messages` and
+  `POST /v1/brief/run` -- same-origin, CSRF, an ordinary (not
+  ten-minutes-fresh) session -- explicitly NOT the ten-minute recency window
+  `PUT /v1/onboarding/channels` reserves for a channel-authority change. A
+  model profile choice changes nothing about who can act on the tenant's
+  behalf, what data a connector can reach, or what autonomy a grant confers
+  -- it only selects among operator-approved model routes for future calls,
+  the same class of decision the "Web conversation acceptance uses ordinary
+  proofs, not recency" entry already reasons about for a different route.
+  The mandatory allowed/observed/failed two-phase audit lives in a new
+  `HostedModelProfileService`, mirroring `HostedChannelService` exactly
+  (content-free metadata: schema_version only, never the profile name
+  itself, matching that service's own "hashed actor/preference references"
+  posture) -- the SECURITY DEFINER SQL function itself writes no audit row
+  of its own, exactly like `configure_hosted_channels`.
+- **The metering seam lives at the model gateway client, justified by who
+  actually sees the provider's token counts.** `HostedModelGateway.complete`/
+  `embed` extract `TokenUsage` defensively from the upstream OpenAI-compatible
+  provider's own response (a malformed or absent `usage` field degrades to
+  `None` and never breaks the actual text/vector contract -- the provider is
+  untrusted third-party data). The gateway always reports this (nullable)
+  usage in its OWN versioned response envelope; `ModelGatewayClient` parses
+  it STRICTLY, since that is now a trusted, internal, versioned contract
+  between two of Attune's own services, not an untrusted upstream shape --
+  a malformed `usage` field there is a genuine contract violation, the same
+  rigor this client already applies to the `text`/`vector` fields. The
+  client's `complete`/`embed` gained an optional `usage_sink` callback
+  (invoked synchronously, once, with the parsed `TokenUsage | None`) rather
+  than changing their return type to a richer object: the ONLY production
+  consumer of this client is `GoogleChatConversationExecutor` (reused by
+  the Slack and web surfaces), and every one of its four existing test
+  files fakes this exact `complete(*, task, messages) -> str` signature;
+  widening the return type would have forced every one of those tests to
+  unwrap a new object even though most of them exercise nothing related to
+  metering. Both `profile` and `usage_sink` are omitted from the call
+  entirely when their owning feature is dormant (`kwargs` built
+  conditionally, not passed as literal `None`), so the exact pre-existing
+  call shape reaches every unmodified fake gateway byte-for-byte -- zero
+  test churn outside the four new, purpose-built test files. The actual
+  recording -- `PostgresModelUsageMeterRepository.accumulate` through
+  `attune.accumulate_model_usage` -- happens in the executor's own
+  `_record_usage`, which the executor calls from within the `usage_sink`
+  callback (success) or from an `except` block around the model call
+  (failure, `success=False`, zero tokens): a metering write failure is
+  caught and logged there, never re-raised, so a metering outage can never
+  break a model call the human is waiting on -- the same dual-write
+  posture every other best-effort write in this codebase already has. A
+  genuine model-call failure itself is NOT swallowed by this path: the
+  executor records the failure counter, then re-raises the original
+  exception unchanged.
+- **Usage visibility is content-free by construction, not by policy.**
+  `GET /v1/usage` (ordinary session, no CSRF needed for a read) returns the
+  tenant's own `model_usage_daily` rows for a fixed, bounded 30-day window
+  -- there is nothing in the underlying table to redact, since it never
+  stored anything but counters in the first place. This is the
+  customer-facing half of metering the hosted-review gap named; the
+  operator-facing half (aggregating counts toward an actual invoice) is
+  explicitly deferred, unbuilt future work.
+- **Chosen over:** a tenant-supplied base URL/API key/model string (rejected
+  outright -- BYO endpoints breach the fixed-egress and credential-boundary
+  posture, see above); reusing the existing generic `attune.usage_records`
+  table for metering (rejected -- that table is a per-event row store, not
+  an aggregate, and mixing a high-volume per-model-call insert stream into
+  a table already shared by other categories would defeat the whole point
+  of a bounded daily aggregate); an ordinary UPDATE grant on
+  `model_usage_daily` for the worker (rejected -- see the accumulate-function
+  justification above); the ten-minute recency window for the model-profile
+  ceremony (rejected -- a profile choice carries no authority, unlike a
+  channel-preference validation change); and changing `ModelGatewayClient.
+  complete`/`embed`'s return type to a richer object (rejected -- the
+  `usage_sink` callback achieves the same observability with zero blast
+  radius on existing conversation-executor tests).
+
 ## 2026-07-19 — Self-hosted setup-friction package (Phase 6, G20)
 
 Closes `docs/future-state.md` Phase 6's first bullet against the top-4

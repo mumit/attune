@@ -145,6 +145,20 @@
         </button>
         <div id="customer-export-list" aria-live="polite"></div>
       </section>
+      <section id="model-profile" hidden>
+        <h2>Model profile</h2>
+        <p>
+          Choose which operator-defined model profile Attune uses for your
+          classify, converse, and embed requests.
+        </p>
+        <select id="model-profile-select">
+          <option value="standard">Standard</option>
+          <option value="premium">Premium</option>
+        </select>
+        <button id="model-profile-save" type="button">Save</button>
+        <p id="model-profile-state" aria-live="polite"></p>
+        <div id="model-usage" aria-live="polite"></div>
+      </section>
       <section id="account-deletion" hidden>
         <h2>Delete your Attune account</h2>
         <p>
