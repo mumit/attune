@@ -423,6 +423,40 @@ appears once that gate and the owner's own sign-in gate are both on.
    construction) survives the account it describes, the same as any other
    tenant's audit history.
 
+## 7. Export your data
+
+This ceremony is dormant behind `ATTUNE_CUSTOMER_EXPORTS_ENABLED` until its
+own development activation evidence is recorded; the affordance below only
+appears once that gate and the owner's own sign-in gate are both on. The
+private alpha exposes only the `account` scope — the tenant/principal
+profile, installation and connector descriptors (never credentials), policy
+version/status, autonomy, onboarding, and channel preferences/destinations.
+The other reviewed scopes (`conversations`, `memories`, `activity`) stay
+server-side unavailable until their own customer disclosures ship.
+
+1. From the signed-in page, choose **Request export**. Attune requires the
+   same recent-session bar as disconnecting Google Workspace or deleting the
+   account; a session older than ten minutes is asked to sign out and back
+   in first. The browser sends only a fixed confirmation phrase and the
+   server-defined scope — never a tenant, table, or object identifier.
+2. The page shows the export's status — queued, generating, ready, failed,
+   or expired — and polls until it settles. Nothing about internal errors,
+   object identifiers, wrapping keys, or storage URLs is ever shown.
+3. Once ready, choose **Download once**. Attune re-authenticates the recent
+   session, mints a random one-time secret valid for 90 seconds, and hands
+   it back only in the response body of the request the click just made.
+   The page immediately turns around and POSTs that secret in a second
+   request's JSON body to complete the download — it is never placed in a
+   URL, a link, or a redirect. The browser receives the archive as a file
+   attachment with no-store headers.
+4. The export becomes unavailable immediately after that first successful
+   download, or after 24 hours, whichever comes first; the page's status
+   list reflects "downloaded and queued for secure cleanup" or "expired and
+   securely erased" accordingly, and no further download is offered.
+5. Google and Slack remain the source of truth for anything Attune did not
+   retain — the export does not silently refetch an entire mailbox,
+   calendar, or channel to manufacture content Attune never stored.
+
 ## What the natural-language layer can do
 
 | Request | Behavior |

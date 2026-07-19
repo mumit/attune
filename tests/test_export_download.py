@@ -1,7 +1,5 @@
 """Tests for one-time export download storage, crypto, and HTTP boundaries."""
 
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -160,3 +158,33 @@ def test_http_boundary_requires_same_origin_and_never_places_secret_in_url():
     )
     assert downloads.calls[0][:2] == (GRANT, SECRET)
     assert isinstance(downloads.calls[0][2], UUID)
+
+
+def test_download_route_accepts_only_a_same_origin_post_with_a_json_body():
+    # The one-time secret must never travel in a URL: pin that the download
+    # route takes a POST body only, and that placing the grant/secret on the
+    # query string or path instead of the JSON body is refused, not silently
+    # accepted.
+    class Downloads:
+        def download(self, grant_id, secret, *, run_id):
+            raise AssertionError("must not be reached")
+
+    client = create_app(HOST, Downloads()).test_client()
+    headers = {"Origin": f"https://{HOST}", "Sec-Fetch-Site": "same-origin"}
+    get_response = client.get(
+        "/v1/export-download", headers=headers, base_url=f"https://{HOST}"
+    )
+    assert get_response.status_code == 405
+    query_response = client.post(
+        f"/v1/export-download?grant_id={GRANT}&secret={SECRET}",
+        headers=headers,
+        base_url=f"https://{HOST}",
+    )
+    assert query_response.status_code == 401
+    empty_body_response = client.post(
+        "/v1/export-download",
+        json={},
+        headers=headers,
+        base_url=f"https://{HOST}",
+    )
+    assert empty_body_response.status_code == 400

@@ -2322,3 +2322,80 @@ design" section; this entry records the choices and their rationale.
   already passed, repeated for both new executors; their Cloud Run jobs are
   not yet deployed; and the independent, cross-tenant restore-suppression
   ledger remains unbuilt. None of that is claimed done by this entry.
+
+## 2026-07-19 — Customer export: writer invocation, download, cleanup, and UI close out (Phase 6 export finish line)
+
+`docs/roadmap.md`'s export paragraph still read "No writer can invoke it
+yet. Cleanup, download, and UI remain." That sentence was written against
+the completion-transition milestone (migration 0031) and was never updated
+across the several commits that followed it -- the writer boundary
+(`customer_export_writer.py`, `export_writer_app.py`/`_service.py`), the
+download gateway (`export_download.py`, `export_download_app.py`/
+`_service.py`, migration 0037), the bounded cleanup executor
+(`export_cleanup.py`, migrations 0033/0034/0037), their Terraform (writer
+and download Cloud Run services, the cleanup Cloud Run Job plus its paused
+Scheduler, all four workload identities in `foundation/iam.tf`), and the
+setup-page UI (`sign-in.js`'s `showCustomerExports`/`downloadCustomerExport`)
+already existed and already passed the full offline and real-PostgreSQL
+suites. This entry closes the documentation gap and records what this pass
+verified, added, and deliberately left alone.
+
+- **No migration 0047.** The task brief anticipated one might be needed to
+  grant the writer identity invocation of `complete_customer_export`.
+  Migration 0031 already runs `GRANT EXECUTE ON FUNCTION
+  attune.complete_customer_export(...) TO attune_export`, and `attune_export`
+  is exactly the role the production writer's `iam_connection` authenticates
+  as. `CustomerExportWriter.execute` (`customer_export_writer.py`) already
+  calls `PostgresCustomerExportExecution.complete`, which issues that
+  `SELECT * FROM attune.complete_customer_export(...)` -- no new grant,
+  role, or SQL was required. This was verified, not assumed:
+  `test_customer_export_request_and_claim_are_fixed_recent_and_function_only`
+  in `tests/test_hosted_db.py` drives the real `attune_export` role through
+  claim, task-claim, projection read, archive build, and
+  `complete_customer_export` end to end against real PostgreSQL, and it
+  already passed before this session touched anything.
+- **What this pass verified rather than built.** A full read of
+  `customer_export_writer.py`, `export_writer_app.py`/`_service.py`,
+  `export_download.py`, `export_download_app.py`/`_service.py`,
+  `export_cleanup.py`, migrations 0029-0037, `control_plane_service.py`'s
+  `/v1/exports*` routes, `deploy/gcp/{runtime,edge,data,foundation}`, and
+  `sign-in.js` against `docs/customer-export.md`'s contract found the
+  identity split honored (writer: encrypt/create/delete, never decrypt/
+  read/list; download: get+decrypt+one-use-consume, never create/delete/
+  list; cleanup: delete-only), the 90-second secret returned once in a POST
+  response body and never placed in a URL, atomic one-use grant consumption
+  by database function, exact-generation scheduled deletion, content-free
+  audit rows at every transition, and every Terraform activation flag
+  (`enable_export_writer`, `deploy_customer_export_download`,
+  `enable_export_cleanup_schedule`, `ATTUNE_CUSTOMER_EXPORTS_ENABLED`)
+  defaulting off. The full offline suite (1809 passed, 53 skipped) and the
+  real-PostgreSQL suite (1860 passed, 2 skipped) both already passed at the
+  start of this session.
+- **Three real test gaps, closed.** (1) No test pinned that the control
+  plane's export routes 404 when `customer_exports_enabled` is off, unlike
+  the equivalent pins for hosted signup and tenant deletion --
+  `test_customer_export_gate_off_pins_404` and
+  `test_customer_exports_require_identity_when_enabled` now mirror those.
+  (2) The download gateway's HTTP boundary test proved same-origin-POST-
+  with-JSON succeeds but never proved a GET or a query-string-carried
+  secret is refused -- `test_download_route_accepts_only_a_same_origin_post_with_a_json_body`
+  now pins the 405/401/400 refusals. (3) The one-use download-grant
+  consumption was proved only by sequential calls on one connection; it is
+  now also proved under real concurrency --
+  `test_customer_export_download_grant_is_consumed_by_exactly_one_of_two_racers`
+  races two independent PostgreSQL connections (via `attune_export_download`)
+  claiming the identical grant through a `ThreadPoolExecutor`, and asserts
+  exactly one gets the plaintext-bound metadata while the other gets the
+  same fixed `None` refusal a wrong secret or a replay produces.
+- **`docs/customer-export.md` needed no changes.** Unlike `roadmap.md`, its
+  "Current implementation" section already describes migrations through
+  0037, the download ceremony, and the cleanup identity accurately; it was
+  re-read in full against the code and Terraform and found consistent.
+- **What activation still requires (unchanged by this entry):** the
+  synthetic development export review, cross-tenant/role/replay/concurrency
+  real-PostgreSQL evidence beyond what already exists, adversarial fixture
+  review, independent security review, and flipping
+  `enable_export_writer`/`deploy_customer_export_download`/
+  `enable_export_cleanup_schedule` -- all still operator work per
+  `customer-export.md`'s "Required evidence before production activation"
+  list, none of it claimed done here.

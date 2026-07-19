@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -3987,6 +3988,120 @@ def test_customer_export_control_plane_and_one_time_download_are_exact(
         )
         assert cursor.fetchone() == ("consumed", None, None)
     initialized_database.commit()
+
+
+def test_customer_export_download_grant_is_consumed_by_exactly_one_of_two_racers(
+    initialized_database, database_url
+):
+    # Function-owned one-use consumption must hold under real concurrency,
+    # not merely under a single-threaded call sequence: race two independent
+    # connections claiming the identical grant and prove exactly one obtains
+    # plaintext-bound metadata while the other gets the same fixed refusal
+    # (None) a wrong secret or a replay would produce.
+    session_id = UUID("10000000-0000-4000-8000-0000000000e1")
+    object_id = UUID("10000000-0000-4000-8000-0000000000e2")
+    export_id = None
+    grant_secret = b"race-the-one-time-download-secret"
+    grant_hash = hashlib.sha256(grant_secret).digest()
+    _reset_role(initialized_database)
+    with tenant_transaction(initialized_database, TenantContext(TENANT_A)) as cursor:
+        cursor.execute(
+            "INSERT INTO attune.identity_sessions "
+            "(tenant_id,id,principal_id,token_hash,csrf_hash,expires_at) "
+            "VALUES (%s,%s,%s,%s,%s,clock_timestamp()+interval '1 hour')",
+            (
+                TENANT_A, session_id, PRINCIPAL_A,
+                hashlib.sha256(b"race-token").digest(),
+                hashlib.sha256(b"race-csrf").digest(),
+            ),
+        )
+
+    control = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )()
+    try:
+        with tenant_transaction(control, TenantContext(TENANT_A)) as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.request_or_read_customer_export(%s,%s,%s,%s)",
+                (
+                    PRINCIPAL_A, session_id, "memories",
+                    hashlib.sha256(b"race-export-request").digest(),
+                ),
+            )
+            export_id = cursor.fetchone()[0]
+    finally:
+        control.close()
+
+    _reset_role(initialized_database)
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "UPDATE attune.export_jobs SET state='ready', object_ref=%s, "
+            "object_generation=701, wrapped_dek=%s, nonce=%s, key_resource=%s, "
+            "archive_sha256=%s, ciphertext_sha256=%s, archive_bytes=100, "
+            "ciphertext_bytes=116, encryption_format=1, ready_at=clock_timestamp(), "
+            "expires_at=clock_timestamp()+interval '1 hour' WHERE id=%s",
+            (
+                object_id, b"w" * 64, b"n" * 12,
+                "projects/test/locations/test/keyRings/test/cryptoKeys/customer-export",
+                hashlib.sha256(b"race-plain").digest(),
+                hashlib.sha256(b"race-cipher").digest(), export_id,
+            ),
+        )
+    initialized_database.commit()
+
+    control = _role_connection_factory(
+        database_url, ROLE_BINDINGS["attune_control_plane"]
+    )()
+    try:
+        with tenant_transaction(control, TenantContext(TENANT_A)) as cursor:
+            cursor.execute(
+                "SELECT * FROM attune.issue_customer_export_download(%s,%s,%s,%s)",
+                (PRINCIPAL_A, session_id, export_id, grant_hash),
+            )
+            grant_id, _grant_expires = cursor.fetchone()
+    finally:
+        control.close()
+
+    def claim_with_own_connection(run_id: UUID):
+        connection = _role_connection_factory(
+            database_url, ROLE_BINDINGS["attune_export_download"]
+        )()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM attune.claim_customer_export_download(%s,%s,%s)",
+                    (grant_id, grant_hash, run_id),
+                )
+                row = cursor.fetchone()
+            connection.commit()
+            return row
+        finally:
+            connection.close()
+
+    run_ids = (
+        UUID("10000000-0000-4000-8000-0000000000e3"),
+        UUID("10000000-0000-4000-8000-0000000000e4"),
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim_with_own_connection, run_ids))
+
+    winners = [row for row in results if row is not None]
+    losers = [row for row in results if row is None]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    assert winners[0][:5] == (TENANT_A, export_id, "memories", object_id, 701)
+
+    _reset_role(initialized_database)
+    with initialized_database.cursor() as cursor:
+        cursor.execute(
+            "SELECT lease_run_id, consumed_at IS NOT NULL "
+            "FROM attune.export_download_grants WHERE id = %s",
+            (grant_id,),
+        )
+        lease_run_id, consumed = cursor.fetchone()
+    initialized_database.commit()
+    assert consumed is False
+    assert lease_run_id in run_ids
 
 
 def test_customer_export_expired_claim_is_recoverable_and_failure_is_exact(
