@@ -1,5 +1,8 @@
 # Getting started, step by step
 
+*This is the setup guide for self-hosted, single-principal Attune — see
+[`modes.md`](modes.md) for the other ways to run it.*
+
 This is the shortest path to one working Attune instance for one person. Start
 with polling and Slack Socket Mode: both are outbound-only, so a workstation,
 home server, or ordinary VM can run them without Pub/Sub, Cloud Run, or a public

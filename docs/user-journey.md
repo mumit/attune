@@ -1,5 +1,10 @@
 # User journey
 
+*This describes what using Attune feels like in both deployment modes from
+[`modes.md`](modes.md): §0 below is the hosted multi-tenant customer journey;
+the remaining sections describe day-to-day use that applies to self-hosted
+and, where noted, hosted alike.*
+
 Attune is meant to feel like one assistant whether the principal uses Slack,
 Google Chat, or both. The channel authenticates the human and carries the
 response; the same bounded interaction layer, Workspace connector, memory, and

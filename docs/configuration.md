@@ -1,5 +1,9 @@
 # Configuration reference
 
+*This is the self-hosted `.env` reference. Hosted multi-tenant services are
+configured by the operator's infrastructure (Terraform and Secret Manager),
+not a per-tenant `.env` file — see [`modes.md`](modes.md).*
+
 Attune reads configuration from the process environment. The CLI loads `.env`
 automatically, and `attune init` edits that file while retaining its current
 values as prompt defaults. Never commit a populated `.env`, OAuth credential,

@@ -2826,3 +2826,69 @@ file changed at all.
   server's window requires updating this file's constants by hand -- there
   is no shared source of truth between client and server for this number,
   and inventing one was out of scope for a client-only polish pass.
+
+## 2026-07-20 — Documentation rationalization: a modes guide and persona-routed navigation
+
+The repository had 31 docs and no single answer to "what are Attune's
+deployment modes and how do I run each one?" `README.md` routed every reader
+-- personal user, platform operator, security reviewer -- into one dense
+paragraph of links. This pass adds one new guide and restructures navigation
+around it; it does not change any normative or contract content.
+
+- **`docs/modes.md` is the new centerpiece.** It states plainly that Attune
+  is one product with two deployment modes -- self-hosted single-principal
+  (runnable today, the full intelligence set) and the operated hosted
+  multi-tenant service (a development-stage platform, gated behind
+  default-off activation flags, not publicly operated, per `roadmap.md` and
+  `security-review.md` §8) -- gives a modes-at-a-glance table (polling
+  self-hosted, the Pub/Sub push variant, hosted-as-customer, hosted-as-
+  operator, plus a credential-free "try it in 10 minutes" dev-loop row), a
+  per-mode WHO/RUN-IT/WHAT-YOU-GET-OR-GIVE-UP/COMMON-CONFUSIONS section, and
+  a CX-framed "which state lives where" comparison (what to back up, what to
+  delete) that links to `data-lifecycle.md`/`security-architecture.md` for
+  the security framing rather than restating it. Two confusions it calls out
+  explicitly because they showed up while reading the existing docs: running
+  self-hosted Attune on a cloud VM is still self-hosted mode, not "hosted";
+  and MCP vs `google_oauth` is a workspace-backend choice inside self-hosted,
+  not a mode of its own.
+- **`README.md` gained a "Choose how you run Attune" section** immediately
+  after the intro -- a four-row table distilled from `modes.md` -- and its
+  old single-paragraph link dump was replaced with a persona-routed "Where
+  to go next" list (personal-machine user, hosted operator, security
+  reviewer, MCP implementer, design-history reader). Every link that existed
+  in the README before this change is still reachable from it; none were
+  deleted, only grouped. The reviewer bullet deliberately keeps the original
+  sentence structure verbatim, since the task brief called it out as already
+  good. Quick start is otherwise unchanged and gained exactly one line
+  pointing to `modes.md` for the other modes; `tests/test_docs.py`'s
+  `test_quickstart_uses_guided_local_setup` (which pins `attune init
+  --target local` present and both `docker compose` and `attune doctor`
+  absent from that section) was checked against the new text and still
+  passes unmodified.
+- **Five entry docs gained a one- or two-sentence italic "you are here" line
+  under their H1** -- `getting-started.md`, `deployment.md`, `hosted-gcp.md`,
+  `user-journey.md`, and `configuration.md` -- each pointing to `modes.md`
+  and stating only which mode(s) the document covers, never a status claim
+  that could go stale. No other line in any of these five files changed.
+- **What was deliberately left untouched.** `security-architecture.md`,
+  every `*-contract.md` document, and the point-in-time review trilogy
+  (`current-state.md`, `gap-analysis.md`, `future-state.md`) are frozen
+  snapshots or normative documents; none of their content was edited, only
+  linked to from the README and `modes.md`. `oauth-transaction.md`,
+  `reconciliation.md`, `hosted-signup.md`, `hosted-channel-installation.md`,
+  `hosted-conversation.md`, `hosted-memory.md`, and
+  `hosted-model-profiles.md` were read for mode-relevant content but were not
+  already linked from the README before this change and the task scope was
+  to avoid orphaning existing links, not to add every doc to the README; they
+  remain reachable from `security-review.md`'s review artifact index and from
+  cross-references inside the `hosted-*` documents themselves.
+- **Judgment calls reported, not fixed:** a few docs (`getting-started.md`,
+  `deployment.md`) restate overlapping Slack-setup and Google-OAuth-ceremony
+  steps that could become one-way pointers instead of duplicated
+  instructions; that consolidation touches normative setup content and reads
+  as a substantive rewrite rather than navigation, so it was left for a
+  separate, deliberate pass rather than folded into this one.
+- **Verification.** The full offline suite stayed at 1920 passed/57 skipped,
+  unchanged, since no Python or test-pinned string changed. A relative-link
+  check was run over `docs/modes.md`, the edited `README.md`, and the five
+  orientation lines; every link resolved to a file that exists in the repo.

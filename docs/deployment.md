@@ -1,5 +1,10 @@
 # Deployment guide
 
+*This is the self-hosted, long-running-service guide — covering both the
+default polling track and its Google Pub/Sub push variant; see
+[`modes.md`](modes.md) for how these fit alongside the hosted multi-tenant
+service.*
+
 Attune is a long-running Python service. One instance acts for one principal
 and has its own Workspace credential or MCP endpoint, model credentials,
 channel credentials, memory, state, and audit log. Run separate isolated
