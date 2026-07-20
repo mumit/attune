@@ -53,6 +53,9 @@ const conversationMessages = document.querySelector("#conversation-messages");
 const conversationIndicator = document.querySelector("#conversation-indicator");
 const conversationInput = document.querySelector("#conversation-input");
 const conversationSend = document.querySelector("#conversation-send");
+const conversationNotifyToggle = document.querySelector("#conversation-notify-toggle");
+const conversationNotifyState = document.querySelector("#conversation-notify-state");
+const conversationHints = document.querySelector("#conversation-hints");
 const sessionSignOut = document.querySelector("#session-sign-out");
 const status = document.querySelector("#status");
 let hostedPolicyAvailable = false;
@@ -66,6 +69,31 @@ let conversationPollTimer = null;
 let conversationPendingSince = null;
 let conversationSending = false;
 let conversationPollFailures = 0;
+let conversationNotificationsEnabled = false;
+
+// --- Recency-window UX (UX review hosted item #1) -------------------------
+//
+// The server independently re-validates session age on every recency-gated
+// ceremony (policy confirmation, channel install/disconnect, deletion,
+// export authorize/download -- see docs/hosted-policy.md and the
+// `recent_authentication_required` 409 each of those routes can return).
+// That ten-minute bar is the actual security boundary and is unchanged by
+// anything below. Everything in this section is advisory client-side UX
+// only: a best-effort estimate of how much of the window is left, used to
+// warn the user before they get bounced and to offer a resumable re-auth
+// instead of a dead end. It can never grant, extend, or shorten the
+// server's own authority window -- if this estimate is ever wrong (clock
+// skew, a session that predates this tab, a session created in another
+// tab), the ceremony's own 409 is still authoritative and is handled the
+// same way (see `forceLapsedNow` below).
+const RECENCY_WINDOW_MS = 10 * 60 * 1000;
+const RECENCY_WARNING_MS = 3 * 60 * 1000;
+const SESSION_STARTED_KEY = "attune_session_started_at";
+const RESUME_SECTION_KEY = "attune_resume_section";
+const CONVERSATION_POLL_INTERVAL_MS = 2000;
+const CONVERSATION_POLL_SLOW_INTERVAL_MS = 15000;
+const CONVERSATION_STALL_MS = 60_000;
+const CONVERSATION_TERMINAL_MS = 5 * 60_000;
 
 function show(message, kind = "info") {
   status.textContent = message;
@@ -205,6 +233,193 @@ function cookie(name) {
 
 function wait(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function markSessionStarted() {
+  // Recorded only at the moment this tab actually performs the sign-in
+  // exchange (see the `exchange()` call site below) -- never inferred from
+  // an already-existing session on page load, since this tab has no way to
+  // know when that session truly began. sessionStorage (not a cookie) keeps
+  // it out of anything the server reads, and it naturally survives a
+  // same-tab reload but not a new tab or browser restart.
+  try {
+    window.sessionStorage.setItem(SESSION_STARTED_KEY, String(Date.now()));
+  } catch {
+    /* Storage unavailable (private browsing, disabled storage): the
+       countdown and pre-flight simply stay in their "unknown" state below;
+       the server's own recency check is unaffected either way. */
+  }
+}
+
+function recencyRemainingMs() {
+  let raw;
+  try {
+    raw = window.sessionStorage.getItem(SESSION_STARTED_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  const started = Number(raw);
+  if (!Number.isFinite(started)) return null;
+  return RECENCY_WINDOW_MS - (Date.now() - started);
+}
+
+function forceLapsedNow() {
+  // A ceremony call still returned `recent_authentication_required` despite
+  // our local estimate (clock skew, a race, or an unknown/never-set
+  // estimate). The server is right; fold that into our local state
+  // immediately so the in-place "sign in again" affordance appears at every
+  // gated ceremony (recency is one session-wide window, not per-ceremony)
+  // instead of leaving only a passive status message.
+  try {
+    window.sessionStorage.setItem(
+      SESSION_STARTED_KEY,
+      String(Date.now() - RECENCY_WINDOW_MS - 1),
+    );
+  } catch {
+    /* Nothing to force locally; the textual error message still guides the
+       user to sign out and back in. */
+  }
+  refreshRecencyGates();
+}
+
+function formatRecencyCountdown(remainingMs) {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+const RECENCY_GATE_KEYS = [
+  "policy",
+  "channels",
+  "channel-installations",
+  "deletion",
+  "export",
+];
+const recencyGates = new Map();
+
+function buildRecencyGate(key) {
+  const anchor = document.querySelector(`[data-recency-gate="${key}"]`);
+  if (!anchor) return null;
+  const container = document.createElement("p");
+  container.className = "recency-status";
+  container.setAttribute("aria-live", "polite");
+  container.hidden = true;
+  const countdownText = document.createElement("span");
+  countdownText.hidden = true;
+  const lapsedText = document.createElement("span");
+  lapsedText.hidden = true;
+  lapsedText.textContent = "Sign in again to continue this step.";
+  const reauthButton = document.createElement("button");
+  reauthButton.type = "button";
+  reauthButton.className = "secondary recency-reauth";
+  reauthButton.hidden = true;
+  reauthButton.textContent = "Sign in again";
+  reauthButton.addEventListener("click", () => requestReauthForSection(key));
+  container.append(countdownText, lapsedText, reauthButton);
+  anchor.parentNode.insertBefore(container, anchor);
+  return { key, container, countdownText, lapsedText, reauthButton };
+}
+
+for (const key of RECENCY_GATE_KEYS) {
+  const gate = buildRecencyGate(key);
+  if (gate) recencyGates.set(key, gate);
+}
+
+function renderRecencyGate(gate, remainingMs) {
+  const lapsed = remainingMs !== null && remainingMs <= 0;
+  const warning = !lapsed && remainingMs !== null && remainingMs <= RECENCY_WARNING_MS;
+  gate.container.hidden = !(lapsed || warning);
+  gate.countdownText.hidden = !warning;
+  gate.lapsedText.hidden = !lapsed;
+  gate.reauthButton.hidden = !lapsed;
+  if (warning) {
+    gate.countdownText.textContent =
+      `Recent sign-in expires in ${formatRecencyCountdown(remainingMs)} — ` +
+      "finish this step or you'll sign in again.";
+  }
+  if (lapsed) {
+    // The pre-flight: hide the real confirm control(s) rather than merely
+    // disabling them, so the "sign in again" affordance above is the only
+    // thing offered. A fresh sign-in reruns the normal render pipeline,
+    // which restores each control's correct hidden/shown state from real
+    // server data -- nothing here needs to remember or restore it.
+    for (const control of document.querySelectorAll(`[data-recency-gate="${gate.key}"]`)) {
+      control.hidden = true;
+    }
+  }
+}
+
+function refreshRecencyGates() {
+  const remaining = recencyRemainingMs();
+  for (const gate of recencyGates.values()) renderRecencyGate(gate, remaining);
+}
+
+// Advisory-only ticker: reconciles every mounted gate against the estimated
+// remaining window once a second. Harmless no-op while no local estimate
+// exists (nothing lapses or warns), and each render function below also
+// calls refreshRecencyGates() itself so a status change is reflected
+// immediately rather than waiting up to a second for this tick.
+window.setInterval(refreshRecencyGates, 1000);
+
+async function performSignOut() {
+  const csrf = cookie("__Host-attune_csrf");
+  if (!csrf) throw new Error("missing session binding");
+  await json(
+    await fetch("/v1/session", {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: { Accept: "application/json", "X-Attune-CSRF": csrf },
+    }),
+  );
+}
+
+async function requestReauthForSection(sectionKey) {
+  // Reuses the exact same sign-out-then-sign-in-again ceremony the visible
+  // "Sign out" button already performs -- no new re-auth endpoint, no
+  // change to session semantics. The only addition is remembering, in this
+  // tab's sessionStorage, which section to return the user to once they
+  // finish signing back in (see resumePendingSection()).
+  try {
+    window.sessionStorage.setItem(RESUME_SECTION_KEY, sectionKey);
+  } catch {
+    /* The user can still sign back in; they just won't be scrolled back to
+       this section automatically. */
+  }
+  show("Signing you out so you can sign in again…", "pending");
+  try {
+    await performSignOut();
+  } catch {
+    /* Best-effort: every route re-validates the session server-side
+       regardless of what this tab believes, so navigating to "/" still
+       forces a fresh sign-in even if this call itself failed. */
+  }
+  window.location.assign("/");
+}
+
+const RESUME_SECTION_ELEMENTS = {
+  policy: policyReview,
+  channels: channelPreferences,
+  "channel-installations": channelInstallations,
+  deletion: accountDeletion,
+  export: customerExports,
+};
+
+function resumePendingSection() {
+  let key;
+  try {
+    key = window.sessionStorage.getItem(RESUME_SECTION_KEY);
+    if (key) window.sessionStorage.removeItem(RESUME_SECTION_KEY);
+  } catch {
+    return;
+  }
+  if (!key) return;
+  const target = RESUME_SECTION_ELEMENTS[key];
+  if (target && !target.hidden) {
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    show("Signed back in. Continuing where you left off.", "success");
+  }
 }
 
 async function verifyWorkspaceConnection() {
@@ -378,6 +593,7 @@ function renderCustomerExports(payload) {
         const download = document.createElement("button");
         download.type = "button";
         download.textContent = "Download once";
+        download.dataset.recencyGate = "export";
         download.addEventListener("click", () => downloadCustomerExport(item.id, download));
         container.append(download);
       }
@@ -387,6 +603,7 @@ function renderCustomerExports(payload) {
   customerExportCreate.disabled = (payload.exports || []).some((item) =>
     ["requested", "running", "ready"].includes(item.state),
   );
+  refreshRecencyGates();
 }
 
 function deletionStateLabel(item) {
@@ -511,6 +728,7 @@ async function renderAccountDeletion() {
   const active = item.status === "pending" || item.status === "claimed";
   accountDeletionRequest.hidden = active;
   accountDeletionCancel.hidden = item.status !== "pending";
+  refreshRecencyGates();
   return item;
 }
 
@@ -541,6 +759,7 @@ accountDeletionRequest.addEventListener("click", async () => {
     show("Account deletion requested.", "success");
   } catch (error) {
     accountDeletionRequest.disabled = false;
+    if (error.code === "recent_authentication_required") forceLapsedNow();
     show(
       error.code === "recent_authentication_required"
         ? "Sign out and sign in again before deleting your account."
@@ -571,6 +790,7 @@ accountDeletionCancel.addEventListener("click", async () => {
     await renderAccountDeletion();
     show("Account deletion cancelled.", "success");
   } catch (error) {
+    if (error.code === "recent_authentication_required") forceLapsedNow();
     show(
       error.code === "recent_authentication_required"
         ? "Sign out and sign in again before cancelling deletion."
@@ -620,6 +840,7 @@ customerExportCreate.addEventListener("click", async () => {
     }
   } catch (error) {
     customerExportCreate.disabled = false;
+    if (error.code === "recent_authentication_required") forceLapsedNow();
     show(
       error.code === "recent_authentication_required"
         ? "Sign out and sign in again before creating an export."
@@ -665,12 +886,104 @@ async function downloadCustomerExport(exportId, button) {
     show("Export downloaded once and queued for secure deletion.", "success");
   } catch (error) {
     button.disabled = false;
+    if (error.code === "recent_authentication_required") forceLapsedNow();
     show(
       error.code === "recent_authentication_required"
         ? "Sign out and sign in again before downloading your export."
         : "The one-time download could not be completed. Please try again.",
       error.code === "recent_authentication_required" ? "pending" : "error",
     );
+  }
+}
+
+function updateConversationHints() {
+  // First-run hints (UX review hosted item #9): shown only for a genuinely
+  // empty conversation, and hidden the moment any turn -- prior or just
+  // sent -- exists. No separate "have I shown this before" flag is needed:
+  // the message list itself is the source of truth.
+  if (!conversationHints) return;
+  conversationHints.hidden = conversationMessages.children.length > 0;
+}
+
+function conversationNotificationsSupported() {
+  return typeof window.Notification === "function";
+}
+
+function renderConversationNotifyControl() {
+  // Web-panel reply notifications: the control disappears once permission
+  // is denied (browsers never re-prompt) or Notification isn't supported,
+  // and explains why via the adjacent status text instead of leaving a
+  // dead button (deliverable 2's "handle denied/unsupported gracefully").
+  if (!conversationNotifyToggle) return;
+  if (!conversationNotificationsSupported()) {
+    conversationNotifyToggle.hidden = true;
+    conversationNotifyState.hidden = false;
+    conversationNotifyState.textContent =
+      "Reply notifications aren't supported in this browser.";
+    return;
+  }
+  if (Notification.permission === "denied") {
+    conversationNotifyToggle.hidden = true;
+    conversationNotifyState.hidden = false;
+    conversationNotifyState.textContent =
+      "Reply notifications are blocked. Allow notifications for this site " +
+      "in your browser settings to enable them.";
+    return;
+  }
+  conversationNotifyToggle.hidden = false;
+  conversationNotifyState.hidden = true;
+  const active = Notification.permission === "granted" && conversationNotificationsEnabled;
+  conversationNotifyToggle.setAttribute("aria-pressed", String(active));
+  conversationNotifyToggle.textContent = active
+    ? "Reply notifications on"
+    : "Notify me when Attune replies";
+}
+
+conversationNotifyToggle?.addEventListener("click", async () => {
+  if (!conversationNotificationsSupported()) return;
+  if (Notification.permission === "granted") {
+    conversationNotificationsEnabled = !conversationNotificationsEnabled;
+    renderConversationNotifyControl();
+    return;
+  }
+  if (Notification.permission === "denied") {
+    renderConversationNotifyControl();
+    return;
+  }
+  // Permission is requested ONLY here, on this explicit click -- never
+  // automatically on page load or poll.
+  try {
+    const permission = await Notification.requestPermission();
+    conversationNotificationsEnabled = permission === "granted";
+  } catch {
+    conversationNotificationsEnabled = false;
+  }
+  renderConversationNotifyControl();
+});
+
+for (const hint of conversationHints?.querySelectorAll(".conversation-hint") ?? []) {
+  hint.addEventListener("click", () => {
+    conversationInput.value = hint.dataset.hintText || hint.textContent || "";
+    conversationInput.focus();
+  });
+}
+
+function notifyOfConversationReply() {
+  if (!conversationNotificationsEnabled || !conversationNotificationsSupported()) return;
+  if (Notification.permission !== "granted") return;
+  if (!document.hidden) return;
+  try {
+    // Content-free by construction, matching every other OS-notification
+    // and audit surface in this codebase: the reply text never leaves the
+    // page, even into the notification center.
+    const notification = new Notification("Attune replied");
+    notification.onclick = () => {
+      window.focus();
+      notification.close();
+    };
+  } catch {
+    /* Notification construction can fail in some environments; it must
+       never affect the poll that triggered it. */
   }
 }
 
@@ -687,21 +1000,36 @@ function appendConversationTurns(turns) {
   }
   if (turns.length) {
     conversationMessages.scrollTop = conversationMessages.scrollHeight;
+    updateConversationHints();
   }
 }
 
 function setConversationPending(pending) {
   if (pending) {
     if (!conversationPendingSince) conversationPendingSince = Date.now();
-    const stalled = Date.now() - conversationPendingSince > 60_000;
+    const elapsed = Date.now() - conversationPendingSince;
     conversationIndicator.hidden = false;
-    conversationIndicator.textContent = stalled
-      ? "Attune is still working on this…"
-      : "Attune is working…";
+    if (elapsed > CONVERSATION_TERMINAL_MS) {
+      // A genuine terminal state (UX review hosted item #10), not an error:
+      // the message was durably accepted (docs/hosted-conversation.md's
+      // acceptance ceremony) and will still be answered. This is honest
+      // about that rather than implying anything failed.
+      conversationIndicator.textContent =
+        "This is taking much longer than expected — your message was " +
+        "accepted and will still be answered; check back or send a follow-up.";
+      conversationIndicator.dataset.state = "terminal";
+    } else if (elapsed > CONVERSATION_STALL_MS) {
+      conversationIndicator.textContent = "Attune is still working on this…";
+      conversationIndicator.dataset.state = "stalled";
+    } else {
+      conversationIndicator.textContent = "Attune is working…";
+      conversationIndicator.dataset.state = "working";
+    }
   } else {
     conversationPendingSince = null;
     conversationIndicator.hidden = true;
     conversationIndicator.textContent = "";
+    conversationIndicator.dataset.state = "";
   }
 }
 
@@ -725,7 +1053,9 @@ async function pollConversationTurns() {
         },
       ),
     );
-    appendConversationTurns(payload.turns || []);
+    const turns = payload.turns || [];
+    appendConversationTurns(turns);
+    if (turns.some((turn) => turn.actor === "assistant")) notifyOfConversationReply();
     pending = Boolean(payload.pending);
     conversationPollFailures = 0;
   } catch (error) {
@@ -743,7 +1073,16 @@ async function pollConversationTurns() {
   }
   setConversationPending(pending);
   if (pending) {
-    conversationPollTimer = window.setTimeout(pollConversationTurns, 2000);
+    // Past the terminal bound, drop to slow polling: the reply is still
+    // coming (the acceptance is durable), so polling never stops outright,
+    // but there is no reason to keep hitting the server every two seconds
+    // for a reply that is already known to be taking unusually long.
+    const elapsed = conversationPendingSince ? Date.now() - conversationPendingSince : 0;
+    const interval =
+      elapsed > CONVERSATION_TERMINAL_MS
+        ? CONVERSATION_POLL_SLOW_INTERVAL_MS
+        : CONVERSATION_POLL_INTERVAL_MS;
+    conversationPollTimer = window.setTimeout(pollConversationTurns, interval);
   }
 }
 
@@ -751,7 +1090,9 @@ async function startConversation() {
   conversationPanel.hidden = false;
   conversationHighestSequence = 0;
   conversationMessages.replaceChildren();
+  renderConversationNotifyControl();
   await pollConversationTurns();
+  updateConversationHints();
 }
 
 async function sendConversationMessage() {
@@ -823,6 +1164,7 @@ function renderChannels(channels) {
   channelsSave.textContent =
     channels.status === "not_started" ? "Save channel choices" : "Update channel choices";
   channelsSave.disabled = false;
+  refreshRecencyGates();
 }
 
 async function showChannels() {
@@ -869,6 +1211,7 @@ channelsSave.addEventListener("click", async () => {
   } catch (error) {
     channelsSave.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before changing channel choices.", "pending");
     } else {
       show("Channel choices could not be saved. Please try again.", "error");
@@ -927,6 +1270,7 @@ function renderChannelInstallations(payload) {
       !hostedChannelLifecycleAvailable || !["active", "pending_test"].includes(destination);
     slackDisconnect.disabled = false;
   }
+  refreshRecencyGates();
 }
 
 async function showChannelInstallations() {
@@ -964,6 +1308,7 @@ googleChatLinkStart.addEventListener("click", async () => {
   } catch (error) {
     googleChatLinkStart.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before linking Google Chat.", "pending");
     } else {
       show("Google Chat linking could not be started. Please try again.", "error");
@@ -996,6 +1341,7 @@ googleChatDeliveryTest.addEventListener("click", async () => {
   } catch (error) {
     googleChatDeliveryTest.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before testing Google Chat delivery.", "pending");
     } else {
       show("Google Chat delivery could not be verified. No workspace data was sent.", "error");
@@ -1038,6 +1384,7 @@ googleChatDisconnect.addEventListener("click", async () => {
   } catch (error) {
     googleChatDisconnect.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before disconnecting Google Chat.", "pending");
     } else {
       show("Google Chat could not be disconnected. Please try again.", "error");
@@ -1062,6 +1409,7 @@ slackInstallStart.addEventListener("click", async () => {
   } catch (error) {
     slackInstallStart.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before installing Slack.", "pending");
     } else {
       show("Slack installation could not be started. Please try again.", "error");
@@ -1094,6 +1442,7 @@ slackDeliveryTest.addEventListener("click", async () => {
   } catch (error) {
     slackDeliveryTest.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before testing Slack delivery.", "pending");
     } else {
       show("Slack delivery could not be verified. No workspace data was sent.", "error");
@@ -1133,6 +1482,7 @@ slackDisconnect.addEventListener("click", async () => {
   } catch (error) {
     slackDisconnect.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before disconnecting Slack.", "pending");
     } else {
       show("Slack could not be disconnected. Please try again.", "error");
@@ -1156,6 +1506,7 @@ function renderPolicy(policy) {
   renderItems(policyExcluded, policy.excluded || []);
   policyConfirm.hidden = policy.status === "validated";
   policyConfirm.disabled = false;
+  refreshRecencyGates();
 }
 
 async function showPolicy() {
@@ -1186,6 +1537,7 @@ policyConfirm.addEventListener("click", async () => {
   } catch (error) {
     policyConfirm.disabled = false;
     if (error.code === "recent_authentication_required") {
+      forceLapsedNow();
       show("Sign out and sign in again before changing assistant policy.", "pending");
     } else if (error.code === "policy_requires_repair") {
       show("Policy state changed outside Attune and requires operator repair.", "error");
@@ -1198,15 +1550,7 @@ policyConfirm.addEventListener("click", async () => {
 sessionSignOut.addEventListener("click", async () => {
   sessionSignOut.disabled = true;
   try {
-    const csrf = cookie("__Host-attune_csrf");
-    if (!csrf) throw new Error("missing session binding");
-    await json(
-      await fetch("/v1/session", {
-        method: "DELETE",
-        credentials: "same-origin",
-        headers: { Accept: "application/json", "X-Attune-CSRF": csrf },
-      }),
-    );
+    await performSignOut();
     window.location.assign("/");
   } catch {
     sessionSignOut.disabled = false;
@@ -1293,6 +1637,7 @@ async function main() {
     await renderAccountDeletion();
     const slackMessage = slackInstallReturnMessage(slackOutcome);
     if (slackMessage) slackInstallationState.textContent = slackMessage;
+    resumePendingSection();
     return;
   }
   const auth = await configure();
@@ -1306,6 +1651,7 @@ async function main() {
       // activation for browsers that otherwise block the provider popup.
       const attempt = exchange(auth, bootstrap);
       await attempt;
+      markSessionStarted();
       show("Signed in to Attune.", "success");
       button.hidden = true;
       sessionSignOut.hidden = false;
@@ -1314,6 +1660,7 @@ async function main() {
         await showWorkspace(session);
         await showOnboarding(session);
         await renderAccountDeletion();
+        resumePendingSection();
       }
     } catch (error) {
       if (error.status === 409) {
