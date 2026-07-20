@@ -439,6 +439,18 @@ confirming the dashboard against live data all remain operator work. The
 dated design record is in [`decisions.md`](decisions.md); the operator-facing
 summary is in [`hosted-gcp.md`](hosted-gcp.md#slo-monitoring).
 
+Phase 6's hosted onboarding item's "push/email fallback for the web panel"
+sub-bullet is now partly closed: the setup page's conversation panel gained
+an opt-in, content-free browser-notification control (push only -- no email
+fallback exists yet). The same client-only pass also addressed three UX
+review findings (hosted items #1, #9, #10) that were not roadmap sub-items
+of their own: a recency-window countdown and resumable pre-flight ahead of
+every ten-minute-gated ceremony, first-run conversation-panel hints, and a
+genuine terminal state for the polling flow past five minutes. Collapsing
+ceremonies, a single step-up auth covering one onboarding session, and
+OAuth-style Chat install remain open. The dated design record is in
+[`decisions.md`](decisions.md).
+
 ## Later
 
 - richer calendar negotiation and follow-up workflows

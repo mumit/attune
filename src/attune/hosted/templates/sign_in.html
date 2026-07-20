@@ -63,7 +63,7 @@
           <label><input type="checkbox" data-purpose="brief" value="slack"> Slack</label>
         </fieldset>
         <p class="channel-note">The selected apps and owner-only destinations must be installed and verified before this step is complete.</p>
-        <button id="channels-save" type="button">Save channel choices</button>
+        <button id="channels-save" type="button" data-recency-gate="channels">Save channel choices</button>
       </section>
       <section id="channel-installations" hidden>
         <h2>Connect your selected apps</h2>
@@ -74,13 +74,13 @@
         <div id="google-chat-installation" hidden>
           <h3>Google Chat</h3>
           <p id="google-chat-installation-state"></p>
-          <button id="google-chat-link-start" type="button">
+          <button id="google-chat-link-start" type="button" data-recency-gate="channel-installations">
             Generate Google Chat link code
           </button>
-          <button id="google-chat-delivery-test" type="button" hidden>
+          <button id="google-chat-delivery-test" type="button" hidden data-recency-gate="channel-installations">
             Send fixed connection test
           </button>
-          <button id="google-chat-disconnect" class="secondary" type="button" hidden>
+          <button id="google-chat-disconnect" class="secondary" type="button" hidden data-recency-gate="channel-installations">
             Disconnect Google Chat
           </button>
           <div id="google-chat-link-instructions" hidden>
@@ -92,13 +92,13 @@
         <div id="slack-installation" hidden>
           <h3>Slack</h3>
           <p id="slack-installation-state"></p>
-          <button id="slack-install-start" type="button">
+          <button id="slack-install-start" type="button" data-recency-gate="channel-installations">
             Install the Attune Slack app
           </button>
-          <button id="slack-delivery-test" type="button" hidden>
+          <button id="slack-delivery-test" type="button" hidden data-recency-gate="channel-installations">
             Send fixed connection test
           </button>
-          <button id="slack-disconnect" class="secondary" type="button" hidden>
+          <button id="slack-disconnect" class="secondary" type="button" hidden data-recency-gate="channel-installations">
             Disconnect Slack
           </button>
         </div>
@@ -113,7 +113,7 @@
         <ul id="policy-automatic"></ul>
         <p><strong>Not permitted</strong></p>
         <ul id="policy-excluded"></ul>
-        <button id="policy-confirm" type="button">
+        <button id="policy-confirm" type="button" data-recency-gate="policy">
           Enable read-only policy
         </button>
       </section>
@@ -123,7 +123,37 @@
           Send Attune a message and it will reply here. Conversations are
           read-only until write capabilities are enabled.
         </p>
+        <div id="conversation-notify">
+          <button
+            id="conversation-notify-toggle"
+            class="secondary"
+            type="button"
+            aria-pressed="false"
+            hidden
+          >
+            Notify me when Attune replies
+          </button>
+          <p id="conversation-notify-state" hidden></p>
+        </div>
         <div id="conversation-messages" role="log" aria-live="polite"></div>
+        <div id="conversation-hints" hidden>
+          <p>Try asking:</p>
+          <button
+            type="button"
+            class="conversation-hint"
+            data-hint-text="What needs my attention today?"
+          >What needs my attention today?</button>
+          <button
+            type="button"
+            class="conversation-hint"
+            data-hint-text="Did anyone reply to the launch thread?"
+          >Did anyone reply to the launch thread?</button>
+          <button
+            type="button"
+            class="conversation-hint"
+            data-hint-text="What's on my calendar tomorrow?"
+          >What's on my calendar tomorrow?</button>
+        </div>
         <p id="conversation-indicator" aria-live="polite" hidden></p>
         <label for="conversation-input">Message Attune</label>
         <textarea
@@ -140,7 +170,7 @@
           Create an encrypted account-and-preferences archive. It is available
           briefly, downloads once, and is then cryptographically erased.
         </p>
-        <button id="customer-export-create" type="button">
+        <button id="customer-export-create" type="button" data-recency-gate="export">
           Create account export
         </button>
         <div id="customer-export-list" aria-live="polite"></div>
@@ -167,10 +197,10 @@
           source data.
         </p>
         <p id="account-deletion-state" aria-live="polite"></p>
-        <button id="account-deletion-request" class="secondary danger" type="button">
+        <button id="account-deletion-request" class="secondary danger" type="button" data-recency-gate="deletion">
           Delete account
         </button>
-        <button id="account-deletion-cancel" class="secondary" type="button" hidden>
+        <button id="account-deletion-cancel" class="secondary" type="button" hidden data-recency-gate="deletion">
           Cancel deletion
         </button>
       </section>

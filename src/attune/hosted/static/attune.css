@@ -296,3 +296,77 @@ button.danger {
 #conversation-send {
   margin-top: 0.75rem;
 }
+
+#conversation-notify {
+  margin-bottom: 1rem;
+}
+
+#conversation-notify-toggle {
+  width: auto;
+  margin-top: 0;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.82rem;
+}
+
+#conversation-notify-toggle[aria-pressed="true"] {
+  border-color: #3f6d51;
+  color: #17633a;
+  background: rgb(36 76 53 / 8%);
+}
+
+#conversation-notify-state {
+  margin: 0.4rem 0 0;
+  color: #735918;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+#conversation-hints {
+  margin: 0.75rem 0;
+}
+
+#conversation-hints p {
+  margin: 0 0 0.4rem;
+  color: #69756e;
+  font-size: 0.8rem;
+}
+
+.conversation-hint {
+  width: auto;
+  display: inline-block;
+  margin: 0 0.4rem 0.4rem 0;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid rgb(23 33 28 / 18%);
+  border-radius: 999px;
+  color: #244c35;
+  background: rgb(255 255 252 / 60%);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.conversation-hint:hover:not(:disabled) {
+  background: rgb(36 76 53 / 8%);
+}
+
+#conversation-indicator[data-state="terminal"] {
+  color: #735918;
+  font-weight: 650;
+}
+
+.recency-status {
+  margin: 0.6rem 0;
+  padding: 0.65rem 0.85rem;
+  border-radius: 0.65rem;
+  background: rgb(115 89 24 / 10%);
+  color: #735918;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.recency-status button.recency-reauth {
+  width: auto;
+  display: block;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.82rem;
+}

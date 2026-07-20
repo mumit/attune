@@ -2689,3 +2689,140 @@ convention the F1-F9 entry above already established; `roadmap.md` and
   `alert_notification_channels`, and confirming the dashboard renders
   real data against a live deployment are all still operator work, exactly
   like every other Terraform change in this codebase.
+
+## 2026-07-20 — Hosted onboarding polish: recency countdown, reply notifications, first-run hints, terminal polling state (Phase 6, UX review hosted items #1/#9/#10)
+
+The UX review found three plain rough edges in the hosted onboarding and web
+conversation panel: the ten-minute recency bar (item #1) bounces a signed-in
+owner mid-ceremony with no warning; a blank conversation panel gives no hint
+what to type (item #9); and the polling flow's only escalation past "working"
+is a vague "still working" note with no honest terminal state (item #10).
+None of these are security findings -- the ceremonies, CSRF, session
+semantics, and every server-side check needed to stay byte-identical -- so
+this pass is deliberately scoped to `web/hosted-identity/src/sign-in.js`,
+`src/attune/hosted/templates/sign_in.html`, and
+`src/attune/hosted/static/attune.css`, plus the rebuilt bundle. No Python
+file changed at all.
+
+- **The countdown is advisory; the server remains authoritative, and the
+  code says so.** The client cannot know a session's true age from a cookie
+  it cannot read, so it only tracks what it can honestly know: the moment
+  *this browser tab* performed the sign-in exchange, kept in
+  `sessionStorage` (never a cookie, never sent to the server) under
+  `attune_session_started_at`. A reload in the same tab keeps tracking
+  correctly (sessionStorage survives it); a different tab, a session that
+  predates this code, or plain clock skew all degrade to an "unknown"
+  local estimate, in which case the countdown and pre-flight silently do
+  nothing and the ceremony renders exactly as it always has -- the
+  existing server-side `recent_authentication_required` 409 is the actual
+  backstop either way. Every one of the twelve routes that return that
+  error (confirmed by grep against `control_plane_service.py`: policy
+  confirm, channel-preference save, Google Chat link/test/disconnect,
+  Slack install/test/disconnect, deletion request/cancel, export
+  create/download-authorize) got a `data-recency-gate` attribute on its
+  button and a matching client-side gate; `GET`/read routes and the three
+  routes the code already documents as deliberately *not* recency-gated
+  (Workspace connect/disconnect, `POST /v1/brief/run`,
+  `PUT /v1/model-profile` -- see their own docstrings' "ordinary session,
+  not recency" citations) were left alone.
+- **One session-wide window, not twelve independent timers.** The ten-minute
+  bar is a property of the session, not of any one ceremony, so a single
+  `recencyRemainingMs()` computation drives every gate; there is exactly
+  one per-second ticker (`window.setInterval(refreshRecencyGates, 1000)`)
+  plus an explicit call at the end of every render function that can
+  reveal a gated control (`renderPolicy`, `renderChannels`,
+  `renderChannelInstallations`, `renderAccountDeletion`,
+  `renderCustomerExports`, including the dynamically created per-export
+  "Download once" button) so a status change is reflected immediately
+  rather than waiting up to a second for the next tick. Past the window,
+  the pre-flight hides the real control(s) outright rather than merely
+  disabling them -- there is no "restore" step to get wrong, because the
+  only way the window resets is a fresh sign-in, which reruns the normal
+  render pipeline and re-derives every control's correct hidden/shown
+  state from real server data anyway.
+- **Resuming lands on the same section via the existing sign-out ceremony,
+  not a new one.** "Sign in again" writes a section key to
+  `attune_resume_section` in `sessionStorage`, then calls the exact same
+  `DELETE /v1/session` the visible "Sign out" button already uses (both
+  now share one `performSignOut()`), and navigates to `/` -- there is no
+  new re-auth endpoint or session-semantics change. After the ordinary
+  "Continue with Google" flow completes again, `resumePendingSection()`
+  reads and clears that key and scrolls the same section into view. If the
+  underlying sign-out call itself failed, the code still navigates to `/`
+  on the reasoning that every route re-validates the session server-side
+  regardless of what this tab believes, so a fresh sign-in is forced either
+  way.
+- **The reactive path gets the same treatment as the proactive one.** All
+  twelve `error.code === "recent_authentication_required"` catch blocks
+  that already existed (each showing some form of "sign out and sign in
+  again...") now also call `forceLapsedNow()`, which back-dates the local
+  session-start estimate past the window and re-renders every gate
+  immediately -- so a race or clock-skew 409 produces the identical
+  in-place "sign in again" button as a proactively detected lapse, instead
+  of a passive dead-end message the user has to act on manually elsewhere
+  on the page.
+- **Notifications are content-free by construction, matching every other
+  audit and log surface in this codebase.** The opt-in control
+  (`#conversation-notify-toggle`) calls `Notification.requestPermission()`
+  only inside its own click handler, never on load or on a poll tick.
+  Granted + tab hidden + an assistant turn arriving through the existing
+  two-second poll fires exactly `new Notification("Attune replied")` --
+  the literal string, never turn text -- and its `onclick` only focuses
+  the tab and closes itself. Denied permission or no `Notification`
+  constructor at all removes the control and swaps in explanatory text
+  (`#conversation-notify-state`) rather than leaving an inert button,
+  since browsers never re-prompt once denied.
+- **First-run hints name only what the executor answers.** The three chips
+  ("What needs my attention today?", "Did anyone reply to the launch
+  thread?", "What's on my calendar tomorrow?") map onto the brief/Gmail/
+  Calendar routes `docs/hosted-conversation.md`'s planner actually serves
+  and were checked against it before writing them; none suggest a write
+  the bounded executor refuses. `updateConversationHints()` has no separate
+  "seen before" flag -- it just checks whether `conversationMessages` has
+  any children, so it is exactly as correct as the DOM it reads.
+- **The terminal state is honest, not an error, and audibly changes the
+  poll.** Past five minutes of a still-pending turn,
+  `setConversationPending()` swaps to "this is taking much longer than
+  expected... your message was accepted and will still be answered; check
+  back or send a follow-up" -- true regardless of how slow the reply is,
+  because the acceptance ceremony in `hosted-conversation.md` already made
+  the turn durable before this page ever saw it -- and `pollConversationTurns()`
+  drops its own re-schedule interval from two seconds to fifteen once past
+  that bound. It never stops polling outright (the reply is still coming)
+  and it is deliberately kept distinct from the pre-existing five-failure
+  error path (`conversationPollFailures >= 5`), which still reports that
+  replies could not be checked and still halts the indicator -- a slow
+  reply and a broken poll are different situations and now say so
+  differently.
+- **Nothing here needed a server change.** `control_plane_service.py` was
+  read only, to confirm the twelve routes' exact `recent_authentication_required`
+  409 shape and which three routes deliberately omit it; that shape was
+  already a sufficient, distinguishable marker (`error.code` already
+  round-trips it via the existing `json()` helper), so no additive field
+  or other server change was justified or made.
+- **Docs and tests.** `docs/user-journey.md` §0 and its conversation-panel
+  paragraph, and `docs/hosted-conversation.md`'s "Setup-page panel" section,
+  now describe the countdown/pre-flight, hints, notifications, and terminal
+  state; `docs/hosted-policy.md` gained one paragraph on the same page's
+  behavior for its own ceremony. This codebase has no JS test framework
+  (confirmed via `package.json`: `esbuild` is the only dependency, no test
+  runner) and none was introduced. `tests/test_control_plane_service.py`'s
+  `test_identity_ui_exposes_only_public_provider_configuration` -- the
+  existing precedent for asserting rendered `sign_in.html` strings -- was
+  extended to pin the three hint prompts, the notification opt-in label,
+  and all five `data-recency-gate` values. The full offline suite stays at
+  1920 passed/57 skipped (unchanged, since no Python behavior changed);
+  `ruff` has the same pre-existing, unrelated findings it had before this
+  change (none of the four changed files are Python). `node --check` passes
+  on both `src/sign-in.js` and the rebuilt, minified
+  `src/attune/hosted/static/identity.js`.
+- **What this does not do.** It does not add a step-up-auth ceremony, does
+  not collapse any ceremony, and does not add an email fallback -- those
+  remain the other, separate parts of `docs/future-state.md` Phase 6's
+  "hosted onboarding" bullet (`docs/roadmap.md` carries the one-liner). It
+  also does not change what counts as recent: the countdown's 10-minute/
+  3-minute constants are read from the same fixed values the server already
+  enforces, not derived from them at runtime, so a future change to the
+  server's window requires updating this file's constants by hand -- there
+  is no shared source of truth between client and server for this number,
+  and inventing one was out of scope for a client-only polish pass.
