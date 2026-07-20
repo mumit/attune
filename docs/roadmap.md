@@ -408,6 +408,37 @@ own deployment evidence. The dated design record is in
 [`decisions.md`](decisions.md); the ceremony and gates are documented in
 [`hosted-model-profiles.md`](hosted-model-profiles.md).
 
+Phase 6's "hosted operations" item also had "SLO-grade monitoring" outstanding
+(hosted review gap #8: seven job-failure alert policies existed and nothing
+gave latency, error-rate, or per-service health visibility). That is now
+implemented and tested. `src/attune/hosted/service_metrics.py` gives all six
+hosted Flask services one content-free `http_request` JSON log line per
+request (`metric`/`service`/`route`/`method`/`status_class`/`status`/
+`duration_ms`, `route` always the matched Flask URL rule template rather than
+a raw path); the worker's dispatch seam emits an equivalent `task_execution`
+line per task. Both ship always-on, not behind a gate, since they are
+content-free operational logging strictly less sensitive than the anomaly
+markers and audit events these services already write unconditionally.
+`deploy/gcp/runtime` and `deploy/gcp/edge` gained log-based metrics parsing
+those lines, a 5xx-rate alert policy per service, p95-latency alert policies
+for the two customer-facing paths (the control plane overall, and the
+worker's bounded conversation-execution task kinds specifically, since the
+worker's HTTP surface is one uniform route for every task purpose), and one
+`google_monitoring_dashboard` covering request rate, error rate, p95 latency,
+and task-execution outcome across all six services. These Terraform resources
+are unconditional too, following the same pattern the seven pre-existing
+policies already established -- tied only to whichever flag gates the
+underlying service's own existence, never a new separate monitoring toggle.
+No uptime-check/synthetic-monitoring infrastructure existed to extend, so
+none was invented. The full offline suite grew from 1898 passed/57 skipped to
+1920 passed/57 skipped. No `terraform` binary was available in the
+environment this was built in, so every `.tf` change was validated
+structurally with `python-hcl2` and by hand-conformance to the existing seven
+policies' style -- `terraform apply`, real notification-channel wiring, and
+confirming the dashboard against live data all remain operator work. The
+dated design record is in [`decisions.md`](decisions.md); the operator-facing
+summary is in [`hosted-gcp.md`](hosted-gcp.md#slo-monitoring).
+
 ## Later
 
 - richer calendar negotiation and follow-up workflows

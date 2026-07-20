@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Mapping, Protocol
 from .repositories import HostedJob, PostgresJobRepository
+from .service_metrics import emit_task_execution
 from .task_envelope import TokenVerifier, verify_task_envelope
 from .tenant import TenantContext
 
@@ -104,6 +106,28 @@ class WorkerDispatcher:
             return DispatchResult(400)
 
         route = self._routes[envelope.purpose]
+        start = time.monotonic()
+        result, outcome = self._execute_route(envelope, route)
+        emit_task_execution(
+            task=route.purpose,
+            outcome=outcome,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return result
+
+    def _execute_route(
+        self, envelope, route: TaskRoute
+    ) -> tuple[DispatchResult, str]:
+        """Claim, audit, execute, audit, and finish one bound job.
+
+        Returns the HTTP result alongside a fixed-vocabulary outcome for the
+        content-free ``task_execution`` metric line: ``"duplicate"`` (an
+        idempotent no-op, no work claimed), ``"failed"`` (the claim itself
+        errored -- no reconciliation was opened because no job was ever
+        claimed), ``"reconciled"`` (every path that opens a durable
+        reconciliation record because the effect is ambiguous), or
+        ``"succeeded"``.
+        """
         try:
             job = self._jobs.claim(
                 envelope.tenant,
@@ -112,9 +136,9 @@ class WorkerDispatcher:
                 expected_capability=route.capability,
             )
         except Exception:
-            return DispatchResult(503)
+            return DispatchResult(503), "failed"
         if job is None:
-            return DispatchResult(204)
+            return DispatchResult(204), "duplicate"
 
         if not self._record(
             envelope.tenant,
@@ -124,7 +148,7 @@ class WorkerDispatcher:
             caller_subject=envelope.caller_subject,
         ):
             self._reconcile(envelope.tenant, job, "pre_effect_audit")
-            return DispatchResult(503)
+            return DispatchResult(503), "reconciled"
 
         try:
             route.execute(envelope.tenant, job)
@@ -137,7 +161,7 @@ class WorkerDispatcher:
                 caller_subject=envelope.caller_subject,
             )
             self._reconcile(envelope.tenant, job, "executor_ambiguous")
-            return DispatchResult(500)
+            return DispatchResult(500), "reconciled"
 
         if not self._record(
             envelope.tenant,
@@ -147,17 +171,17 @@ class WorkerDispatcher:
             caller_subject=envelope.caller_subject,
         ):
             self._reconcile(envelope.tenant, job, "post_effect_audit")
-            return DispatchResult(503)
+            return DispatchResult(503), "reconciled"
         try:
             if not self._jobs.finish(
                 envelope.tenant, job.id, outcome="succeeded"
             ):
                 self._reconcile(envelope.tenant, job, "job_finalize")
-                return DispatchResult(503)
+                return DispatchResult(503), "reconciled"
         except Exception:
             self._reconcile(envelope.tenant, job, "job_finalize")
-            return DispatchResult(503)
-        return DispatchResult(204)
+            return DispatchResult(503), "reconciled"
+        return DispatchResult(204), "succeeded"
 
     def _record(
         self,

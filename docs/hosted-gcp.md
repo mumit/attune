@@ -362,6 +362,57 @@ Terraform plans were both empty after deployment. This evidence authorizes the
 development slice only; it does not authorize hosted production signup or a
 generic browser-controlled state transition.
 
+## SLO monitoring
+
+Phase 6 "hosted operations" (`docs/future-state.md`; hosted review gap #8)
+closed the "seven job-failure alert policies only, no latency/error-rate
+visibility, no dashboards" gap with request- and task-level metrics, new
+log-based metrics, alert policies, and one dashboard. The dated design
+record, including why it is unconditional infrastructure rather than
+behind a new activation flag, is in
+[`decisions.md`](decisions.md#2026-07-19--slo-grade-observability-requesttask-metrics-log-based-metrics-alerts-and-a-dashboard-phase-6-hosted-operations-hosted-review-gap-8).
+
+**What each hosted Flask service now emits.** Every request produces one
+content-free JSON line -- `metric`, `service`, `route` (the matched Flask
+URL rule template, never a raw path or identifier), `method`,
+`status_class`, `status`, `duration_ms` -- and nothing else. The worker
+additionally emits one line per dispatched task -- `metric`, `task` (the
+fixed registered purpose), `outcome`, `duration_ms`. Both land in Cloud
+Logging as `jsonPayload` automatically; no code change is required to see
+them, and emission is always on (it ships in the application, not gated by
+Terraform).
+
+**What to apply.** `deploy/gcp/runtime` now creates log-based metrics and
+5xx-rate alert policies for the worker, model gateway, dispatch broker,
+secret broker, and channel broker, plus the worker's task-execution
+metrics and its conversation-execution p95-latency alert (present only
+once at least one of Google Chat, Slack, or web conversation is enabled).
+`deploy/gcp/edge` creates the equivalent control-plane metrics and alert
+policies, plus a p95-latency alert, plus the one `google_monitoring_dashboard`
+(`<prefix> SLO overview`) covering all six services' request rate, error
+rate, and p95 latency, and the worker's task-execution outcome and
+latency. All of it is unconditional: it activates with the normal
+`terraform apply` for each root, exactly like the seven pre-existing
+policies, with no separate monitoring flag to flip. `alert_notification_channels`
+still must be populated in each root for these alerts to page anyone,
+same as before.
+
+**Threshold variables** (all operator-tunable, all with conservative
+defaults so applying either root with the example tfvars is enough):
+`slo_5xx_error_threshold` (default 5 responses per window),
+`slo_alert_window_seconds` (default 300s), `slo_control_plane_p95_latency_ms`
+(edge, default 2000), and `slo_worker_conversation_p95_latency_ms`
+(runtime, default 15000 -- conversation tasks call the model gateway, so
+this sits well above a simple API round trip).
+
+**What this does not give you.** No uptime-check or synthetic-monitoring
+infrastructure exists in this codebase to extend, so none was added; a
+"no traffic" style policy would need that built first. Applying Terraform
+is not the same as having live evidence the alerts page correctly or the
+dashboard renders real data -- that is the same "successfully applying
+Terraform is not successful onboarding" posture as everything else in this
+document.
+
 ## GCP implementation references
 
 - [Cloud Run service identities](https://cloud.google.com/run/docs/securing/service-identity)

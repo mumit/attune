@@ -36,6 +36,13 @@ alert_notification_channels = [
   # "projects/PROJECT/notificationChannels/NUMERIC_ID",
 ]
 
+# SLO monitoring (log-based metrics and the per-service 5xx/p95-latency
+# alerts) is unconditional infrastructure -- these tunables all have
+# conservative defaults and do not need to be set to apply it.
+# slo_5xx_error_threshold                = 5
+# slo_alert_window_seconds               = 300
+# slo_worker_conversation_p95_latency_ms = 15000
+
 labels = {
   owner       = "platform"
   cost_center = "attune"

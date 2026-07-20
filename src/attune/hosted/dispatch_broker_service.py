@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping, Sequence, Union
 from uuid import UUID
 
 from .dispatch_broker import DispatchBroker
+from .service_metrics import instrument_service_metrics
 from .task_envelope import _google_token_verifier, _verify_claims
 
 LOG = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ def create_app(
     }
     verifier = token_verifier or _google_token_verifier
     app = Flask(__name__)
+    instrument_service_metrics(app, service="dispatch_broker")
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
     def authorize() -> str | None:

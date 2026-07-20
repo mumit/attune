@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from .service_metrics import instrument_service_metrics
 from .worker_dispatch import WorkerDispatcher
 
 LOG = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ def create_app(dispatcher: WorkerDispatcher):
     from flask import Flask, jsonify, request
 
     app = Flask(__name__)
+    instrument_service_metrics(app, service="worker")
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
     @app.get("/healthz")

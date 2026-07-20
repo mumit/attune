@@ -101,6 +101,39 @@ variable "alert_notification_channels" {
   }
 }
 
+variable "slo_5xx_error_threshold" {
+  description = "The control plane pages after more than this many 5xx responses within slo_alert_window_seconds. Conservative default; tune down only with evidence of real traffic volume."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.slo_5xx_error_threshold >= 1
+    error_message = "slo_5xx_error_threshold must be at least 1."
+  }
+}
+
+variable "slo_alert_window_seconds" {
+  description = "Alignment window, in seconds, for the control-plane 5xx-rate and p95-latency alert policies."
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.slo_alert_window_seconds >= 60
+    error_message = "slo_alert_window_seconds must be at least 60."
+  }
+}
+
+variable "slo_control_plane_p95_latency_ms" {
+  description = "The control plane pages when p95 request latency exceeds this many milliseconds over slo_alert_window_seconds."
+  type        = number
+  default     = 2000
+
+  validation {
+    condition     = var.slo_control_plane_p95_latency_ms >= 100
+    error_message = "slo_control_plane_p95_latency_ms must be at least 100."
+  }
+}
+
 variable "enable_identity_sign_in" {
   description = "Expose the staged Identity Platform session routes after provider and security evidence."
   type        = bool

@@ -2550,3 +2550,142 @@ verified, added, and deliberately left alone.
   `enable_export_cleanup_schedule` -- all still operator work per
   `customer-export.md`'s "Required evidence before production activation"
   list, none of it claimed done here.
+
+## 2026-07-19 — SLO-grade observability: request/task metrics, log-based metrics, alerts, and a dashboard (Phase 6 "hosted operations", hosted review gap #8)
+
+`docs/gap-analysis.md` G19 and `docs/current-state.md` named the gap plainly:
+"job-failure-only monitoring" -- seven `google_monitoring_alert_policy`
+resources existed (five job/backlog failure policies plus the secret-broker
+use-anomaly and export-download-failure policies) and nothing gave
+latency, error-rate, or per-service health visibility across the six
+hosted Flask services (control plane, worker, model gateway, dispatch
+broker, secret broker, channel broker). Both are point-in-time review
+documents (2026-07-18) and are not rewritten by this entry, per the same
+convention the F1-F9 entry above already established; `roadmap.md` and
+`hosted-gcp.md` carry the forward-looking summary instead.
+
+- **A fixed, content-free field vocabulary is the contract.** A new shared
+  module, `src/attune/hosted/service_metrics.py`, installs one
+  before/after_request hook pair per Flask app that emits exactly one
+  JSON line per request: `{"metric": "http_request", "service": <fixed>,
+  "route": <matched Flask URL rule template>, "method": <str>,
+  "status_class": "2xx".."5xx", "status": <int>, "duration_ms": <int>}` --
+  and nothing else. `route` is `request.url_rule.rule`, never
+  `request.path`: a real UUID or other identifier substituted into a
+  templated route (e.g. `/v1/connectors/google/tests/<uuid:job_id>`)
+  never reaches a log line or a metric label, matching the existing
+  "Content-free anomaly markers drive an operational alert; tenant or
+  provider content is not copied into logs or metric labels" stance
+  above. No query string, header, body, User-Agent, or IP is ever read.
+  An unmatched route (a 404 before dispatch) reports `"unmatched"`. The
+  worker's dispatch seam (`worker_dispatch.py`) emits one equivalent line
+  per dispatched task: `{"metric": "task_execution", "task": <fixed
+  registered purpose>, "outcome": <"succeeded"|"duplicate"|"reconciled"|
+  "failed">, "duration_ms": <int>}`. `"reconciled"` is deliberately the
+  outcome for every path that already opens a durable reconciliation
+  record (pre-effect audit failure, executor exception, post-effect audit
+  failure, finalize failure) -- the metric's ambiguous-outcome bucket
+  matches the codebase's own ambiguous-effect concept exactly, rather than
+  inventing a separate taxonomy. `"failed"` is reserved for the one path
+  that opens no reconciliation because no job was ever claimed (the claim
+  call itself raised). A failure inside either emitter is caught and
+  swallowed (a content-free `logging` breadcrumb at DEBUG) so
+  instrumentation can never break the request or task it observes.
+- **A bare `print(json.dumps(...), flush=True)`, not `logging`, and that
+  was a real finding, not a style choice.** These six hosted services run
+  under gunicorn with no `logging.basicConfig` call anywhere -- unlike the
+  local runtime's `logging_setup.py` -- so the root logger's default level
+  is `WARNING`. Every existing per-request `LOG.info` call in these
+  modules (e.g. `control_plane_service.py`'s `hosted_signup_attempted`)
+  was already silently dropped before reaching a handler. A per-request
+  operational signal that must reliably reach Cloud Logging cannot depend
+  on that, so both emitters match the existing structured-log precedent in
+  `protocol_retention.py`/`export_cleanup.py`/`content_retention.py`:
+  Cloud Run parses a bare JSON stdout/stderr line into `jsonPayload`
+  automatically regardless of logger configuration.
+- **Emission ships always-on; the Terraform that reads it follows the
+  existing monitoring norm, not a new gate.** The task brief's default
+  suggestion was a new `enable_slo_monitoring` Terraform variable
+  defaulting false, mirroring the product-feature activation flags
+  (`enable_google_chat_conversation` and friends). Reading the seven
+  existing alert policies first shows that is not, in fact, the norm for
+  monitoring resources: `secret_broker_use_anomaly` and
+  `export_writer_failure` in `deploy/gcp/runtime`, both `protocol_retention_*`
+  and `export_cleanup_*` in `deploy/gcp/data`, and `export_download_failure`
+  in `deploy/gcp/edge` are each either unconditional or gated only on the
+  *same* flag that gates the underlying service's own existence
+  (`count = var.enable_export_writer ? 1 : 0`, matching the service
+  resource's own count) -- never on a separate monitoring toggle. Product
+  gates exist because activating a customer-facing capability needs
+  security review; observing an already-running service does not. The new
+  log-based metrics, 5xx-rate and p95-latency alert policies, and the
+  dashboard all follow that same established pattern: tied only to
+  whichever `enable_model_gateway`/`enable_dispatch_broker`/
+  `enable_channel_broker` flag already gates that service (worker, secret
+  broker, and control plane are unconditional, matching their own
+  services), never a new toggle. Application-side emission is unconditional
+  for the same reason from the other direction: it is strictly less
+  sensitive than the anomaly markers and audit events these services
+  already write unconditionally today.
+- **Where the Terraform lives, and the one cross-module wrinkle.** Log-based
+  metrics and alert policies for the five private runtime services (worker,
+  model gateway, dispatch broker, secret broker, channel broker) live in
+  `deploy/gcp/runtime/main.tf`, next to the two policies already there;
+  control plane's live in `deploy/gcp/edge/main.tf`, next to
+  `export_download_failure`. The one new `google_monitoring_dashboard` also
+  lives in `edge/main.tf` (edge already reads runtime's remote state for
+  other checks), but its widgets reference five of the six services'
+  metrics by their deterministic `"${local.prefix}-<service>-..."` name
+  string rather than a Terraform resource reference, because those metrics
+  are resources in the separate runtime state, not this one. A naming
+  mismatch between the two roots would only ever render an empty panel --
+  Cloud Monitoring does not error on an unknown metric type -- but the two
+  naming schemes must be kept in sync by hand; there is no compiler for it.
+  The worker's HTTP surface is one uniform `/v1/tasks/dispatch` route for
+  every task purpose, so the "worker conversation execution" p95 latency
+  alert the brief asked for is built from the `task_execution` distribution
+  metric filtered to whichever of the three bounded conversation task kinds
+  (`channel.google_chat.converse`/`channel.slack.converse`/
+  `channel.web.converse`) are activated, not from the HTTP request metric
+  -- and only exists at all (`count = length(local.conversation_task_purposes)
+  > 0 ? 1 : 0`) when at least one is. No uptime-check/synthetic-monitoring
+  infrastructure was added: none existed to extend, and inventing one was
+  out of scope for a log-metrics-and-alerts pass.
+- **What this pass verified rather than built.** All six hosted Flask apps
+  already had a distinct `create_app` factory and no app-level
+  before/after_request hook of any kind to conflict with (`grep` for
+  `before_request`/`after_request` across `control_plane_service.py`,
+  `worker_service.py`, `dispatch_broker_service.py`,
+  `secret_broker_service.py`, `model_gateway_service.py`,
+  `channel_broker_service.py` found only `control_plane_service.py`'s
+  existing `security_headers` `after_request`, registered after this
+  module's hook so it still sees the accurate final response). All six
+  service accounts (`control_plane`, `worker`, `model_gateway`,
+  `dispatch_broker`, `secret_broker`, `channel_broker`) already hold
+  `roles/logging.logWriter` and `roles/monitoring.metricWriter` in
+  `foundation/iam.tf`; no IAM change was needed.
+- **Tests.** `tests/test_service_metrics.py` pins the exact seven-field
+  `http_request` set and nothing else, that a parameterized route
+  (`/v1/items/<uuid:item_id>`) reports its template rather than a
+  realistic UUID, that query-string values, an `Authorization` header, a
+  request body, and a `User-Agent` never appear in the emitted line, the
+  `"unmatched"` 404 case, 5xx status-class bucketing, that a broken clock
+  or a broken emit path never breaks the request itself, and that all six
+  real `create_app` factories are wired with their fixed service name
+  (parameterized over minimal fake dependencies, hitting only `/healthz`).
+  `tests/test_worker_dispatch.py` gained one test per `task_execution`
+  outcome (`succeeded`, `duplicate`, `failed` via a claim exception, and
+  `reconciled` via each of the three existing reconciliation paths), plus
+  a pin that an invalid envelope -- which never resolves a task purpose --
+  emits no line at all. The full offline suite grew from 1898 passed/57
+  skipped to 1920 passed/57 skipped; `ruff` is clean on every changed file.
+- **What remains operator work.** No `terraform` binary exists in the
+  environment this was built in; every `.tf` change was validated
+  structurally with `python-hcl2` (parses cleanly, no duplicate resource
+  names, every `var.`/`local.`/resource reference resolves within its
+  module) and by careful hand-conformance to the seven existing policies'
+  exact style, not with `terraform validate` or `terraform plan`. Applying
+  either root, wiring real notification channels into
+  `alert_notification_channels`, and confirming the dashboard renders
+  real data against a live deployment are all still operator work, exactly
+  like every other Terraform change in this codebase.

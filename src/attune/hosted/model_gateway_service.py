@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable, Mapping
 
 from .model_gateway import PROFILE_NAME, HostedModelGateway
+from .service_metrics import instrument_service_metrics
 from .task_envelope import _google_token_verifier, _verify_claims
 
 LOG = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def create_app(
         raise ValueError("expected worker must be a service account")
     verifier = token_verifier or _google_token_verifier
     app = Flask(__name__)
+    instrument_service_metrics(app, service="model_gateway")
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
 
     def authorized() -> bool:

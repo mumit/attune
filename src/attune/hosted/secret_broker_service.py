@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 from uuid import UUID
 
 from .secret_broker import SecretBroker
+from .service_metrics import instrument_service_metrics
 from .task_envelope import _google_token_verifier, _verify_claims
 
 MAX_SECRET_REQUEST_BYTES = 70_000
@@ -39,6 +40,7 @@ def create_app(
     if expected_oauth_exchange in {expected_control_plane, expected_worker}:
         raise ValueError("OAuth exchange identity must be distinct")
     app = Flask(__name__)
+    instrument_service_metrics(app, service="secret_broker")
     app.config["MAX_CONTENT_LENGTH"] = MAX_SECRET_REQUEST_BYTES
     verifier = token_verifier or _google_token_verifier
 
