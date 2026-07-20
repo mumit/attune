@@ -64,7 +64,18 @@ The first hosted connection journey is:
    Workspace verification automatically and explicitly excludes sending,
    calendar changes, deletion, and sharing. Choose **Enable read-only policy**
    within ten minutes of sign-in; otherwise sign out and sign in again before
-   confirming the authority change.
+   confirming the authority change. The page itself now warns before that
+   bounce rather than only explaining it after the fact: every ceremony that
+   carries this ten-minute bar (policy confirmation here, channel install and
+   disconnect, account deletion and cancellation, and export authorization
+   and download) shows a quiet countdown once under about three minutes
+   remain, and offers a one-click "sign in again" that returns the owner to
+   the same step once they finish. This is advisory client-side UX only --
+   it estimates the window from when this browser tab itself signed in and
+   can be wrong (a session from another tab, clock skew); the server's own
+   ten-minute recheck on each of these routes is what actually decides, and
+   still returns the same `recent_authentication_required` refusal either
+   way (see [`hosted-policy.md`](hosted-policy.md)).
 8. Choose Google Chat, Slack, or both independently for conversation and brief
    delivery. Saving records intent only; Attune clearly leaves the step pending
    installation and verified owner-only destination tests.
@@ -164,11 +175,24 @@ signed-in visit safely retries the fixed check.
 Once Workspace is connected and the read-only policy is active, the setup
 page itself shows a bounded conversation panel: a signed-in owner can type a
 message and converse with Attune right there, with no channel to install and
-no destination to verify first. There is no push delivery -- the browser
-polls for the stored assistant turn every two seconds, with a working
-indicator and a note if a reply is taking a while. This is the same durable
-acceptance, dispatch, and bounded read-only execution that Slack and Google
-Chat use, just without a channel broker in between; see
+no destination to verify first. An empty panel shows a few example prompts
+("What needs my attention today?", "Did anyone reply to the launch thread?",
+"What's on my calendar tomorrow?") as clickable chips that prefill the
+composer -- they name only the routes the bounded executor actually answers
+(brief, Gmail, Calendar, general) and disappear once any turn exists. There
+is no push delivery from Attune's side -- the browser polls for the stored
+assistant turn every two seconds, with a working indicator, a "still
+working" note past one minute, and a genuine terminal note past five
+minutes ("this is taking much longer than expected... your message was
+accepted and will still be answered") that drops polling to a slower
+cadence instead of escalating further or implying failure. The owner can
+separately opt in to a browser notification ("Attune replied", no message
+content, shown only while the tab is hidden) with an explicit control next
+to the panel; browser permission is requested only on that click, and the
+control explains itself instead of doing nothing if permission is denied or
+unsupported. This is the same durable acceptance, dispatch, and bounded
+read-only execution that Slack and Google Chat use, just without a channel
+broker in between; see
 [`hosted-conversation.md`](hosted-conversation.md#the-browser-surface).
 
 ## 1. Start the day

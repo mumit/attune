@@ -299,6 +299,38 @@ owner has a connected Workspace and an active policy. It polls
 turn is pending, and surfaces a "still working" note once a pending turn
 passes 60 seconds. Rendering is text-only.
 
+Three purely client-side additions (no server or protocol change) round out
+the polling contract:
+
+- **A genuine terminal state past five minutes.** A pending turn that has
+  not resolved after five minutes gets an honest note -- "this is taking
+  much longer than expected... your message was accepted and will still be
+  answered; check back or send a follow-up" -- and the poll cadence drops
+  from every two seconds to every fifteen. This is not an error state (the
+  acceptance ceremony already made the turn durable; nothing has failed)
+  and it never stops polling outright, it just stops polling aggressively
+  for a reply that is already known to be unusually slow. The distinct
+  error path (`GET /v1/conversation/turns` itself failing repeatedly) keeps
+  its own separate message and still stops the indicator rather than
+  claiming the turn is still in flight.
+- **First-run hints.** An empty panel (zero turns, nothing pending) shows
+  three clickable example prompts that prefill the composer and disappear
+  once any turn exists. The wording is deliberately drawn from the routes
+  this executor actually answers -- brief, Gmail, Calendar, general -- and
+  never suggests a write the bounded executor refuses.
+- **Opt-in browser notifications.** A control next to the panel requests
+  the browser's `Notification` permission only on that explicit click,
+  never automatically. When granted and the tab is hidden, a reply arriving
+  through the existing poll shows a content-free `Notification("Attune
+  replied")` -- no message text, matching the content-free discipline this
+  document's data-handling section already applies to logs and audit
+  fields -- and clicking it focuses the tab. A denied or unsupported
+  browser removes the control and explains why instead of leaving it inert.
+
+All three are advisory presentation only: they change what the page shows
+and how fast it polls, never the acceptance, dispatch, execution, or
+delivery contract described above.
+
 ### Activation gates and evidence
 
 `enable_hosted_web_conversation` gates the edge: Cloud Armor priority `893`

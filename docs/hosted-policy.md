@@ -16,7 +16,15 @@ confirmation:
 
 The owner chooses **Enable read-only policy**. A session older than ten minutes
 cannot make this authority change; the page asks the owner to sign out and sign
-in again. The fixed review response contains only profile/version, R0, bounded
+in again. Since hosted onboarding polish (`docs/decisions.md`, 2026-07-20), the
+page also warns before that bounce -- a quiet countdown once under three
+minutes remain, and, once the window has already lapsed, an in-place "sign in
+again" control that returns the owner to this exact step afterward -- and
+gives the same treatment if the confirmation call itself still comes back
+`recent_authentication_required` (clock skew, a session from another tab).
+That client-side estimate is advisory only and cannot be reduced to a
+server-visible signal: the ten-minute bar below is what actually decides,
+unchanged. The fixed review response contains only profile/version, R0, bounded
 descriptions, and current status. It contains no tenant, principal, policy,
 grant, connector, scope, or credential identifier.
 

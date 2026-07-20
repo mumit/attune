@@ -468,8 +468,25 @@ def test_identity_ui_exposes_only_public_provider_configuration():
     client = identity_client()
     root = client.get("/", headers={"Host": HOST})
     assert root.status_code == 200
-    assert "Continue with Google" in root.get_data(as_text=True)
-    assert API_KEY not in root.get_data(as_text=True)
+    page = root.get_data(as_text=True)
+    assert "Continue with Google" in page
+    assert API_KEY not in page
+    # Hosted onboarding polish (Phase 6): first-run conversation hints (UX
+    # review item #9) name only bounded executor routes (brief/Gmail/
+    # Calendar/general) and never advertise a write.
+    assert "What needs my attention today?" in page
+    assert "Did anyone reply to the launch thread?" in page
+    assert "What's on my calendar tomorrow?" in page
+    # Web-panel reply notifications (deliverable 2): the opt-in control and
+    # its denied/unsupported explanation text both render server-side; the
+    # client decides at runtime whether to show the control or the text.
+    assert "Notify me when Attune replies" in page
+    # Recency-window pre-flight (UX review item #1): every route this page
+    # enumerates as recency-gated in docs/hosted-policy.md/user-journey.md
+    # carries a client-side hook the built bundle uses to mount its
+    # advisory countdown/pre-flight banner.
+    for gate in ("policy", "channels", "channel-installations", "deletion", "export"):
+        assert f'data-recency-gate="{gate}"' in page
     config = client.get("/v1/identity/config", headers={"Host": HOST})
     assert config.get_json() == {
         "api_key": API_KEY,
