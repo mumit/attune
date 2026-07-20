@@ -5,6 +5,24 @@ and Slack. It answers natural-language Workspace questions from live data,
 drafts and triages work, prepares briefs, detects scheduling conflicts, and
 earns autonomy through explicit, audited grants.
 
+## Choose how you run Attune
+
+Attune ships as one product with two deployment modes. Full detail, exact
+commands, and the tradeoffs between them are in the
+[deployment modes guide](docs/modes.md); this table is the short version.
+
+| Mode | Who it's for | How you run it |
+|---|---|---|
+| Self-hosted, polling (the default) | One person, on their own machine, VM, or server | `attune init --quick` → `attune doctor` → `attune run` |
+| Self-hosted, Google Pub/Sub push | The same one person, wanting lower-latency push instead of polling | The polling setup above, plus Pub/Sub and the stateless republisher |
+| Hosted multi-tenant, as a customer | Someone signing in to an operator-run instance | Sign in with Google in a browser — nothing to install |
+| Hosted multi-tenant, as the operator | Whoever runs the service on GCP for others | Terraform (foundation → data → runtime → edge), then gate-by-gate activation |
+
+Self-hosted is the only mode that is fully built and runnable today; hosted
+multi-tenant is a development-stage platform gated behind default-off
+activation flags and is not publicly operated. See
+[the modes guide](docs/modes.md) for what that means in practice.
+
 ## Why the name
 
 Attune describes the product's purpose: adapting to a principal's context,
@@ -38,6 +56,9 @@ attune brief
 attune run
 ```
 
+This is the self-hosted, polling path. For the Pub/Sub push variant or the
+hosted multi-tenant service, see the [deployment modes guide](docs/modes.md).
+
 The local target edits the environment, displays its deterministic deployment
 plan, starts the pinned Qdrant service on `127.0.0.1:6333`, and runs the full
 Doctor battery. Setup progress is resumable from
@@ -67,39 +88,53 @@ to fill the documented mixed-provider model routing from
 Google Cloud Console ceremony, with exact copy-paste values and no silent
 cloud mutations.
 
-See [Getting started](docs/getting-started.md), the complete
-[configuration reference](docs/configuration.md), the
-[user journey](docs/user-journey.md), [Design](docs/design.md), and
-[Deployment](docs/deployment.md). A full point-in-time product review lives
-in [current state](docs/current-state.md), the
-[gap analysis](docs/gap-analysis.md) against the product goal, and the
-[future-state plan](docs/future-state.md). Operators building the managed service should
-start with the [GCP operated-service architecture](docs/hosted-gcp.md); the
-[hosted sign-in guide](docs/identity-platform.md) documents the separate Google
-Identity Platform and Workspace consent clients. External reviewers should
-begin with the [security review guide](docs/security-review.md), which maps
-the implemented architecture, service inventory, cryptography, and channel
-trust model to code and evidence. The normative
-[security architecture](docs/security-architecture.md) defines trust boundaries,
-control requirements, red-team cases, and hosted launch gates; the
-[hosted data-lifecycle contract](docs/data-lifecycle.md) defines retention,
-export, deletion, and backup restore suppression; the
-[hosted customer-export boundary](docs/customer-export.md) defines fixed
-scopes, dedicated identities, encrypted temporary objects, and the
-recent-authenticated download ceremony; the approved
-[dispatch-broker contract](docs/dispatch-broker.md) defines exclusive task
-authority and queue delivery, while the
-[audit-writer contract](docs/audit-writer.md) defines the intent-only path to
-hosted hash-chained audit events, and the
-[secret-broker contract](docs/secret-broker.md) defines connector credential
-encryption and use. The
-[capability-gateway contract](docs/capability-gateway.md) defines how untrusted
-model proposals become typed, tenant-bound admission without becoming provider
-requests, and the [hosted policy ceremony](docs/hosted-policy.md) defines the
-recent-authenticated fixed R0 owner choice. The [hosted channel preference
-ceremony](docs/hosted-channels.md) keeps Slack/Google Chat interaction and brief
-choices independent without treating a preference as an installed route. MCP server
-implementers should use the [versioned Workspace contract](docs/mcp-contract.md).
+## Where to go next
+
+- **I want a personal assistant on my own machine** — start with
+  [Getting started](docs/getting-started.md) and the
+  [deployment modes guide](docs/modes.md). The complete
+  [configuration reference](docs/configuration.md) documents every setting,
+  the [user journey](docs/user-journey.md) describes day-to-day use, and
+  [Deployment](docs/deployment.md) covers always-on hosting and the
+  Google Pub/Sub push variant.
+- **I operate the hosted service** — start with the
+  [GCP operated-service architecture](docs/hosted-gcp.md) and the operator
+  section of the [deployment modes guide](docs/modes.md). The
+  [hosted sign-in guide](docs/identity-platform.md) documents the separate
+  Google Identity Platform and Workspace consent clients; the
+  [hosted policy ceremony](docs/hosted-policy.md) defines the
+  recent-authenticated fixed R0 owner choice, and the
+  [hosted channel preference ceremony](docs/hosted-channels.md) keeps
+  Slack/Google Chat interaction and brief choices independent without
+  treating a preference as an installed route. The
+  [hosted data-lifecycle contract](docs/data-lifecycle.md) defines
+  retention, export, deletion, and backup restore suppression; the
+  [hosted customer-export boundary](docs/customer-export.md) defines fixed
+  scopes, dedicated identities, encrypted temporary objects, and the
+  recent-authenticated download ceremony. Internally, the approved
+  [dispatch-broker contract](docs/dispatch-broker.md) defines exclusive task
+  authority and queue delivery, the
+  [audit-writer contract](docs/audit-writer.md) defines the intent-only path
+  to hosted hash-chained audit events, the
+  [secret-broker contract](docs/secret-broker.md) defines connector
+  credential encryption and use, and the
+  [capability-gateway contract](docs/capability-gateway.md) defines how
+  untrusted model proposals become typed, tenant-bound admission without
+  becoming provider requests.
+- **I'm reviewing security** — begin with the
+  [security review guide](docs/security-review.md), which maps the
+  implemented architecture, service inventory, cryptography, and channel
+  trust model to code and evidence. The normative
+  [security architecture](docs/security-architecture.md) defines trust
+  boundaries, control requirements, red-team cases, and hosted launch gates.
+- **I'm implementing an MCP server** — use the
+  [versioned Workspace contract](docs/mcp-contract.md).
+- **I want the design history** — read [Design](docs/design.md), the
+  [durable decisions record](docs/decisions.md), and the
+  [roadmap](docs/roadmap.md), plus the point-in-time review trilogy: a full
+  [current state](docs/current-state.md) review, the
+  [gap analysis](docs/gap-analysis.md) against the product goal, and the
+  [future-state plan](docs/future-state.md).
 
 ## Development
 

@@ -1,5 +1,8 @@
 # Operated SaaS on Google Cloud
 
+*This is the operator's guide to the hosted multi-tenant service — see
+[`modes.md`](modes.md) if you instead want to run Attune for yourself.*
+
 GCP is Attune's first operated SaaS platform. This is a platform decision, not
 a change to the portable self-hosted product: `attune init --target local` and
 polling deployments continue to work without hosted Attune.
