@@ -122,3 +122,18 @@ output "google_chat_conversation_enabled" {
   description = "Whether the bounded Google Chat conversation worker route is registered."
   value       = var.enable_google_chat_conversation
 }
+
+output "hosted_brief_enabled" {
+  description = "Whether the worker's proactive-brief executor and route are registered."
+  value       = var.enable_hosted_brief
+}
+
+output "tenant_model_profiles_enabled" {
+  description = "Whether the worker and model gateway register per-tenant model profile support."
+  value       = var.enable_tenant_model_profiles
+}
+
+output "model_usage_metering_enabled" {
+  description = "Whether the worker records per-tenant model usage metering."
+  value       = var.enable_model_usage_metering
+}

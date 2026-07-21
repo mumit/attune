@@ -303,3 +303,44 @@ variable "enable_hosted_web_conversation" {
   type        = bool
   default     = false
 }
+
+variable "enable_hosted_signup" {
+  description = "Expose POST /v1/signup, the sessionless self-service tenant-creation ceremony (docs/hosted-signup.md). Requires identity sign-in and hosted_signup_region; not yet activated in any environment."
+  type        = bool
+  default     = false
+}
+
+variable "hosted_signup_region" {
+  description = "Fixed region label recorded on every tenant created by hosted signup (ATTUNE_HOSTED_SIGNUP_REGION); control_plane_app.py reads this with no default, so it is required whenever enable_hosted_signup is true. Format matches the same GCP-region-style pattern migration 0045 enforces server-side."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.hosted_signup_region == "" || can(regex("^[a-z][a-z0-9-]{1,62}$", var.hosted_signup_region))
+    error_message = "hosted_signup_region must be empty or a lower-case region-style label."
+  }
+}
+
+variable "enable_hosted_deletion" {
+  description = "Expose the owner-initiated tenant-deletion request/status/cancel routes (ATTUNE_HOSTED_DELETION_ENABLED on the control plane). The executor job that actually erases data is deployed separately from deploy/gcp/data; this gate alone only lets an owner record and observe a deletion request."
+  type        = bool
+  default     = false
+}
+
+variable "enable_hosted_brief" {
+  description = "Expose POST /v1/brief/run on the control plane (ATTUNE_ENABLE_HOSTED_BRIEF). Must be flipped together with the worker copy of this same-named variable in the runtime root (docs/hosted-channels.md 'Proactive brief delivery')."
+  type        = bool
+  default     = false
+}
+
+variable "enable_tenant_model_profiles" {
+  description = "Expose GET/PUT /v1/model-profile on the control plane (ATTUNE_ENABLE_TENANT_MODEL_PROFILES). Must be flipped together with the worker/model-gateway copy of this same-named variable in the runtime root (docs/hosted-model-profiles.md)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_model_usage_metering" {
+  description = "Expose GET /v1/usage on the control plane (ATTUNE_ENABLE_MODEL_USAGE_METERING). Independently activatable from the worker's metering write path of the same name (docs/hosted-model-profiles.md)."
+  type        = bool
+  default     = false
+}

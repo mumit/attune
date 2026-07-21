@@ -2987,3 +2987,197 @@ rewriting any normative or contract document.
   `test_slack_owner_destination_reuses_allowlisted_user_id` was repointed at
   `docs/install/slack-app.md`, which now carries the exact pinned strings the
   test checks for; its assertions and intent are otherwise unchanged.
+
+## 2026-07-21 — Hosted Terraform: wiring the eight unwired gates and the two missing content-lifecycle jobs
+
+The previous entry (above, same day) documented the gap as pure discovery
+work: eight `ATTUNE_*` gates read by already-implemented, already-tested
+Python code had zero corresponding Terraform variable in any of the four
+`deploy/gcp` roots, and two of them (content retention, tenant deletion) had
+no deployed Cloud Run Job resource at all. This entry records the follow-up
+that closes that gap — Terraform wiring only, no activation.
+
+- **Service env wiring.** Each gate got a same-named Terraform variable in
+  every module whose service reads it, mirroring exactly how
+  `enable_google_chat_conversation` already appears independently in both
+  `runtime` and `edge` with a cross-module `precondition` requiring the
+  other module's copy to agree:
+  - `enable_hosted_memory` (runtime, worker only — no cross-module gate).
+  - `enable_hosted_draft_capability` (runtime, worker only). Requires
+    `enable_dispatch_broker` (capability admissions enqueue through it) and
+    the new `intelligence-reference-hmac` platform secret (below).
+  - `enable_hosted_brief` (runtime + edge, same name, cross-checked).
+    Requires `enable_channel_broker` on the worker side and the same
+    intelligence secret.
+  - `enable_tenant_model_profiles` (runtime + edge, same name,
+    cross-checked). Gates the worker, the model gateway, and the control
+    plane together, per `hosted-model-profiles.md`. The model gateway also
+    requires its three new premium-route variables
+    (`model_premium_classify`/`_converse`/`_embed`) to be non-empty via a
+    `precondition` when this is on.
+  - `enable_model_usage_metering` (runtime + edge, same name, *not*
+    cross-checked between modules — the owning doc explicitly says worker
+    write and control-plane read are independently activatable).
+  - `enable_hosted_signup` (edge only) + `hosted_signup_region` (edge only,
+    default `""`, format-validated with the same
+    `^[a-z][a-z0-9-]{1,62}$` pattern migration 0045 enforces server-side).
+    Format validation lives on the variable itself (this repo's existing
+    precedent for optional-but-format-constrained strings, e.g.
+    `slack_client_id`); the "required when the gate is on" cross-check is a
+    `precondition` on the control-plane resource, the same split
+    `slack_channel_enabled`/`slack_client_id` already uses in
+    `runtime/main.tf`. This is deliberate: `required_version = ">= 1.8.0"`
+    predates Terraform 1.9's cross-variable `validation` blocks, so the
+    existing codebase never uses that form and this wiring doesn't either.
+  - `enable_hosted_deletion` (edge only) — gates only the control-plane
+    request/status/cancel routes; the executor that actually erases data is
+    the separate `enable_tenant_deletion_execution` gate in the *data* root
+    (below), on purpose: they are different Terraform roots applied by
+    different reviewed plans, even though both ultimately set
+    `ATTUNE_HOSTED_DELETION_ENABLED` in their own service's environment.
+  - **A pre-existing, unrelated gap fixed in passing:** `model_gateway_app.py`
+    reads `ATTUNE_MODEL_EMBED` unconditionally (it's the third member of the
+    fixed `standard_models` map alongside classify/converse), but no
+    Terraform variable ever set it — any deployment enabling
+    `enable_model_gateway` at all, regardless of any of these eight gates,
+    would already crash the gateway container at startup. Fixed with a new
+    `model_embed` variable (default `text-embedding-3-small`, same
+    validation shape as `model_classify`/`model_converse`) in the same edit
+    that added the premium-route variables, since both touch the same
+    container's env block. This is the only correctness fix outside the
+    eight named gates and the two jobs; everything else in this entry is
+    additive wiring.
+- **Edge routes and Cloud Armor priorities.** Six new routes, six new
+  default-off edge variables, six new priorities in the previously-unused
+  `894`–`899` range (the range comment in `hosted-operator.md` said
+  `880`–`893` plus `900`; it now reads `880`–`900` contiguous):
+  - `894` — `POST /v1/signup`, 10/60s. Not a new choice: `hosted-signup.md`
+    §7 already reserved this exact number.
+  - `895` — `GET /v1/account/deletion-request` (status read), 30/60s,
+    matching this policy's other bounded-read rules (onboarding state at
+    884, exports at 889).
+  - `896` — `POST`/`DELETE /v1/account/deletion-requests` (request/cancel),
+    5/60s. Classified as a destructive ceremony despite
+    `control_plane_service.py` not naming it one explicitly: it uses
+    `_authorize_mutation(..., recent=True)`, the same recency bar as the
+    two other 5/60s rules already in this policy (Google Chat disconnect at
+    888, Slack disconnect at 892) — account deletion is at least as severe
+    as either.
+  - `897` — `GET`/`PUT /v1/model-profile`, 10/60s. The code's own docstring
+    says `PUT` here uses the *ordinary* session/CSRF bar (same as
+    `POST /v1/conversation/messages`/`POST /v1/brief/run`), not the
+    recency ceremony — but `hosted-model-profiles.md` explicitly leaves the
+    exact Cloud Armor rule to this wiring and states no rate, so the
+    conservative ceremony rate was chosen per the task's own instruction to
+    default conservative where unspecified, rather than inventing a new,
+    untested "ordinary-write" rate class.
+  - `898` — `GET /v1/usage`, 30/60s, matching the other bounded-read rules
+    (this is a pure read with no mutation capability at all).
+  - `899` — `POST /v1/brief/run`, 10/60s, same reasoning as 897 (the code
+    docstring says ordinary bar, the owning doc leaves the rule
+    unspecified, conservative default chosen).
+- **The two Cloud Run Jobs** (`deploy/gcp/data`), each mirroring
+  `protocol_retention`'s established shape exactly — dedicated identity,
+  paused-by-default Cloud Scheduler job, separate non-database scheduler
+  identity (this repo's established "the scheduler can start only this job;
+  it has no database, logging, metrics, or service-level runtime role"
+  pattern, restated verbatim in both new jobs' comments), and a
+  failure/(usually also backlog) alert pair:
+  - **`content_retention`** — identity `content_retention` (account id
+    suffix `content`, fits the 30-char Cloud Run service-account limit at
+    `attune-development-content`), database role `attune_content_retention`
+    (one of `migrate.py`'s 14 fixed `RUNTIME_ROLES`, already required by
+    `bind_runtime_roles`'s exact-set check but with no Terraform identity or
+    binding until now — meaning the migrator job would already have failed
+    its own `set(bindings) == set(RUNTIME_ROLES)` assertion before this
+    wiring, since `data/main.tf`'s `runtime_database_users` map was missing
+    both this and the deletion role entirely). Reuses `var.migrator_image`
+    with an overridden container `command`, exactly like
+    `protocol_retention`/`export_cleanup`/`identity_provision` already do —
+    no new Dockerfile needed; `deploy/migrator/Dockerfile` packages the
+    whole `attune.hosted` package and its `ENTRYPOINT` is overridden by the
+    Cloud Run Job's own `command`, not read at all once overridden. Gets
+    both a failure alert (`severity>=ERROR`) and a backlog alert
+    (`jsonPayload.backlog_possible=true`) because `content_retention.py`'s
+    own completion record carries that field, matching
+    `protocol_retention.py`'s shape.
+  - **`tenant_deletion`** — identity `deletion`, database role
+    `attune_deletion` (the other previously-unbound fixed role). Reads
+    `tenant_deletion_executor.py` closely before deciding its IAM grants:
+    `main()` never constructs a `ConnectorRevocation` client (the parameter
+    stays `None`, and `run_tenant_deletion_once`'s own docstring frames any
+    upstream revocation as best-effort only, since the generic per-relation
+    erase pass already cryptographically erases the credential row
+    regardless). So this job gets **only** database access — no
+    secret-broker or channel-broker egress grant, and `PRIVATE_RANGES_ONLY`
+    vpc egress (not `ALL_TRAFFIC`) — because granting either would violate
+    this platform's narrowest-actual-use IAM norm for a job whose real code
+    path never calls them. Gets **only** a failure alert, not a backlog
+    alert: its own JSON completion record (`processed`, `tenants`) carries
+    no `backlog_possible`-shaped field, unlike content/protocol retention.
+    Inventing an unemitted signal to keep the "pair" symmetric would have
+    been a Python behavior change, which this task's own scope explicitly
+    excludes; the asymmetry is called out in both `main.tf`'s comment and
+    `hosted-operator.md` rather than silently omitted.
+  - Both jobs' own app-level gates (`enable_content_retention_execution`,
+    `enable_tenant_deletion_execution`) and both Cloud Scheduler jobs
+    (`enable_content_retention_schedule`, `enable_tenant_deletion_schedule`)
+    default `false`, independently of each other — deployed is not
+    activated, matching every other job in this codebase.
+- **Foundation changes required to make the above possible.** Four new
+  workload identities (`content_retention`, `content_retention_scheduler`,
+  `deletion`, `deletion_scheduler`) in `foundation/iam.tf`'s
+  `workload_accounts` map, the two scheduler identities excluded from the
+  logging/metrics/database grants exactly like `retention_scheduler`
+  already is. One new platform secret container,
+  `intelligence-reference-hmac` (`foundation/main.tf`'s
+  `platform_secret_ids`), added because `worker_app.py`'s
+  `_intelligence_reference_hasher()` — called by both the draft-capability
+  and hosted-brief paths — reads `ATTUNE_INTELLIGENCE_HMAC_SECRET`
+  unconditionally once either gate is on, and no secret existed for it
+  anywhere in Terraform. Scoped to the worker identity alone (a new
+  dedicated `google_secret_manager_secret_iam_member`, mirroring
+  `channel_broker_hmac_access`'s shape) and explicitly excluded from the
+  secret broker's broad `broker_access` grant, since the secret broker never
+  reads it.
+- **Validation limits of this environment.** No `terraform` binary exists
+  here. Every touched module (`foundation`, `data`, `runtime`, `edge`) was
+  checked with a `python-hcl2` (8.1.2) script doing three things: (1) parse
+  every `.tf` file, (2) detect duplicate `resource`/`variable`/`output`/
+  `locals` declarations within a module, (3) confirm every `var.`/`local.`
+  reference in each module's own files resolves to something declared in
+  that same module (this catches typos in same-module references; it does
+  *not* resolve cross-module `local.runtime.*` remote-state references,
+  which were instead checked by hand against `runtime/outputs.tf`'s actual
+  output names). All four modules pass clean. This is explicitly **not**
+  `terraform validate`/`terraform fmt -check`/`terraform plan` — HCL type
+  checking, provider schema validation, cycle detection beyond simple
+  duplicate names, and any real-world API/quota/permission check are all
+  unverified. `terraform validate` and `terraform plan` were not run in this
+  environment and must be run for real before any apply.
+- **What remains genuine operator work after this entry**, none of which
+  this Terraform-only change performs: building/pushing no new container
+  images (the two jobs reuse the existing migrator image); running
+  `terraform init/plan/apply` for real against a live project for all four
+  roots; populating the new `intelligence-reference-hmac` secret version
+  out-of-band (Terraform creates only the empty container, per this
+  platform's existing "no customer data or secret material in Terraform
+  state" norm); the activation-evidence chain each owning doc requires
+  before flipping any of these eight gates (`hosted-signup.md` §11's live
+  probe and abuse monitoring plus migration 0045; `hosted-memory.md`,
+  `capability-gateway.md`, `hosted-channels.md`, and
+  `hosted-model-profiles.md`'s own "Deployment order"/"Activation gates"
+  sections); and the paused-first-then-scheduled activation ceremony for
+  both new Cloud Scheduler jobs, mirroring protocol-retention's own
+  evidence chain exactly. `install/hosted-operator.md` §4/§6 and
+  `roadmap.md` were updated to say "wired" rather than "no Terraform
+  wiring" for all eight gates and both jobs, while keeping every
+  activation-evidence prerequisite intact — wiring is not activation.
+- **Verification.** The full offline suite remains unchanged:
+  1920 passed, 57 skipped, matching this task's stated baseline exactly.
+  `ruff check .` reports the same 32 pre-existing errors as before this
+  change, all in test files this change never touched. No Python file was
+  modified — both `content_retention.py` and `tenant_deletion_executor.py`
+  already had a working `if __name__ == "__main__": main()` shim, so the
+  one permissible Python change this task's scope allowed (a tiny
+  `__main__` shim) turned out not to be needed at all.

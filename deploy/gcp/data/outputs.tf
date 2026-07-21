@@ -45,3 +45,31 @@ output "export_cleanup_job" {
     image           = var.migrator_image
   }
 }
+
+output "content_retention_job" {
+  description = "Bounded expired-customer-content retention job and independent scheduler identifiers."
+  value = {
+    project                   = local.foundation.project_id
+    region                    = local.foundation.region
+    name                      = google_cloud_run_v2_job.content_retention.name
+    service_account           = local.foundation.workload_identities.content_retention
+    image                     = var.migrator_image
+    scheduler_name            = google_cloud_scheduler_job.content_retention.name
+    scheduler_service_account = local.foundation.workload_identities.content_retention_scheduler
+    scheduler_paused          = google_cloud_scheduler_job.content_retention.paused
+  }
+}
+
+output "tenant_deletion_job" {
+  description = "Owner-initiated tenant-deletion executor job and independent scheduler identifiers."
+  value = {
+    project                   = local.foundation.project_id
+    region                    = local.foundation.region
+    name                      = google_cloud_run_v2_job.tenant_deletion.name
+    service_account           = local.foundation.workload_identities.deletion
+    image                     = var.migrator_image
+    scheduler_name            = google_cloud_scheduler_job.tenant_deletion.name
+    scheduler_service_account = local.foundation.workload_identities.deletion_scheduler
+    scheduler_paused          = google_cloud_scheduler_job.tenant_deletion.paused
+  }
+}

@@ -258,19 +258,74 @@ resource "google_cloud_run_v2_service" "worker" {
         }
       }
       # The web conversation route never touches the channel broker: it is
-      # excluded from this gate on purpose.
+      # excluded from this gate on purpose. The hosted brief executor also
+      # delivers through the channel broker, so it joins this condition too.
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation || var.enable_hosted_brief ? [1] : []
         content {
           name  = "ATTUNE_CHANNEL_BROKER_URL"
           value = google_cloud_run_v2_service.channel_broker[0].uri
         }
       }
       dynamic "env" {
-        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation ? [1] : []
+        for_each = var.enable_google_chat_conversation || var.enable_slack_conversation || var.enable_hosted_brief ? [1] : []
         content {
           name  = "ATTUNE_CHANNEL_BROKER_AUDIENCE"
           value = local.channel_broker_audience
+        }
+      }
+      # --- Hosted memory, draft-and-approve capability, briefs, per-tenant
+      # model profiles, and usage metering (docs/hosted-memory.md,
+      # docs/capability-gateway.md, docs/hosted-channels.md "Proactive brief
+      # delivery", docs/hosted-model-profiles.md). Each is implemented and
+      # tested behind its own default-off gate; wiring the flag here does not
+      # by itself make any of them reachable by a tenant -- see each doc's
+      # own "Deployment order"/"Activation gates" section for what evidence
+      # must precede flipping it in a reviewed plan.
+      env {
+        name  = "ATTUNE_ENABLE_HOSTED_MEMORY"
+        value = tostring(var.enable_hosted_memory)
+      }
+      env {
+        name  = "ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY"
+        value = tostring(var.enable_hosted_draft_capability)
+      }
+      env {
+        name  = "ATTUNE_ENABLE_HOSTED_BRIEF"
+        value = tostring(var.enable_hosted_brief)
+      }
+      env {
+        name  = "ATTUNE_ENABLE_TENANT_MODEL_PROFILES"
+        value = tostring(var.enable_tenant_model_profiles)
+      }
+      env {
+        name  = "ATTUNE_ENABLE_MODEL_USAGE_METERING"
+        value = tostring(var.enable_model_usage_metering)
+      }
+      # Both the draft-capability registry's signal capture and the hosted
+      # brief executor derive a domain-separated reference hash from this
+      # secret (worker_app.py's _intelligence_reference_hasher()).
+      dynamic "env" {
+        for_each = var.enable_hosted_draft_capability || var.enable_hosted_brief ? [1] : []
+        content {
+          name  = "ATTUNE_INTELLIGENCE_HMAC_SECRET"
+          value = local.foundation.platform_secret_ids["intelligence-reference-hmac"]
+        }
+      }
+      # Draft-capability admissions are enqueued through the dispatch broker
+      # exactly like every other worker-originated job.
+      dynamic "env" {
+        for_each = var.enable_hosted_draft_capability ? [1] : []
+        content {
+          name  = "ATTUNE_DISPATCH_BROKER_URL"
+          value = google_cloud_run_v2_service.dispatch_broker[0].uri
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_hosted_draft_capability ? [1] : []
+        content {
+          name  = "ATTUNE_DISPATCH_BROKER_AUDIENCE"
+          value = local.dispatch_broker_audience
         }
       }
 
@@ -346,6 +401,16 @@ resource "google_cloud_run_v2_service" "worker" {
       )
       error_message = "Web conversation activation requires the dispatch and model boundaries and paging; it never touches the channel broker."
     }
+
+    precondition {
+      condition     = !var.enable_hosted_draft_capability || var.enable_dispatch_broker
+      error_message = "The draft-and-approve capability gateway enqueues admissions through the dispatch broker and requires it deployed."
+    }
+
+    precondition {
+      condition     = !var.enable_hosted_brief || var.enable_channel_broker
+      error_message = "Hosted brief delivery proposes rendered briefs through the channel broker and requires it deployed."
+    }
   }
 }
 
@@ -407,6 +472,14 @@ resource "google_cloud_run_v2_service" "model_gateway" {
         value = var.model_converse
       }
       env {
+        # model_gateway_app.py reads this unconditionally as part of the
+        # fixed standard_models map (classify/converse/embed) -- previously
+        # unwired here, which would have crashed the gateway on first boot
+        # regardless of any feature gate.
+        name  = "ATTUNE_MODEL_EMBED"
+        value = var.model_embed
+      }
+      env {
         name  = "ATTUNE_EXPECTED_AUDIENCE"
         value = local.model_gateway_audience
       }
@@ -421,6 +494,36 @@ resource "google_cloud_run_v2_service" "model_gateway" {
             secret  = local.foundation.platform_secret_ids["llm-api-key"]
             version = "latest"
           }
+        }
+      }
+      # Per-tenant model profiles (docs/hosted-model-profiles.md): gate off
+      # (the default) is the pinned byte-identical routing path; gate on
+      # joins these operator-fixed premium routes with the standard map
+      # into one profile mapping, never a tenant- or worker-supplied
+      # endpoint.
+      env {
+        name  = "ATTUNE_ENABLE_TENANT_MODEL_PROFILES"
+        value = tostring(var.enable_tenant_model_profiles)
+      }
+      dynamic "env" {
+        for_each = var.enable_tenant_model_profiles ? [1] : []
+        content {
+          name  = "ATTUNE_MODEL_PREMIUM_CLASSIFY"
+          value = var.model_premium_classify
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_tenant_model_profiles ? [1] : []
+        content {
+          name  = "ATTUNE_MODEL_PREMIUM_CONVERSE"
+          value = var.model_premium_converse
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_tenant_model_profiles ? [1] : []
+        content {
+          name  = "ATTUNE_MODEL_PREMIUM_EMBED"
+          value = var.model_premium_embed
         }
       }
 
@@ -449,6 +552,15 @@ resource "google_cloud_run_v2_service" "model_gateway" {
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition = !var.enable_tenant_model_profiles || (
+        var.model_premium_classify != "" &&
+        var.model_premium_converse != "" &&
+        var.model_premium_embed != ""
+      )
+      error_message = "Tenant model profile activation requires all three fixed premium model routes."
+    }
   }
 }
 

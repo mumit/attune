@@ -14,6 +14,10 @@ locals {
     model_gateway            = "model"
     retention                = "retention"
     retention_scheduler      = "ret-sched"
+    content_retention        = "content"
+    content_retention_scheduler = "content-sch"
+    deletion                 = "deletion"
+    deletion_scheduler       = "del-sched"
     worker                   = "worker"
     secret_broker            = "secrets"
     slack_ingress            = "slack-ing"
@@ -32,7 +36,7 @@ resource "google_service_account" "workload" {
 resource "google_project_iam_member" "runtime_logging" {
   for_each = {
     for name, account in google_service_account.workload : name => account
-    if !contains(["export", "export_cleanup_scheduler", "export_download", "oauth_callback", "oauth_exchange", "retention_scheduler"], name)
+    if !contains(["export", "export_cleanup_scheduler", "export_download", "oauth_callback", "oauth_exchange", "retention_scheduler", "content_retention_scheduler", "deletion_scheduler"], name)
   }
   project = var.project_id
   role    = "roles/logging.logWriter"
@@ -42,7 +46,7 @@ resource "google_project_iam_member" "runtime_logging" {
 resource "google_project_iam_member" "runtime_metrics" {
   for_each = {
     for name, account in google_service_account.workload : name => account
-    if !contains(["export", "export_cleanup_scheduler", "export_download", "retention_scheduler"], name)
+    if !contains(["export", "export_cleanup_scheduler", "export_download", "retention_scheduler", "content_retention_scheduler", "deletion_scheduler"], name)
   }
   project = var.project_id
   role    = "roles/monitoring.metricWriter"
@@ -61,6 +65,8 @@ resource "google_project_iam_member" "database_client" {
     "oauth_exchange",
     "identity_provisioner",
     "retention",
+    "content_retention",
+    "deletion",
     "secret_broker",
     "worker",
   ])
@@ -81,6 +87,8 @@ resource "google_project_iam_member" "database_instance_user" {
     "oauth_exchange",
     "identity_provisioner",
     "retention",
+    "content_retention",
+    "deletion",
     "secret_broker",
     "worker",
   ])
@@ -101,6 +109,8 @@ resource "google_sql_user" "workload" {
     "oauth_exchange",
     "identity_provisioner",
     "retention",
+    "content_retention",
+    "deletion",
     "secret_broker",
     "worker",
   ])
@@ -151,7 +161,7 @@ resource "google_service_account_iam_member" "cloud_tasks_token_creator" {
 resource "google_secret_manager_secret_iam_member" "broker_access" {
   for_each = {
     for name, secret in google_secret_manager_secret.platform : name => secret
-    if !contains(["channel-reference-hmac", "identity-bootstrap", "llm-api-key", "slack-client", "slack-signing-secret"], name)
+    if !contains(["channel-reference-hmac", "identity-bootstrap", "intelligence-reference-hmac", "llm-api-key", "slack-client", "slack-signing-secret"], name)
   }
   project   = var.project_id
   secret_id = each.value.secret_id
@@ -185,6 +195,17 @@ resource "google_secret_manager_secret_iam_member" "channel_broker_slack_client_
   secret_id = google_secret_manager_secret.platform["slack-client"].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.workload["channel_broker"].email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "worker_intelligence_hmac_access" {
+  # The worker's dormant hosted-memory/brief/draft-capability signal-capture
+  # path (ATTUNE_ENABLE_HOSTED_BRIEF, ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY)
+  # derives a domain-separated reference hash from this key. Scoped to the
+  # worker alone -- no other service reads it.
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.platform["intelligence-reference-hmac"].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.workload["worker"].email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "identity_bootstrap_access" {
