@@ -124,8 +124,16 @@ yet active: both remain behind independent default-off gates
 registry-driven executor walks every classified relation for the
 right-to-be-forgotten path behind a 14-day grace period, and the gated
 real-PostgreSQL suite proves per-tenant isolation, RLS, one-use claims, and
-an end-to-end multi-tenant deletion -- but neither executor's Cloud Run job
-is deployed yet, neither has passed the paused-first activation ceremony the
+an end-to-end multi-tenant deletion. Terraform wiring for both executors now
+exists (`deploy/gcp/data`): each is its own Cloud Run Job with a dedicated
+workload identity and Cloud SQL IAM database role
+(`attune_content_retention`, `attune_deletion` -- two of `migrate.py`'s 14
+fixed runtime roles that previously had no Terraform identity or binding at
+all), a paused-by-default Cloud Scheduler job with its own separate
+non-database scheduler identity, and failure/backlog alert policies
+mirroring the protocol-retention pair. Both jobs' own app-level gates and
+both schedules default `false` -- deployed is not activated: neither has
+passed the paused-first authenticated-path activation ceremony the
 protocol-retention executor already did, and the independent cross-tenant
 restore-suppression ledger this design depends on for backup/PITR recovery
 remains unbuilt. Support repair, customer-visible audit, adversarial
@@ -280,7 +288,9 @@ rather than any shared worker process state (SEC-011). See
 [`decisions.md`](decisions.md) for the dated record. Gate-off behavior is
 pinned as byte-identical to pre-stage-2 conversation handling; there is no
 hosted approval workflow or signal-capture path yet, both deliberately out
-of scope.
+of scope. Terraform wiring for `ATTUNE_ENABLE_HOSTED_MEMORY`
+(`enable_hosted_memory`, runtime root) now exists; the gate has not been
+flipped in any deployment.
 
 Stage 3 of the same effort — wiring the dormant typed capability gateway
 into the dispatch spine, then introducing the first hosted write capability
@@ -311,7 +321,10 @@ exercise it. Rate/cost/concurrency budgets, live Gmail thread source-
 freshness re-verification before dispatch, and content-free audit of the
 admission/approval-decision steps themselves (distinct from the job's own
 claim/execute audit, which is unchanged) are genuine remaining gates before
-this capability's activation gate can pass.
+this capability's activation gate can pass. Terraform wiring for
+`ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY` (`enable_hosted_draft_capability`,
+runtime root) now exists; it stays inert even once wired, for the same
+reasons above.
 
 Stage 4 of the same effort — the hosted proactive brief job
 (`docs/future-state.md` Phase 5 item 4; `docs/gap-analysis.md` G12), closing
@@ -351,6 +364,10 @@ scope for this phase — Phase 5's brief/nudge item closes with briefs only.
 The dated design record, including what was and wasn't reused from
 `brief.py`, is in [`decisions.md`](decisions.md); the delivery flow and its
 gates are also described in [`hosted-channels.md`](hosted-channels.md).
+Terraform wiring for `ATTUNE_ENABLE_HOSTED_BRIEF` (`enable_hosted_brief`,
+same name in both the runtime and edge roots) plus the `POST /v1/brief/run`
+Cloud Armor rule now exists; recurring scheduling without an owner click
+remains future operator work regardless.
 
 Phase 6's hosted onboarding item (`docs/future-state.md` Phase 6;
 `docs/gap-analysis.md` G19's "no production signup" half) has its production
@@ -367,11 +384,14 @@ slug oracle; the new function takes no slug at all and is owned by the
 same existing memberless executor role, so the migration adds no new role,
 table grant, or schema privilege. Signup never mints a session itself --
 the client performs the ordinary sign-in flow afterward -- and inviting a
-second member into an existing tenant remains out of scope. The full
-design, including the abuse-throttle posture and what remains operator
-work (the Cloud Armor edge rule, a live probe, abuse monitoring), is in
-[`hosted-signup.md`](hosted-signup.md); the dated decision record is in
-[`decisions.md`](decisions.md).
+second member into an existing tenant remains out of scope. Terraform
+wiring for `ATTUNE_HOSTED_SIGNUP_ENABLED` and the previously-unwired
+`ATTUNE_HOSTED_SIGNUP_REGION` (edge root's `enable_hosted_signup` /
+`hosted_signup_region`), plus the Cloud Armor rule at its reserved priority
+`894`, now exist. The full design, including the abuse-throttle posture and
+what remains operator work (applying migration 0045, a live probe, abuse
+monitoring), is in [`hosted-signup.md`](hosted-signup.md); the dated
+decision record is in [`decisions.md`](decisions.md).
 
 Phase 6's "hosted operations" item (`docs/future-state.md` Phase 6;
 hosted-review gaps #1/#2 -- no billing/usage metering existed, and the model
@@ -400,13 +420,16 @@ logged and never breaks the model call, the same dual-write posture every
 other best-effort write in this codebase already has. `GET`/`PUT
 /v1/model-profile` and the customer-facing `GET /v1/usage` (a bounded
 30-day window) follow the exact 404-gate-off pin every other gated route
-has. Neither gate has been turned on in any real deployment, and Cloud Run/
-Terraform wiring for the two new premium-route environment variables on the
-model gateway service remains separate operator work, mirroring how
-`ATTUNE_ENABLE_HOSTED_BRIEF` shipped implemented-and-tested well before its
-own deployment evidence. The dated design record is in
-[`decisions.md`](decisions.md); the ceremony and gates are documented in
-[`hosted-model-profiles.md`](hosted-model-profiles.md).
+has. Neither gate has been turned on in any real deployment. Terraform
+wiring for both gates (`enable_tenant_model_profiles` and
+`enable_model_usage_metering` in the runtime and edge roots), the model
+gateway's three premium-route variables, and the Cloud Armor rules for
+`/v1/model-profile` and `/v1/usage` now exists (`deploy/gcp/runtime`,
+`deploy/gcp/edge`) -- turning either gate on in a reviewed plan remains
+separate operator work, mirroring how `ATTUNE_ENABLE_HOSTED_BRIEF` shipped
+implemented-and-tested well before its own deployment evidence. The dated
+design record is in [`decisions.md`](decisions.md); the ceremony and gates
+are documented in [`hosted-model-profiles.md`](hosted-model-profiles.md).
 
 Phase 6's "hosted operations" item also had "SLO-grade monitoring" outstanding
 (hosted review gap #8: seven job-failure alert policies existed and nothing

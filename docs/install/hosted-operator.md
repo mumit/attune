@@ -97,21 +97,28 @@ variables — every variable here is sizing/identity
 
 Deploys the private, operator-executed migrator job (§2 below) and the
 private initial-identity-provisioning job (dormant without a one-time secret
-version; never run by Terraform itself). Its two feature gates:
+version; never run by Terraform itself). Its six feature gates:
 
 | Variable | Default | Gates |
 |---|---|---|
 | `enable_protocol_retention_schedule` | `false` | The independently-authenticated daily protocol-retention Cloud Scheduler job |
 | `enable_export_cleanup_schedule` | `false` | The ten-minute customer-export cleanup Cloud Scheduler job |
+| `enable_content_retention_execution` | `false` | The content-retention job's own app-level gate (`ATTUNE_ENABLE_CONTENT_RETENTION`); the job is always deployed, but refuses to open a database connection unless this reads `true` |
+| `enable_content_retention_schedule` | `false` | The independently-authenticated daily content-retention Cloud Scheduler job |
+| `enable_tenant_deletion_execution` | `false` | The tenant-deletion executor's own app-level gate (`ATTUNE_HOSTED_DELETION_ENABLED`); same paused-job-always-deployed shape as content retention |
+| `enable_tenant_deletion_schedule` | `false` | The independently-authenticated tenant-deletion Cloud Scheduler job |
 
-Leave both `false` on first apply — everything in this root is paused/dormant
-by default; day-2 operations (§5) covers when to flip them.
+Leave all six `false` on first apply — everything in this root is
+paused/dormant by default; day-2 operations (§5) covers when to flip them.
+The content-retention and tenant-deletion Cloud Run Jobs (each its own
+dedicated identity, database role, and scheduler identity, mirroring
+protocol-retention's shape exactly) are new as of this wiring; see §4.12.
 
 ### Runtime
 
 Deploys the dispatch broker, secret broker, workers, model gateway, channel
 broker, and audit writer — each dormant-first (its feature flag off) until
-its own negative/adversarial tests pass. Ten `enable_*`/`*_enabled` gates
+its own negative/adversarial tests pass. Fifteen `enable_*`/`*_enabled` gates
 live here, all defaulting `false`:
 
 | Variable | Gates |
@@ -126,17 +133,25 @@ live here, all defaulting `false`:
 | `slack_channel_enabled` | Configures the broker's Slack installation routes (needs the platform Slack app from §0) |
 | `enable_google_gmail_profile` | Registers the fixed Gmail profile worker route |
 | `enable_google_workspace_verification` | Registers the composite Gmail+Calendar verification route |
+| `enable_hosted_memory` | Registers the worker's hosted conversational memory repository (`ATTUNE_ENABLE_HOSTED_MEMORY`) |
+| `enable_hosted_draft_capability` | Registers the worker's typed draft-and-approve capability gateway (`ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`); requires `enable_dispatch_broker` |
+| `enable_hosted_brief` | Registers the worker's proactive-brief executor and route (`ATTUNE_ENABLE_HOSTED_BRIEF`); requires `enable_channel_broker`; must be flipped together with edge's variable of the same name |
+| `enable_tenant_model_profiles` | Registers per-tenant model profile support on the worker and model gateway (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`); requires the model gateway's `model_premium_classify`/`model_premium_converse`/`model_premium_embed` to be set; must be flipped together with edge's variable of the same name |
+| `enable_model_usage_metering` | Registers the worker's per-tenant model usage metering (`ATTUNE_ENABLE_MODEL_USAGE_METERING`); independently activatable from edge's read route of the same name |
 
 Also `oauth_min_instance_count` (default `0`; the rollout evidence sets it to
-`1` only after OAuth activation) and the SLO threshold variables
-(`slo_5xx_error_threshold` default `5`, `slo_alert_window_seconds` default
-`300`, `slo_worker_conversation_p95_latency_ms` default `15000`) — these last
-three are unconditional infrastructure, not gates; see §5.
+`1` only after OAuth activation), `model_embed`/`model_premium_classify`/
+`model_premium_converse`/`model_premium_embed` (the model gateway's premium
+route configuration for `enable_tenant_model_profiles`), and the SLO
+threshold variables (`slo_5xx_error_threshold` default `5`,
+`slo_alert_window_seconds` default `300`,
+`slo_worker_conversation_p95_latency_ms` default `15000`) — these last are
+unconditional infrastructure or plain configuration, not gates; see §5.
 
 ### Edge
 
 Deploys the public control plane and provider ingresses behind Cloud Armor,
-admitting only exact paths, activated last per capability. Seventeen
+admitting only exact paths, activated last per capability. Twenty-two
 `enable_*`/`deploy_*` gates live here, all defaulting `false`, plus four
 `*_provider_ready` attestation booleans (also default `false` — these are
 operator sign-off flags proving out-of-band provider configuration is done,
@@ -161,12 +176,20 @@ not deploy toggles themselves):
 | `enable_slack_conversation` | Routes verified owner-DM Slack messages into hosted conversation |
 | `enable_hosted_slack_install` | Exposes hosted Slack installation (needs runtime's Slack channel + deployed Slack ingress) |
 | `enable_hosted_web_conversation` | Exposes the web conversation message/turn-poll routes |
+| `enable_hosted_signup` | Exposes `POST /v1/signup`, the sessionless self-service tenant-creation ceremony (`ATTUNE_HOSTED_SIGNUP_ENABLED` + the now-wired required `ATTUNE_HOSTED_SIGNUP_REGION`, via `hosted_signup_region`) |
+| `enable_hosted_deletion` | Exposes the owner-initiated tenant-deletion request/status/cancel routes (`ATTUNE_HOSTED_DELETION_ENABLED`); the executor that erases data is a separate Cloud Run Job in `deploy/gcp/data` (§4.12) |
+| `enable_hosted_brief` | Exposes `POST /v1/brief/run` (`ATTUNE_ENABLE_HOSTED_BRIEF`); must be flipped together with runtime's variable of the same name |
+| `enable_tenant_model_profiles` | Exposes `GET`/`PUT /v1/model-profile` (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`); must be flipped together with runtime's variable of the same name |
+| `enable_model_usage_metering` | Exposes `GET /v1/usage` (`ATTUNE_ENABLE_MODEL_USAGE_METERING`); independently activatable from runtime's metering-write gate |
 
 Cloud Armor rule priorities (`deploy/gcp/edge/main.tf`, hardcoded, not
-variables) occupy `880`–`893` plus `900` for named security rules, with
-catch-all default-deny rules at `1000`/`2147483647` per backend. When you add
-a new onboarding-ceremony rule, the next free priority in the reviewed range
-is what the ceremony docs (e.g. `hosted-signup.md` §7) already reserve — check
+variables) occupy `880`–`900` contiguously for named security rules (as of
+this wiring, `894`–`899` are the signup, tenant-deletion read, tenant-deletion
+mutate, model-profile, usage, and brief-run rules respectively — see each
+rule's comment in `main.tf` for the exact reasoning), with catch-all
+default-deny rules at `1000`/`2147483647` per backend. When you add a new
+onboarding-ceremony rule, the next free priority in the reviewed range is
+what the ceremony docs (e.g. `hosted-signup.md` §7) already reserve — check
 the specific ceremony doc for its assigned number before picking one.
 
 Apply all four roots with every gate at its `false` default on first pass.
@@ -313,16 +336,19 @@ customer-facing route:
   Development evidence: first tenant/principal mapping activated 2026-07-15.
 
 Production self-service signup (`POST /v1/signup`) is designed and
-implemented behind `ATTUNE_HOSTED_SIGNUP_ENABLED` but is **not wired into
-Terraform at all** — no `enable_*` variable exists in any of the four roots
-for it. It also requires `ATTUNE_HOSTED_SIGNUP_REGION`, which
-`control_plane_app.py` reads with no default (`os.environ[...]`) — deploying
-with signup enabled today, before that variable is wired, would crash the
-control plane at startup. Before enabling this in any environment: author the
-missing Terraform wiring for both variables, apply migration 0045, author the
-Cloud Armor edge rule at the next free priority (`hosted-signup.md` §7
-reserves `894`), and complete the live probe and abuse-monitoring checks in
-`hosted-signup.md` §11. None of this is done in this codebase today.
+implemented behind `ATTUNE_HOSTED_SIGNUP_ENABLED`. **Terraform wiring now
+exists**: the edge root's `enable_hosted_signup` variable sets that flag on
+the control plane, and `hosted_signup_region` supplies the previously-unwired
+`ATTUNE_HOSTED_SIGNUP_REGION` (`control_plane_app.py` reads it with no
+default, so a precondition on the control-plane resource requires both
+`enable_identity_sign_in` and a non-empty `hosted_signup_region` whenever
+`enable_hosted_signup` is true — deploying with signup enabled but the region
+unset now fails `terraform plan`, not the control plane at container
+startup). The Cloud Armor rule sits at the reserved priority `894`
+(`hosted-signup.md` §7), 10 requests per 60 seconds per IP. Wiring is not
+activation: before enabling this in any environment, apply migration 0045
+and complete the live probe and abuse-monitoring checks in
+`hosted-signup.md` §11 — none of that evidence exists in this codebase today.
 
 ### 4.3 Workspace connect + verification route
 
@@ -401,13 +427,10 @@ reserves `894`), and complete the live probe and abuse-monitoring checks in
 
 ### 4.8 Memory gate
 
-- **Flag:** `ATTUNE_ENABLE_HOSTED_MEMORY` (worker). **Not wired in Terraform
-  in any root** — there is no `enable_hosted_memory` variable anywhere under
-  `deploy/gcp`. Setting this today requires a direct, out-of-band Cloud Run
-  environment-variable edit, which is itself a departure from this
-  platform's own "activation is a reviewed Terraform ceremony, not an
-  out-of-band edit" norm — do not do this outside a deliberately reviewed
-  exception.
+- **Flag:** `ATTUNE_ENABLE_HOSTED_MEMORY` (worker). **Terraform wiring now
+  exists**: `enable_hosted_memory` (runtime root) sets this on the worker.
+  Wiring is not activation — no environment has flipped this in a reviewed
+  plan yet.
 - **Owning doc:** [`../hosted-memory.md`](../hosted-memory.md). Status:
   implemented and tested behind the default-off gate; **not deployed**, per
   that document's own header.
@@ -415,7 +438,15 @@ reserves `894`), and complete the live probe and abuse-monitoring checks in
 ### 4.9 Briefs
 
 - **Flag:** `ATTUNE_ENABLE_HOSTED_BRIEF` (control plane + worker, together).
-  **Not wired in Terraform.**
+  **Terraform wiring now exists**: `enable_hosted_brief` (same name in both
+  the runtime and edge roots, mirroring how `enable_google_chat_conversation`
+  is wired across roots) sets this on the worker and control plane
+  respectively; the edge copy's precondition requires the runtime copy to
+  also be on. The worker's dispatch to the channel broker requires
+  `enable_channel_broker`; the intelligence-reference-hash secret
+  (`intelligence-reference-hmac`, a new platform secret container this
+  wiring also added, granted only to the worker identity) is required by
+  `worker_app.py`'s `_intelligence_reference_hasher()` and is now wired too.
 - **Owning doc:** [`../hosted-channels.md`](../hosted-channels.md) "Proactive
   brief delivery". Status: implemented and tested; **not deployed**.
   Recurring scheduling (firing the job on a timer rather than an owner click)
@@ -425,19 +456,32 @@ reserves `894`), and complete the live probe and abuse-monitoring checks in
 
 - **Flags:** `ATTUNE_ENABLE_TENANT_MODEL_PROFILES` (model gateway + control
   plane + worker, together) and `ATTUNE_ENABLE_MODEL_USAGE_METERING` (worker +
-  control plane, independently). **Neither is wired in Terraform**; the
-  gateway's premium-route environment variables
-  (`ATTUNE_MODEL_PREMIUM_CLASSIFY`, `ATTUNE_MODEL_PREMIUM_CONVERSE`,
-  `ATTUNE_MODEL_PREMIUM_EMBED`) and the Cloud Armor rule for
-  `/v1/model-profile` and `/v1/usage` also remain unauthored.
+  control plane, independently). **Terraform wiring now exists**:
+  `enable_tenant_model_profiles` (same name in runtime and edge roots) and
+  `enable_model_usage_metering` (same name in runtime and edge roots). The
+  model gateway's premium-route variables (`model_premium_classify`,
+  `model_premium_converse`, `model_premium_embed`, all default `""`) are
+  required by a precondition whenever `enable_tenant_model_profiles` is true.
+  While wiring this, a pre-existing, unrelated gap was found and fixed: the
+  model gateway's `ATTUNE_MODEL_EMBED` environment variable (read
+  unconditionally by `model_gateway_app.py` as part of the fixed
+  `standard_models` map) was never wired at all — any deployment enabling
+  the model gateway would already have crashed on startup regardless of
+  these new gates. It is now wired via a new `model_embed` variable. The
+  Cloud Armor rules for `/v1/model-profile` (priority `897`) and `/v1/usage`
+  (priority `898`) are authored.
 - **Owning doc:** [`../hosted-model-profiles.md`](../hosted-model-profiles.md)
   "Deployment order". Status: implemented and tested; **not deployed**.
 
 ### 4.11 Draft-and-approve capability (typed capability gateway)
 
-- **Flag:** `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY` (worker). **Not wired in
-  Terraform.** No worker deployment sets this gate on; the fixed R0 policy
-  grants no tenant R2 authority, and no OAuth flow requests the scope this
+- **Flag:** `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY` (worker). **Terraform
+  wiring now exists**: `enable_hosted_draft_capability` (runtime root) sets
+  this on the worker; a precondition requires `enable_dispatch_broker`
+  (capability admissions enqueue through it) and the same
+  intelligence-reference-hash secret §4.9 wires is required here too. No
+  worker deployment has flipped this gate on yet; the fixed R0 policy grants
+  no tenant R2 authority, and no OAuth flow requests the scope this
   capability requires — no production tenant can exercise it even in
   principle today.
 - **Owning doc:** [`../capability-gateway.md`](../capability-gateway.md) and
@@ -453,13 +497,37 @@ reserves `894`), and complete the live probe and abuse-monitoring checks in
   retention/deletion gate that **is** live in development — flip it only
   after repeating that same evidence chain in your environment.
 - **Content retention:** `ATTUNE_ENABLE_CONTENT_RETENTION` (job entrypoint
-  gate). **Not wired in Terraform, and no Cloud Run Job resource for it
-  exists yet** — there is nothing to `terraform apply` for this today; the
-  job entry point refuses to open a database connection unless the gate is
-  `"true"`, but there is no deployed job to set that on.
+  gate). **Terraform wiring now exists**: a `content_retention` Cloud Run Job
+  (data root), mirroring `protocol_retention`'s shape exactly — its own
+  dedicated `content_retention` workload identity and Cloud SQL IAM
+  database role (`attune_content_retention`, one of the 14 fixed roles
+  `migrate.py` already expected but which had no Terraform identity or
+  database-role binding until this wiring), a paused-by-default
+  `content_retention` Cloud Scheduler job with its own separate
+  `content_retention_scheduler` identity, and a failure/backlog alert pair.
+  `enable_content_retention_execution` (job's own `ATTUNE_ENABLE_CONTENT_RETENTION`
+  gate) and `enable_content_retention_schedule` (the scheduler) are both
+  independent, both default `false`. The job reuses the existing migrator
+  image (`var.migrator_image`) with an overridden container command, exactly
+  like `protocol_retention`/`export_cleanup` already do — no new Dockerfile
+  was needed.
 - **Tenant deletion:** `ATTUNE_HOSTED_DELETION_ENABLED` (control-plane routes
-  + job entrypoint gate). **Not wired in Terraform, and no Cloud Run Job
-  resource for it exists yet**, same as content retention.
+  + job entrypoint gate, two different Terraform roots, same env-var name).
+  **Terraform wiring now exists**: `enable_hosted_deletion` (edge root) gates
+  the control-plane request/status/cancel routes at priorities `895`
+  (status read) and `896` (request/cancel, 5-per-60-second ceremony rate,
+  matching the other recent-authenticated destructive ceremonies already in
+  this policy); a `tenant_deletion` Cloud Run Job (data root) mirrors
+  `protocol_retention`'s shape with its own `deletion` workload identity and
+  database role (`attune_deletion`, the other of the two previously-unbound
+  fixed roles) and its own `deletion_scheduler` identity. Its executor
+  (`tenant_deletion_executor.py`) needs only database access today: its
+  `main()` never constructs a `ConnectorRevocation` client, so the job has no
+  secret-broker or channel-broker egress grant — widening it beyond what the
+  code actually calls would violate this platform's narrowest-grant norm.
+  Its JSON completion record also carries no `backlog_possible` field (unlike
+  protocol/content retention), so only a failure alert exists for it, not a
+  backlog alert — an honest asymmetry, not an oversight.
 - **Customer export:** `enable_customer_exports` / `deploy_customer_export_download`
   (edge, both wired) and `enable_export_writer` (runtime, wired) plus
   `enable_export_cleanup_schedule` (data, wired) — these **are** wired and
@@ -545,21 +613,34 @@ production/customer-facing environment):
 - SLO-grade request/task metrics, alerts, and one dashboard (unconditional
   infrastructure, not a gate).
 
-What is **implemented and tested but has never been exercised outside
-development, has no Terraform wiring, or both** — do not represent any of
+What is **implemented, tested, and now has Terraform wiring, but has never
+been exercised outside development, never been activated in any
+environment, or both** — wiring is not activation; do not represent any of
 these as available to a customer or as one `terraform apply` away from being
-so:
+so without repeating the evidence chain each owning doc requires:
 
-- Production self-service signup (`ATTUNE_HOSTED_SIGNUP_ENABLED`) — no
-  Terraform variable, and a second required environment variable
-  (`ATTUNE_HOSTED_SIGNUP_REGION`) is also unwired.
-- Hosted conversational memory (`ATTUNE_ENABLE_HOSTED_MEMORY`).
-- The draft-and-approve capability gateway (`ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`).
-- Hosted proactive briefs (`ATTUNE_ENABLE_HOSTED_BRIEF`).
+- Production self-service signup (`ATTUNE_HOSTED_SIGNUP_ENABLED` +
+  `ATTUNE_HOSTED_SIGNUP_REGION`) — wired via edge's `enable_hosted_signup` /
+  `hosted_signup_region`; migration 0045, the live probe, and abuse-monitoring
+  checks in `hosted-signup.md` §11 are still outstanding.
+- Hosted conversational memory (`ATTUNE_ENABLE_HOSTED_MEMORY`) — wired via
+  runtime's `enable_hosted_memory`.
+- The draft-and-approve capability gateway
+  (`ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`) — wired via runtime's
+  `enable_hosted_draft_capability`; still inert even if flipped, per §4.11.
+- Hosted proactive briefs (`ATTUNE_ENABLE_HOSTED_BRIEF`) — wired via
+  `enable_hosted_brief` in both the runtime and edge roots.
 - Per-tenant model profiles and usage metering
-  (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`, `ATTUNE_ENABLE_MODEL_USAGE_METERING`).
-- Content-retention and tenant-deletion executors — neither has a deployed
-  Cloud Run Job, let alone a scheduler, regardless of their own gate values.
+  (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`, `ATTUNE_ENABLE_MODEL_USAGE_METERING`)
+  — wired via same-named variables in the runtime and edge roots, plus the
+  model gateway's premium-route variables and the `/v1/model-profile`/
+  `/v1/usage` Cloud Armor rules.
+- Content-retention and tenant-deletion executors — each now has a deployed
+  (but paused-by-default, gate-off-by-default) Cloud Run Job and Cloud
+  Scheduler job in the data root, with its own dedicated identity and
+  database role. Deployed is not activated: both jobs' own app-level gates
+  and both schedules default `false`, and neither has ever run outside this
+  Terraform wiring's own hcl2-level validation (§ "Verify" below).
 - The independent, cross-tenant backup-restore-suppression ledger
   `data-lifecycle.md` requires before any restore is safe.
 

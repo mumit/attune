@@ -239,8 +239,82 @@ variable "model_converse" {
   }
 }
 
+variable "model_embed" {
+  description = "Operator-fixed model route for bounded embeddings. model_gateway_app.py reads ATTUNE_MODEL_EMBED unconditionally (it is part of the fixed standard_models map alongside classify/converse); previously unwired here, which would have crashed the gateway on first boot."
+  type        = string
+  default     = "text-embedding-3-small"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_embed))
+    error_message = "model_embed must be a valid fixed model route."
+  }
+}
+
+variable "model_premium_classify" {
+  description = "Operator-fixed premium classification model route; required only when enable_tenant_model_profiles is true (ATTUNE_MODEL_PREMIUM_CLASSIFY)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.model_premium_classify == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_premium_classify))
+    error_message = "model_premium_classify must be empty or a valid fixed model route."
+  }
+}
+
+variable "model_premium_converse" {
+  description = "Operator-fixed premium conversation model route; required only when enable_tenant_model_profiles is true (ATTUNE_MODEL_PREMIUM_CONVERSE)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.model_premium_converse == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_premium_converse))
+    error_message = "model_premium_converse must be empty or a valid fixed model route."
+  }
+}
+
+variable "model_premium_embed" {
+  description = "Operator-fixed premium embedding model route; required only when enable_tenant_model_profiles is true (ATTUNE_MODEL_PREMIUM_EMBED)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.model_premium_embed == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_premium_embed))
+    error_message = "model_premium_embed must be empty or a valid fixed model route."
+  }
+}
+
 variable "enable_google_gmail_profile" {
   description = "Register the fixed Gmail profile worker route after its security gates pass."
+  type        = bool
+  default     = false
+}
+
+variable "enable_hosted_memory" {
+  description = "Register the worker's dormant hosted conversational memory repository (ATTUNE_ENABLE_HOSTED_MEMORY). Implemented and tested but never deployed until an operator flips this in a reviewed plan (docs/hosted-memory.md)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_hosted_draft_capability" {
+  description = "Register the worker's dormant typed draft-and-approve capability gateway (ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY). No R0 policy grants R2 authority and no OAuth flow requests gmail.compose, so this stays inert even when on (docs/capability-gateway.md)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_hosted_brief" {
+  description = "Register the worker's proactive-brief executor and route (ATTUNE_ENABLE_HOSTED_BRIEF). Must be flipped together with the control-plane copy of this same-named variable in the edge root (docs/hosted-channels.md 'Proactive brief delivery')."
+  type        = bool
+  default     = false
+}
+
+variable "enable_tenant_model_profiles" {
+  description = "Register per-tenant model profile support on the worker and model gateway together (ATTUNE_ENABLE_TENANT_MODEL_PROFILES). Must be flipped together with the control-plane copy of this same-named variable in the edge root (docs/hosted-model-profiles.md)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_model_usage_metering" {
+  description = "Register the worker's per-tenant model usage metering (ATTUNE_ENABLE_MODEL_USAGE_METERING). Independently activatable from the control-plane read route of the same name (docs/hosted-model-profiles.md)."
   type        = bool
   default     = false
 }
