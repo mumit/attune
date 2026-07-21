@@ -90,16 +90,18 @@ cloud mutations.
 
 ## Where to go next
 
-- **I want a personal assistant on my own machine** — start with
-  [Getting started](docs/getting-started.md) and the
+- **I want a personal assistant on my own machine** — start with the
+  [self-hosted install guide](docs/install/self-hosted.md) and the
   [deployment modes guide](docs/modes.md). The complete
   [configuration reference](docs/configuration.md) documents every setting,
   the [user journey](docs/user-journey.md) describes day-to-day use, and
   [Deployment](docs/deployment.md) covers always-on hosting and the
   Google Pub/Sub push variant.
 - **I operate the hosted service** — start with the
-  [GCP operated-service architecture](docs/hosted-gcp.md) and the operator
-  section of the [deployment modes guide](docs/modes.md). The
+  [hosted operator runbook](docs/install/hosted-operator.md), which
+  operationalizes the [GCP operated-service architecture](docs/hosted-gcp.md)
+  and the operator section of the
+  [deployment modes guide](docs/modes.md). The
   [hosted sign-in guide](docs/identity-platform.md) documents the separate
   Google Identity Platform and Workspace consent clients; the
   [hosted policy ceremony](docs/hosted-policy.md) defines the
