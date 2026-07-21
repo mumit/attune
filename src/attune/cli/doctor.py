@@ -214,7 +214,7 @@ def check_mail_send(settings) -> tuple[str, str]:
 
 def _fail_workspace(exc: Exception, *, mcp: bool) -> tuple[str, str]:
     """Render a workspace-check FAIL with the inline fix hint from
-    ``docs/getting-started.md``'s common-failures table (UX item #4, G20),
+    ``docs/install/self-hosted.md``'s common-failures table (UX item #4, G20),
     plus the 7-day Testing-token hint when the failure is an
     ``invalid_grant`` (Deliverable B item 2)."""
     base = f"{type(exc).__name__}: {exc}"
@@ -262,7 +262,7 @@ def check_google_oauth_app(settings) -> tuple[str, str]:
     (never in .env, see ``google_setup_state.py``). External+Testing
     refresh tokens for these scopes typically expire about a week after
     issuance — fine for a smoke test, not an always-on service. See
-    docs/getting-started.md section 4A."""
+    docs/install/google-workspace-oauth.md."""
     import os
 
     from ..config import WorkspaceBackend
@@ -300,7 +300,7 @@ def check_google_oauth_app(settings) -> tuple[str, str]:
         "OAuth consent screen is External+Testing: refresh tokens for these "
         "scopes typically expire ~7 days after issuance" + age_note + ". Fix: "
         "switch the consent screen to Internal (Workspace accounts) or "
-        "publish the app; see docs/getting-started.md section 4A"
+        "publish the app; see docs/install/google-workspace-oauth.md"
     )
 
 

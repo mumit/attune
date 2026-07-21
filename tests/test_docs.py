@@ -139,7 +139,7 @@ def test_qdrant_compose_images_are_pinned_and_loopback_bound():
 
 
 def test_slack_owner_destination_reuses_allowlisted_user_id():
-    guide = (ROOT / "docs" / "getting-started.md").read_text()
+    guide = (ROOT / "docs" / "install" / "slack-app.md").read_text()
 
     assert "ATTUNE_SLACK_CHANNEL=U0123456789" in guide
     assert "conversations_open" not in guide

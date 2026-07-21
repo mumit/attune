@@ -11,7 +11,7 @@ runs the process and where your credentials and data live.
    MCP server you trust), and run one instance for yourself. This is the full
    intelligence feature set — memory, drafts, autonomy, writes, everything in
    [`user-journey.md`](user-journey.md) sections 1–6 — and it is runnable
-   today by following [`getting-started.md`](getting-started.md).
+   today by following [`install/self-hosted.md`](install/self-hosted.md).
 2. **Hosted multi-tenant service.** An operator runs Attune on Google Cloud
    for many customers; a customer just signs in with Google and never touches
    a terminal, Terraform, or a `.env` file. Per
@@ -31,17 +31,17 @@ duplicate the instructions those docs already give.
 
 | Mode | Who it's for | What you get | Where your data lives | How you run it | Doc to follow |
 |---|---|---|---|---|---|
-| **Self-hosted, polling** (the default) | One person running Attune for themselves on a workstation, home server, or ordinary VM | The full intelligence set: brief, live Gmail/Calendar Q&A, memory, draft-and-approve, earned autonomy, optional Slack/Google Chat | Your `.env`, `ATTUNE_DATA_DIR` (SQLite/JSON/JSONL), local Qdrant | `attune init --quick` → `attune doctor` → `attune run` | [`getting-started.md`](getting-started.md) |
+| **Self-hosted, polling** (the default) | One person running Attune for themselves on a workstation, home server, or ordinary VM | The full intelligence set: brief, live Gmail/Calendar Q&A, memory, draft-and-approve, earned autonomy, optional Slack/Google Chat | Your `.env`, `ATTUNE_DATA_DIR` (SQLite/JSON/JSONL), local Qdrant | `attune init --quick` → `attune doctor` → `attune run` | [`install/self-hosted.md`](install/self-hosted.md) |
 | **Self-hosted, Google Pub/Sub push** (advanced transport variant) | The same one person, wanting lower-latency Gmail/Calendar/Chat events instead of polling | The same feature set as polling self-hosted — this changes transport, not capability | Same as polling, plus a Compute Engine VM and a stateless Cloud Run republisher for Calendar/Chat callbacks | Everything in polling self-hosted, plus Pub/Sub topics/subscriptions and the republisher | [`deployment.md`](deployment.md) (§3–§11) |
 | **Hosted multi-tenant, as a customer** | Someone who wants Attune without running anything themselves, once an operator has it running | Sign-in, Workspace connect/verify, a private-alpha read-only policy, optional Slack/Google Chat or a built-in browser conversation panel — today's gated feature slice, not the full self-hosted set | Tenant rows in the operator's Cloud SQL; nothing on your own machine | Sign in with Google in a browser — no install | [`user-journey.md`](user-journey.md) §0 |
-| **Hosted multi-tenant, as the operator** | Whoever stands up and runs the multi-tenant service on GCP for others | A fleet of small Cloud Run services, forced-RLS PostgreSQL, and staged activation gates for every capability | Everything customer-facing lives in the operator's GCP project; the operator holds no per-customer OAuth in `.env` files | Terraform (foundation → data → runtime → edge), the migrator job, then ceremony-by-ceremony gate activation | [`hosted-gcp.md`](hosted-gcp.md) |
+| **Hosted multi-tenant, as the operator** | Whoever stands up and runs the multi-tenant service on GCP for others | A fleet of small Cloud Run services, forced-RLS PostgreSQL, and staged activation gates for every capability | Everything customer-facing lives in the operator's GCP project; the operator holds no per-customer OAuth in `.env` files | Terraform (foundation → data → runtime → edge), the migrator job, then ceremony-by-ceremony gate activation | [`install/hosted-operator.md`](install/hosted-operator.md) |
 
 A fifth, even lighter option if you just want to see the code work without
 any credentials at all:
 
 | Mode | Who it's for | What you get | Where your data lives | How you run it | Doc to follow |
 |---|---|---|---|---|---|
-| **Try it in 10 minutes (dev loop)** | Someone evaluating the codebase before committing to either mode | The offline test suite — no live Gmail, Calendar, model, or channel calls | Nothing persists beyond the checkout | `pip install -e ".[dev]"` → `pytest -q` | This page, then [`getting-started.md`](getting-started.md) |
+| **Try it in 10 minutes (dev loop)** | Someone evaluating the codebase before committing to either mode | The offline test suite — no live Gmail, Calendar, model, or channel calls | Nothing persists beyond the checkout | `pip install -e ".[dev]"` → `pytest -q` | This page, then [`install/self-hosted.md`](install/self-hosted.md) |
 
 ## Self-hosted, polling (the default)
 
@@ -91,7 +91,7 @@ attune init --target local
 
 The full manual walkthrough — Slack app creation, MCP as an alternative
 Workspace backend, common failure fixes — is in
-[`getting-started.md`](getting-started.md).
+[`install/self-hosted.md`](install/self-hosted.md).
 
 ### What you get vs the other modes
 
@@ -122,8 +122,8 @@ deployment mode. `google_oauth` (the default) is direct and well-supported,
 and is required for the Pub/Sub transport variant below. `mcp` delegates
 Google credentials, provider calls, and policy to a separate MCP server you
 run or trust, and always uses polling — never Pub/Sub. Pick one per
-[`getting-started.md`](getting-started.md) §4A/§4B; `attune doctor` validates
-whichever you chose.
+[`install/self-hosted.md`](install/self-hosted.md)'s "Workspace access"
+section; `attune doctor` validates whichever you chose.
 
 ## Self-hosted, Google Pub/Sub push (advanced transport variant)
 
@@ -222,11 +222,14 @@ never all at once:
 Every capability in the hosted service is behind its own default-off
 activation gate, and activation is a ceremony — apply Terraform, verify an
 empty plan and negative tests, *then* flip the flag and verify again — not a
-single deploy. `hosted-gcp.md` §"Deployment order and gates" is the
-authoritative sequence; `roadmap.md` tracks exactly which gates are open in
-development today. **Successfully applying Terraform is not successful
-onboarding**, and this platform is not publicly operated — production
-activation requires every launch gate in
+single deploy. [`install/hosted-operator.md`](install/hosted-operator.md) is
+the complete ordered runbook — prerequisites, Terraform apply order, the
+migrator, service deployment, and every activation ceremony with its exact
+flag names; `hosted-gcp.md` §"Deployment order and gates" is the architecture
+reference it operationalizes, and `roadmap.md` tracks exactly which gates are
+open in development today. **Successfully applying Terraform is not
+successful onboarding**, and this platform is not publicly operated —
+production activation requires every launch gate in
 [`security-architecture.md`](security-architecture.md) to be evidenced first.
 
 ### What you're responsible for vs self-hosted

@@ -29,8 +29,8 @@ There are two practical deployment tracks:
 MCP deployments always use the first track: Attune polls the MCP server over
 Streamable HTTP. Provider watches, if any, belong to that server.
 
-Start with [`getting-started.md`](getting-started.md) and move to push only
-after `attune doctor`, `attune brief`, Slack posting, and polling all work.
+Start with [`install/self-hosted.md`](install/self-hosted.md) and move to push
+only after `attune doctor`, `attune brief`, Slack posting, and polling all work.
 Use [`configuration.md`](configuration.md) for the complete environment-variable
 reference; the deployment examples below intentionally show only the settings
 relevant to each topology.
@@ -148,8 +148,7 @@ ATTUNE_MCP_TOKEN=...
 ```
 
 Append the Slack configuration from
-[`getting-started.md`](getting-started.md#6-create-the-slack-app) if Slack is a
-selected route.
+[`install/slack-app.md`](install/slack-app.md) if Slack is a selected route.
 
 ### Run under systemd
 
@@ -246,8 +245,8 @@ gcloud services enable \
 
 The OAuth project, consent screen, scopes, and authorized-user credential are
 created exactly as described in
-[`getting-started.md`](getting-started.md#4a-direct-google-oauth). Push changes
-the transport, not the mailbox identity or scopes.
+[`install/google-workspace-oauth.md`](install/google-workspace-oauth.md). Push
+changes the transport, not the mailbox identity or scopes.
 
 ## 5. Create least-privilege service accounts
 
@@ -580,25 +579,13 @@ Google recommends daily renewal; Attune performs proactive scheduled renewal.
 
 ## 12. Slack on a server or GCP VM
 
-The Slack app setup is identical on every host. Socket Mode does not require a
-public endpoint, load balancer, firewall rule, signing secret, or Cloud Run
-route. The VM only needs outbound HTTPS/WebSocket connectivity to Slack.
-
-Use an owner-only `D...` destination where possible and configure:
-
-```dotenv
-SLACK_APP_TOKEN=xapp-...
-SLACK_BOT_TOKEN=xoxb-...
-ATTUNE_SLACK_CHANNEL=D0123456789
-ATTUNE_SLACK_ALLOWED_USERS=U0123456789
-ATTUNE_BRIEF_CHANNELS=slack
-ATTUNE_APPROVAL_CHANNEL=slack
-ATTUNE_NOTIFICATION_CHANNELS=slack
-ATTUNE_INTERACTION_CHANNELS=slack
-```
-
-See the full creation/scopes/install sequence in
-[`getting-started.md`](getting-started.md#6-create-the-slack-app).
+The Slack app setup is identical on every host — a VM only needs outbound
+HTTPS/WebSocket connectivity to Slack, exactly like any other self-hosted
+target. Socket Mode does not require a public endpoint, load balancer,
+firewall rule, signing secret, or Cloud Run route. Follow
+[`install/slack-app.md`](install/slack-app.md)'s self-hosted section for app
+creation, scopes, and the resulting `.env` values (use an owner-only `D...`
+or `U...` destination where possible).
 
 ## 13. Verify the deployment
 

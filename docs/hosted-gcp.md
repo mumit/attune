@@ -9,7 +9,10 @@ polling deployments continue to work without hosted Attune.
 
 The normative requirements remain in
 [`security-architecture.md`](security-architecture.md). This document maps them
-to the first GCP implementation.
+to the first GCP implementation and is the architecture reference; for the
+ordered, command-level stand-up procedure — prerequisites, Terraform apply
+order, the migrator, service deployment, and gate-by-gate activation — see
+[`install/hosted-operator.md`](install/hosted-operator.md).
 
 ## Trust boundaries and services
 

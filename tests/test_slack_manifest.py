@@ -1,6 +1,6 @@
 """Golden test for ``attune slack manifest`` (UX review persona A item #8,
-G20): the printed manifest must cover exactly what docs/getting-started.md
-section 6 configures by hand."""
+G20): the printed manifest must cover exactly what
+docs/install/slack-app.md's self-hosted section configures by hand."""
 
 from __future__ import annotations
 
