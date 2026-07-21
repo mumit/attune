@@ -1,13 +1,13 @@
 """``attune slack manifest``: a ready-to-paste Slack app manifest (UX review
 persona A item #8, G20).
 
-Covers exactly what ``docs/getting-started.md`` section 6 configures by
-hand: Socket Mode, the four bot token scopes, the ``message.im`` event
-subscription, App Home's Messages tab, and Interactivity. Three steps stay
-manual because Slack's manifest format has no field for them: creating the
-app from this manifest, generating the app-level token (``connections:write``
-scope) and installing the app for the bot token, and copying the operator's
-own member ID.
+Covers exactly what ``docs/install/slack-app.md``'s self-hosted section
+configures by hand: Socket Mode, the four bot token scopes, the
+``message.im`` event subscription, App Home's Messages tab, and
+Interactivity. Three steps stay manual because Slack's manifest format has
+no field for them: creating the app from this manifest, generating the
+app-level token (``connections:write`` scope) and installing the app for the
+bot token, and copying the operator's own member ID.
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from typing import Callable
 
 APP_NAME_DEFAULT = "Attune"
 
-# docs/getting-started.md section 6, step 4.
+# docs/install/slack-app.md, self-hosted manual path step 4.
 BOT_SCOPES: tuple[str, ...] = ("chat:write", "im:history", "im:read", "im:write")
 
-# Section 6, step 5 — the only bot event Attune's Socket Mode client consumes.
+# Manual path step 5 — the only bot event Attune's Socket Mode client consumes.
 BOT_EVENTS: tuple[str, ...] = ("message.im",)
 
 

@@ -1,6 +1,6 @@
 """``attune init --google-setup``: a guided, resumable checklist for the
 Google Cloud Console ceremony that ``attune init`` cannot see or perform on
-its own (docs/getting-started.md section 4A; UX review persona A item #1,
+its own (docs/install/google-workspace-oauth.md; UX review persona A item #1,
 G20).
 
 Every step only ever prints copy-paste values (project URL, consent-screen

@@ -2892,3 +2892,98 @@ around it; it does not change any normative or contract content.
   unchanged, since no Python or test-pinned string changed. A relative-link
   check was run over `docs/modes.md`, the edited `README.md`, and the five
   orientation lines; every link resolved to a file that exists in the repo.
+
+## 2026-07-21 — Install/ documentation set: one canonical procedure per ceremony, a new operator runbook
+
+The previous pass (2026-07-20, above) named but deliberately deferred one
+"judgment call": `getting-started.md` and `deployment.md` restated the same
+Google-OAuth-ceremony and Slack-app-creation steps. This pass performs that
+consolidation and adds the operator runbook `hosted-gcp.md` never had, without
+rewriting any normative or contract document.
+
+- **The dedup design.** `docs/modes.md` routes to one INSTALL doc per mode;
+  each INSTALL doc points at one canonical page per shared procedure; day-2
+  operations stay in `deployment.md`/`hosted-gcp.md`. Concretely, four new
+  documents under `docs/install/`:
+  - **`install/google-workspace-oauth.md`** — the Google Cloud Console OAuth
+    ceremony (project, APIs, consent screen, scopes, Desktop client, the
+    `attune init --google-setup` guided path, the Testing-mode 7-day expiry
+    note), extracted verbatim from `getting-started.md` section 4A. Used by
+    both `install/self-hosted.md` and `deployment.md`'s Pub/Sub track.
+  - **`install/slack-app.md`** — Slack app creation, extracted from
+    `getting-started.md` section 6 (manifest path, manual nine-step path,
+    owner-DM destination rationale). It also documents the hosted platform's
+    Slack app registration in a clearly separated second section, per the
+    task brief's instruction to check whether hosted's Slack setup shares
+    steps with self-hosted's: the console mechanics (OAuth & Permissions,
+    scopes, Redirect/Events URLs) overlap enough that one document with two
+    sections was the right call, not two documents, since
+    `hosted-channel-installation.md` already owns the installation
+    *ceremony* (OAuth state, callback binding, activation gates) and this
+    section only covers the one-time app registration those ceremonies
+    assume exists.
+  - **`install/self-hosted.md`** — the complete self-hosted runbook,
+    absorbing all of `getting-started.md`'s install content (venv/extras,
+    guided local setup, workspace-backend choice, validation, common
+    failures) plus a new explicit prerequisites checklist and a "what green
+    looks like" verification section the old document only had scattered
+    across its "Validate" steps. It points to the two docs above instead of
+    restating their steps, and points to `deployment.md` for
+    service-ification and the Pub/Sub variant.
+  - **`install/hosted-operator.md`** — the operator runbook `hosted-gcp.md`
+    described the architecture for but never sequenced end to end.
+    Structured exactly as the task brief specified: prerequisites; Terraform
+    apply order (foundation/data/runtime/edge) with every `enable_*`
+    variable and its default tabulated per root; the migrator's exact
+    invocation, environment variables, and step-by-step verification
+    behavior (read from `migrate.py` directly, including its literal success
+    message format); the service/Dockerfile/app-module inventory; activation
+    ceremonies in the order this platform's own development history actually
+    exercised them (assembled from the dated entries in `roadmap.md` and
+    `hosted-gcp.md`, spanning 2026-07-14 through 2026-07-20); day-2
+    operations; and a closing honest-status box.
+- **`getting-started.md` becomes a stub redirect, not a deleted file.** It
+  had inbound references from `README.md`, `modes.md`, `deployment.md`, three
+  CLI docstrings, one runtime user-facing message (`doctor.py`'s
+  `google-oauth-app` WARN text), and `tests/test_docs.py`/
+  `test_slack_manifest.py`. Every one of those was updated to point at the
+  new canonical location rather than left dangling; the stub itself remains
+  so any reference this pass missed still resolves to a page that explains
+  where the content moved, per the task's "nothing orphaned" requirement.
+- **A genuinely new fact surfaced while verifying commands against code, not
+  assumed from the docs:** none of `ATTUNE_HOSTED_SIGNUP_ENABLED`,
+  `ATTUNE_ENABLE_HOSTED_MEMORY`, `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`,
+  `ATTUNE_ENABLE_HOSTED_BRIEF`, `ATTUNE_ENABLE_TENANT_MODEL_PROFILES`,
+  `ATTUNE_ENABLE_MODEL_USAGE_METERING`, `ATTUNE_ENABLE_CONTENT_RETENTION`, or
+  `ATTUNE_HOSTED_DELETION_ENABLED` has any corresponding Terraform variable
+  in any of the four `deploy/gcp` roots today — a grep across every `.tf`
+  file confirms zero matches. Two of those (content retention, tenant
+  deletion) also have no deployed Cloud Run Job resource to invoke even
+  manually. Hosted signup additionally requires
+  `ATTUNE_HOSTED_SIGNUP_REGION`, read with no default in
+  `control_plane_app.py`, which is equally unwired — enabling signup today,
+  before that variable exists in Terraform, would crash the control plane at
+  startup. `install/hosted-operator.md` states this plainly for each gate
+  rather than implying "flip the flag" is a complete instruction, matching
+  the roadmap's own "implemented and tested, not deployed" language but
+  making the *infrastructure* gap (not just the activation-evidence gap)
+  explicit for an operator who might otherwise expect a Terraform variable
+  to exist.
+- **What was deliberately left untouched.** `security-architecture.md`,
+  every `*-contract.md` document, `decisions.md`'s own history, and the
+  point-in-time review trilogy (`current-state.md`, `gap-analysis.md`,
+  `future-state.md`) were read for cross-references only; none of their
+  content changed. Every `hosted-*.md` ceremony document keeps its existing
+  role as the canonical description of its own ceremony; the new operator
+  runbook only sequences and points at them, quoting flag names and gate
+  order but never restating a security boundary, database grant, or state
+  machine already specified there.
+- **Verification.** The full offline suite was run after this pass;
+  see this repository's test output for the current pass/skip counts. A
+  relative-link check was run over every new and changed document in this
+  pass (`docs/install/*.md`, `docs/getting-started.md`, `docs/deployment.md`,
+  `docs/hosted-gcp.md`, `docs/modes.md`, `README.md`); every link resolved to
+  a file that exists in the repo. `tests/test_docs.py`'s
+  `test_slack_owner_destination_reuses_allowlisted_user_id` was repointed at
+  `docs/install/slack-app.md`, which now carries the exact pinned strings the
+  test checks for; its assertions and intent are otherwise unchanged.

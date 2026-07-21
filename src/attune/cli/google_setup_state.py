@@ -25,7 +25,7 @@ SCHEMA_VERSION = 1
 
 # Numbered 1-7 in checklist output; order matches the real Google Cloud
 # Console flow (project -> APIs -> consent screen branding -> audience ->
-# scopes -> OAuth client) and docs/getting-started.md section 4A.
+# scopes -> OAuth client) and docs/install/google-workspace-oauth.md.
 STEP_IDS = (
     "create_project",
     "enable_gmail_api",
