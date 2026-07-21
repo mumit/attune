@@ -39,6 +39,7 @@ locals {
     "channel-reference-hmac",
     "google-oauth-client",
     "identity-bootstrap",
+    "intelligence-reference-hmac",
     "llm-api-key",
     "slack-client",
     "slack-signing-secret",

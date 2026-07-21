@@ -170,6 +170,33 @@ resource "google_cloud_run_v2_service" "control_plane" {
         name  = "ATTUNE_HOSTED_WEB_CONVERSATION_ENABLED"
         value = tostring(var.enable_hosted_web_conversation)
       }
+      env {
+        name  = "ATTUNE_ENABLE_HOSTED_BRIEF"
+        value = tostring(var.enable_hosted_brief)
+      }
+      env {
+        name  = "ATTUNE_ENABLE_TENANT_MODEL_PROFILES"
+        value = tostring(var.enable_tenant_model_profiles)
+      }
+      env {
+        name  = "ATTUNE_ENABLE_MODEL_USAGE_METERING"
+        value = tostring(var.enable_model_usage_metering)
+      }
+      env {
+        name  = "ATTUNE_HOSTED_SIGNUP_ENABLED"
+        value = tostring(var.enable_hosted_signup)
+      }
+      dynamic "env" {
+        for_each = var.enable_hosted_signup ? [1] : []
+        content {
+          name  = "ATTUNE_HOSTED_SIGNUP_REGION"
+          value = var.hosted_signup_region
+        }
+      }
+      env {
+        name  = "ATTUNE_HOSTED_DELETION_ENABLED"
+        value = tostring(var.enable_hosted_deletion)
+      }
       dynamic "env" {
         for_each = var.enable_hosted_slack_install ? [1] : []
         content {
@@ -192,21 +219,21 @@ resource "google_cloud_run_v2_service" "control_plane" {
         }
       }
       dynamic "env" {
-        for_each = var.enable_hosted_policy || var.enable_hosted_channels || var.enable_hosted_channel_setup || var.enable_hosted_web_conversation ? [1] : []
+        for_each = var.enable_hosted_policy || var.enable_hosted_channels || var.enable_hosted_channel_setup || var.enable_hosted_web_conversation || var.enable_hosted_signup || var.enable_hosted_deletion || var.enable_tenant_model_profiles ? [1] : []
         content {
           name  = "ATTUNE_AUDIT_WRITER_URL"
           value = local.runtime.audit_writer.uri
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports || var.enable_hosted_web_conversation ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports || var.enable_hosted_web_conversation || var.enable_hosted_brief ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_URL"
           value = local.runtime.dispatch_broker.uri
         }
       }
       dynamic "env" {
-        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports || var.enable_hosted_web_conversation ? [1] : []
+        for_each = local.runtime.google_workspace_verification_enabled || var.enable_customer_exports || var.enable_hosted_web_conversation || var.enable_hosted_brief ? [1] : []
         content {
           name  = "ATTUNE_DISPATCH_BROKER_AUDIENCE"
           value = local.runtime.dispatch_broker.audience
@@ -351,6 +378,32 @@ resource "google_cloud_run_v2_service" "control_plane" {
     precondition {
       condition     = !var.enable_hosted_slack_install || var.slack_client_id != ""
       error_message = "Hosted Slack installation requires the platform Slack app's public client ID."
+    }
+    precondition {
+      condition = !var.enable_hosted_signup || (
+        var.enable_identity_sign_in && var.hosted_signup_region != ""
+      )
+      error_message = "Hosted signup activation requires identity sign-in and the fixed signup region."
+    }
+    precondition {
+      condition     = !var.enable_hosted_deletion || var.enable_identity_sign_in
+      error_message = "Hosted tenant-deletion routes require active identity sign-in."
+    }
+    precondition {
+      condition = !var.enable_hosted_brief || (
+        var.enable_identity_sign_in && try(local.runtime.hosted_brief_enabled, false)
+      )
+      error_message = "Hosted brief activation requires identity sign-in and the activated runtime worker brief route."
+    }
+    precondition {
+      condition = !var.enable_tenant_model_profiles || (
+        var.enable_identity_sign_in && try(local.runtime.tenant_model_profiles_enabled, false)
+      )
+      error_message = "Hosted model profile activation requires identity sign-in and the activated runtime worker/model-gateway profile route."
+    }
+    precondition {
+      condition     = !var.enable_model_usage_metering || var.enable_identity_sign_in
+      error_message = "Hosted usage activation requires active identity sign-in. Independently activatable from the worker's own metering-write gate."
     }
   }
 }
@@ -1244,6 +1297,158 @@ resource "google_compute_security_policy" "edge" {
         enforce_on_key = "IP"
         rate_limit_threshold {
           count        = 30
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_signup ? [1] : []
+    content {
+      action      = "throttle"
+      # Reserved by docs/hosted-signup.md section 7: "the next free priority
+      # in the reviewed range is 894."
+      priority    = 894
+      description = "Permit only the exact sessionless self-service signup ceremony"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/signup'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 10
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_deletion ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 895
+      description = "Permit bounded reads of an owner's own tenant-deletion request state"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.method == 'GET' && request.path == '/v1/account/deletion-request'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 30
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_deletion ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 896
+      description = "Permit only recent-authenticated tenant-deletion request/cancel ceremony"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/account/deletion-requests'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        # 5/60s matches the two other recent-authenticated destructive
+        # ceremonies already in this policy (Google Chat disconnect at 888,
+        # Slack disconnect at 892) -- account deletion is at least as severe.
+        rate_limit_threshold {
+          count        = 5
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_tenant_model_profiles ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 897
+      description = "Permit only the exact model-profile read/configure path"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/model-profile'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        # PUT here is an ordinary owner preference (same authorization bar
+        # as POST /v1/conversation/messages and POST /v1/brief/run per
+        # control_plane_service.py's own docstring), not a recency ceremony,
+        # but the route class is still unspecified upstream -- the
+        # conservative ceremony rate applies (docs/hosted-model-profiles.md
+        # leaves the exact Cloud Armor rule to this Terraform wiring).
+        rate_limit_threshold {
+          count        = 10
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_model_usage_metering ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 898
+      description = "Permit only the exact bounded usage-summary read"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/usage'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        rate_limit_threshold {
+          count        = 30
+          interval_sec = 60
+        }
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.enable_hosted_brief ? [1] : []
+    content {
+      action      = "throttle"
+      priority    = 899
+      description = "Permit only the exact idempotent-per-hour brief-run trigger"
+      match {
+        expr {
+          expression = "request.headers['host'] == '${var.hostname}' && request.path == '/v1/brief/run'"
+        }
+      }
+      rate_limit_options {
+        conform_action = "allow"
+        exceed_action  = "deny(429)"
+        enforce_on_key = "IP"
+        # Not a recency ceremony either (same docstring precedent as
+        # /v1/model-profile above); the conservative ceremony rate applies
+        # for the same reason.
+        rate_limit_threshold {
+          count        = 10
           interval_sec = 60
         }
       }

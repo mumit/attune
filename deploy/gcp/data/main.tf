@@ -67,6 +67,14 @@ locals {
       local.foundation.workload_identities.retention,
       ".gserviceaccount.com",
     )
+    attune_content_retention = trimsuffix(
+      local.foundation.workload_identities.content_retention,
+      ".gserviceaccount.com",
+    )
+    attune_deletion = trimsuffix(
+      local.foundation.workload_identities.deletion,
+      ".gserviceaccount.com",
+    )
   }
 }
 
@@ -652,6 +660,425 @@ resource "google_monitoring_alert_policy" "export_cleanup_backlog" {
       }
     }
   }
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
+# --- Content retention (docs/data-lifecycle.md "Content retention and tenant
+# deletion design"). Mirrors protocol_retention's job/scheduler/identity/
+# alert shape exactly: a dedicated identity, a paused-by-default schedule, a
+# separate non-database scheduler identity, and a failure/backlog alert pair.
+# The job entry point (attune.hosted.content_retention) has its own
+# ATTUNE_ENABLE_CONTENT_RETENTION gate and refuses to open a database
+# connection at all unless it reads "true" -- deploying this job does not by
+# itself prune anything.
+
+resource "google_cloud_run_v2_job" "content_retention" {
+  project             = local.foundation.project_id
+  name                = "${local.prefix}-content-retention"
+  location            = local.foundation.region
+  deletion_protection = true
+  labels = merge(local.labels, {
+    component = "content-retention"
+  })
+
+  template {
+    task_count  = 1
+    parallelism = 1
+
+    template {
+      service_account = local.foundation.workload_identities.content_retention
+      max_retries     = 0
+      timeout         = "300s"
+
+      containers {
+        name    = "content-retention"
+        image   = var.migrator_image
+        command = ["python", "-m", "attune.hosted.content_retention"]
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+
+        env {
+          name  = "ATTUNE_CLOUD_SQL_INSTANCE"
+          value = local.foundation.database_instance
+        }
+        env {
+          name  = "ATTUNE_DB_NAME"
+          value = local.foundation.database_name
+        }
+        env {
+          name = "ATTUNE_DB_USER"
+          value = trimsuffix(
+            local.foundation.workload_identities.content_retention,
+            ".gserviceaccount.com",
+          )
+        }
+        env {
+          name  = "ATTUNE_ENABLE_CONTENT_RETENTION"
+          value = tostring(var.enable_content_retention_execution)
+        }
+        env {
+          name  = "ATTUNE_CONTENT_RETENTION_BATCH_SIZE"
+          value = tostring(var.content_retention_batch_size)
+        }
+        env {
+          name  = "ATTUNE_CONTENT_RETENTION_MAX_BATCHES"
+          value = tostring(var.content_retention_max_batches)
+        }
+      }
+
+      vpc_access {
+        egress = "PRIVATE_RANGES_ONLY"
+        network_interfaces {
+          network    = local.foundation.network_id
+          subnetwork = local.foundation.subnetwork_id
+          tags       = ["attune-content-retention"]
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# The scheduler can start only this job. It has no database, logging, metrics,
+# or service-level runtime role; the job itself assumes the separate content-
+# retention executor identity above after Cloud Run accepts this
+# authenticated control request.
+resource "google_cloud_run_v2_job_iam_member" "content_retention_scheduler" {
+  project  = local.foundation.project_id
+  location = google_cloud_run_v2_job.content_retention.location
+  name     = google_cloud_run_v2_job.content_retention.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.content_retention_scheduler}"
+}
+
+resource "google_cloud_scheduler_job" "content_retention" {
+  project     = local.foundation.project_id
+  region      = local.foundation.region
+  name        = "${local.prefix}-content-retention"
+  description = "Starts the bounded expired-customer-content retention job; deploy paused and activate only after the scheduler-path ceremony."
+  schedule    = var.content_retention_schedule
+  time_zone   = var.content_retention_time_zone
+  paused      = !var.enable_content_retention_schedule
+
+  attempt_deadline = "300s"
+
+  retry_config {
+    retry_count          = 1
+    max_retry_duration   = "600s"
+    min_backoff_duration = "30s"
+    max_backoff_duration = "60s"
+    max_doublings        = 1
+  }
+
+  http_target {
+    uri         = "https://run.googleapis.com/v2/projects/${local.foundation.project_id}/locations/${local.foundation.region}/jobs/${google_cloud_run_v2_job.content_retention.name}:run"
+    http_method = "POST"
+    body        = base64encode("{}")
+    headers = {
+      "Content-Type" = "application/json"
+    }
+
+    oauth_token {
+      service_account_email = local.foundation.workload_identities.content_retention_scheduler
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_cloud_run_v2_job_iam_member.content_retention_scheduler]
+
+  deletion_policy = "PREVENT"
+}
+
+resource "google_logging_metric" "content_retention_failure" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-content-retention-failure"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.job_name=\"${google_cloud_run_v2_job.content_retention.name}\"",
+    "severity>=ERROR",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune content-retention failures"
+  }
+}
+
+resource "google_logging_metric" "content_retention_backlog" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-content-retention-backlog"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.job_name=\"${google_cloud_run_v2_job.content_retention.name}\"",
+    "jsonPayload.event=\"attune_content_retention\"",
+    "jsonPayload.backlog_possible=true",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune content-retention possible backlog"
+  }
+}
+
+resource "google_monitoring_alert_policy" "content_retention_failure" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} content-retention failure"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The bounded content-retention job logged an error. Keep scheduling disabled or pause it, inspect the execution and database verifier, and do not broaden the content-retention identity."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "At least one content-retention error"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.content_retention_failure.name}\" AND resource.type=\"cloud_run_job\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
+resource "google_monitoring_alert_policy" "content_retention_backlog" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} content-retention possible backlog"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The bounded content-retention job saturated every configured batch and expired customer content may remain. Run it again after investigation; do not raise limits without storage and load review."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "Content-retention batch ceiling reached"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.content_retention_backlog.name}\" AND resource.type=\"cloud_run_job\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  notification_channels = var.alert_notification_channels
+  user_labels           = local.labels
+}
+
+# --- Tenant deletion (docs/data-lifecycle.md "Content retention and tenant
+# deletion design"). Mirrors protocol_retention's job/scheduler/identity/
+# alert shape, with one honest asymmetry: tenant_deletion_executor.py's own
+# JSON completion record carries no "backlog_possible" field (unlike
+# protocol/content retention), so only a failure alert is defined here --
+# inventing an unemitted signal would be a Python behavior change, which is
+# out of scope for this Terraform-only change. The executor's main() never
+# wires a ConnectorRevocation client (it stays best-effort/None), so this
+# job needs only database access -- no secret-broker or channel-broker
+# egress, and PRIVATE_RANGES_ONLY egress is sufficient.
+
+resource "google_cloud_run_v2_job" "tenant_deletion" {
+  project             = local.foundation.project_id
+  name                = "${local.prefix}-tenant-deletion"
+  location            = local.foundation.region
+  deletion_protection = true
+  labels = merge(local.labels, {
+    component = "tenant-deletion"
+  })
+
+  template {
+    task_count  = 1
+    parallelism = 1
+
+    template {
+      service_account = local.foundation.workload_identities.deletion
+      max_retries     = 0
+      timeout         = "900s"
+
+      containers {
+        name    = "tenant-deletion"
+        image   = var.migrator_image
+        command = ["python", "-m", "attune.hosted.tenant_deletion_executor"]
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+
+        env {
+          name  = "ATTUNE_CLOUD_SQL_INSTANCE"
+          value = local.foundation.database_instance
+        }
+        env {
+          name  = "ATTUNE_DB_NAME"
+          value = local.foundation.database_name
+        }
+        env {
+          name = "ATTUNE_DB_USER"
+          value = trimsuffix(
+            local.foundation.workload_identities.deletion,
+            ".gserviceaccount.com",
+          )
+        }
+        env {
+          name  = "ATTUNE_HOSTED_DELETION_ENABLED"
+          value = tostring(var.enable_tenant_deletion_execution)
+        }
+        env {
+          name  = "ATTUNE_DELETION_BATCH_SIZE"
+          value = tostring(var.deletion_batch_size)
+        }
+        env {
+          name  = "ATTUNE_DELETION_MAX_BATCHES_PER_RELATION"
+          value = tostring(var.deletion_max_batches_per_relation)
+        }
+        env {
+          name  = "ATTUNE_DELETION_MAX_TENANTS_PER_RUN"
+          value = tostring(var.deletion_max_tenants_per_run)
+        }
+      }
+
+      vpc_access {
+        egress = "PRIVATE_RANGES_ONLY"
+        network_interfaces {
+          network    = local.foundation.network_id
+          subnetwork = local.foundation.subnetwork_id
+          tags       = ["attune-tenant-deletion"]
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# The scheduler can start only this job. It has no database, logging, metrics,
+# or service-level runtime role; the job itself assumes the separate
+# tenant-deletion executor identity above after Cloud Run accepts this
+# authenticated control request.
+resource "google_cloud_run_v2_job_iam_member" "tenant_deletion_scheduler" {
+  project  = local.foundation.project_id
+  location = google_cloud_run_v2_job.tenant_deletion.location
+  name     = google_cloud_run_v2_job.tenant_deletion.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${local.foundation.workload_identities.deletion_scheduler}"
+}
+
+resource "google_cloud_scheduler_job" "tenant_deletion" {
+  project     = local.foundation.project_id
+  region      = local.foundation.region
+  name        = "${local.prefix}-tenant-deletion"
+  description = "Starts the owner-initiated tenant-deletion executor; deploy paused and activate only after the scheduler-path ceremony."
+  schedule    = var.tenant_deletion_schedule
+  time_zone   = var.tenant_deletion_time_zone
+  paused      = !var.enable_tenant_deletion_schedule
+
+  attempt_deadline = "900s"
+
+  retry_config {
+    retry_count          = 1
+    max_retry_duration   = "600s"
+    min_backoff_duration = "30s"
+    max_backoff_duration = "60s"
+    max_doublings        = 1
+  }
+
+  http_target {
+    uri         = "https://run.googleapis.com/v2/projects/${local.foundation.project_id}/locations/${local.foundation.region}/jobs/${google_cloud_run_v2_job.tenant_deletion.name}:run"
+    http_method = "POST"
+    body        = base64encode("{}")
+    headers = {
+      "Content-Type" = "application/json"
+    }
+
+    oauth_token {
+      service_account_email = local.foundation.workload_identities.deletion_scheduler
+      scope                 = "https://www.googleapis.com/auth/cloud-platform"
+    }
+  }
+
+  depends_on = [google_cloud_run_v2_job_iam_member.tenant_deletion_scheduler]
+
+  deletion_policy = "PREVENT"
+}
+
+resource "google_logging_metric" "tenant_deletion_failure" {
+  project = local.foundation.project_id
+  name    = "${local.prefix}-tenant-deletion-failure"
+  filter = join(" AND ", [
+    "resource.type=\"cloud_run_job\"",
+    "resource.labels.job_name=\"${google_cloud_run_v2_job.tenant_deletion.name}\"",
+    "severity>=ERROR",
+  ])
+
+  metric_descriptor {
+    metric_kind  = "DELTA"
+    value_type   = "INT64"
+    unit         = "1"
+    display_name = "Attune tenant-deletion failures"
+  }
+}
+
+resource "google_monitoring_alert_policy" "tenant_deletion_failure" {
+  project      = local.foundation.project_id
+  display_name = "${local.prefix} tenant-deletion failure"
+  combiner     = "OR"
+  enabled      = true
+
+  documentation {
+    content   = "The owner-initiated tenant-deletion executor logged an error (including an executor_ambiguous fail-stop). Keep scheduling disabled or pause it, inspect the claimed deletion_requests row, and do not broaden the deletion identity."
+    mime_type = "text/markdown"
+  }
+
+  conditions {
+    display_name = "At least one tenant-deletion error"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.tenant_deletion_failure.name}\" AND resource.type=\"cloud_run_job\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
   notification_channels = var.alert_notification_channels
   user_labels           = local.labels
 }
