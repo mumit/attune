@@ -3256,3 +3256,45 @@ anything else.
   pre-change baseline (two pre-existing, unrelated findings in
   `test_credentials.py`, confirmed via `git stash` diff) — nothing new
   introduced.
+
+## 2026-07-22 — Fix: the Chat OAuth-user credential path rejected its own output
+
+A real user hit this within hours of the previous entry shipping:
+`attune init`'s Chat-scoped OAuth consent flow completed successfully, but
+`attune run`/`attune brief --post` then crashed inside
+`load_google_chat_credentials` with `"...not: None"` — the strict dispatch
+added in the previous entry required an exact `"type": "authorized_user"`
+key before treating a file as an OAuth user credential.
+
+- **Root cause, confirmed against the real library, not assumed.**
+  `google.oauth2.credentials.Credentials.to_json()` — what
+  `cli/init_cmd.py`'s `_chat_credentials_step` actually writes to
+  `google_chat_authorized_user.json` — never emits a `"type"` field at all
+  (verified by constructing a real `Credentials` object and calling
+  `.to_json()`: the output has `token`/`refresh_token`/`token_uri`/
+  `client_id`/`client_secret`/`scopes`/`universe_domain`/`account`, nothing
+  else). Only Application Default Credentials files (the
+  `gcloud auth application-default login` shape) carry that key. The
+  previous entry's strict `kind == "authorized_user"` check could never be
+  satisfied by the exact file this project's own guided flow produces — a
+  self-inflicted break, and the specific bug class
+  `load_google_credentials`'s existing Gmail/Calendar dispatch already
+  avoided by design (it only special-cases `"service_account"`; everything
+  else is a user credential, no second marker required).
+- **The fix matches the existing, correct pattern instead of inventing a
+  new one.** `load_google_chat_credentials` now uses the identical
+  permissive dispatch: exactly `type == "service_account"` takes the
+  service-account branch; anything else — an ADC-style file, a bare
+  `Credentials.to_json()` dump, or any other shape — goes to
+  `from_authorized_user_info`, whose own validation is the failure mode
+  for a genuinely malformed file. No second, stricter check needed or
+  wanted here.
+- **Verification.** New regression test constructs the literal shape
+  observed from the real `google-auth` library's `Credentials.to_json()`
+  (not a guessed approximation) and asserts it loads successfully — this
+  is the exact file class that broke in the field. The previous "unknown
+  type raises" test is rewritten to assert the correct, permissive
+  behavior instead. Full suite: 1928 passed, 57 skipped (was 1927; one net
+  new test — the rewritten test plus one newly added). `docs/deployment.md`
+  and `docs/configuration.md` corrected to stop implying a `"type"` field
+  is required or expected.
