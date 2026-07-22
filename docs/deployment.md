@@ -470,8 +470,11 @@ API"](https://developers.google.com/workspace/chat/authenticate-authorize):
 **app authentication** (a service account, step 1 above, the recommended and
 best-tested path) and **user authentication** (an OAuth user credential).
 `credentials.load_google_chat_credentials` accepts either: point
-`ATTUNE_CHAT_CREDENTIALS_FILE` at a JSON file whose `type` is
-`"service_account"` (unchanged) or `"authorized_user"` (new).
+`ATTUNE_CHAT_CREDENTIALS_FILE` at a service-account JSON (`type:
+"service_account"`, unchanged) or an OAuth user credential — anything else,
+including the exact type-less shape `google.oauth2.credentials.Credentials
+.to_json()` writes (what the flow below actually produces; it never adds a
+`"type"` field, so do not expect to see one in that file).
 
 To produce the OAuth user credential without ever creating a service account:
 

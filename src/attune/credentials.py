@@ -99,14 +99,23 @@ def load_google_chat_credentials(settings: Settings | None = None) -> Any:
     - **App authentication** — a service account, optionally with
       domain-wide delegation. This is the original, still-recommended path
       here, requested with :data:`SCOPE_CHAT_BOT`.
-    - **User authentication** — an OAuth *user* credential (the on-disk
+    - **User authentication** — an OAuth *user* credential: the on-disk
       shape produced by the same ``google-auth-oauthlib`` flow already used
-      for Gmail/Calendar, ``type: authorized_user``), requested with
-      :data:`SCOPES_CHAT` instead of the app-only ``chat.bot`` scope. This
-      is the alternative for operators whose organization does not permit
-      creating IAM service-account keys — it is still a second, dedicated
-      credential file, just obtained by an OAuth consent flow instead of a
-      downloaded key.
+      for Gmail/Calendar (``cli/init_cmd.py``'s ``_chat_credentials_step``),
+      requested with :data:`SCOPES_CHAT` instead of the app-only
+      ``chat.bot`` scope. This is the alternative for operators whose
+      organization does not permit creating IAM service-account keys — it
+      is still a second, dedicated credential file, just obtained by an
+      OAuth consent flow instead of a downloaded key. Note:
+      ``google.oauth2.credentials.Credentials.to_json()`` (what that flow
+      writes) never adds a ``"type"`` field — an ADC-style file with
+      ``"type": "authorized_user"`` and a bare ``Credentials.to_json()``
+      dump are both accepted here, mirroring how
+      :func:`load_google_credentials` already dispatches: exactly
+      ``"service_account"`` is the service-account branch, everything else
+      is treated as a user credential and left to
+      ``from_authorized_user_info``'s own validation to reject if the
+      shape is actually wrong.
 
     Whichever mechanism is used, the file must be distinct from
     ``ATTUNE_GOOGLE_CREDENTIALS_FILE``; ``attune doctor`` refuses to start if
@@ -132,18 +141,16 @@ def load_google_chat_credentials(settings: Settings | None = None) -> Any:
         raise ImportError("Google Chat requires `pip install attune[google]`") from exc
     with open(path) as fh:
         info = json.load(fh)
-    kind = info.get("type")
-    if kind == "service_account":
+    if info.get("type") == "service_account":
         return service_account.Credentials.from_service_account_info(
             info, scopes=[SCOPE_CHAT_BOT]
         )
-    if kind == "authorized_user":
-        # Scopes are already embedded in a stored user-credential token
-        # (same convention as load_google_credentials' OAuth-user branch);
-        # SCOPES_CHAT documents what must have been granted at consent time.
-        return _user_creds.Credentials.from_authorized_user_info(info)
-    raise ValueError(
-        "ATTUNE_CHAT_CREDENTIALS_FILE must contain a service account "
-        '(type: "service_account") or an OAuth user credential '
-        '(type: "authorized_user"), not: ' + repr(kind)
-    )
+    # Anything else is treated as an OAuth user credential — the same
+    # permissive dispatch load_google_credentials already uses, and the
+    # only one that actually matches what Credentials.to_json() writes
+    # (no "type" key at all; see the docstring). Scopes are already
+    # embedded in a stored user-credential token; SCOPES_CHAT documents
+    # what must have been granted at consent time. A genuinely malformed
+    # file is rejected by from_authorized_user_info's own validation
+    # rather than a second, stricter check here.
+    return _user_creds.Credentials.from_authorized_user_info(info)

@@ -268,9 +268,17 @@ def test_chat_credentials_missing_path_raises(google_mocks):
         load_google_chat_credentials(settings)
 
 
-def test_chat_credentials_unknown_type_raises(google_mocks):
+def test_chat_credentials_anything_non_service_account_is_treated_as_user_creds(
+    google_mocks,
+):
+    """Only an EXACT ``"service_account"`` type takes the service-account
+    branch (mirrors load_google_credentials); anything else — including a
+    file with a nonsense `type` value — is handed to
+    `from_authorized_user_info` rather than rejected by a second, stricter
+    check here. A genuinely malformed shape is google-auth's own problem to
+    reject, not this loader's."""
     _, _, _, tmp_path = google_mocks
-    cred_file = tmp_path / "chat_bad.json"
+    cred_file = tmp_path / "chat_mystery.json"
     cred_file.write_text(json.dumps({"type": "not_a_real_type"}))
 
     from attune.credentials import load_google_chat_credentials
@@ -281,5 +289,40 @@ def test_chat_credentials_unknown_type_raises(google_mocks):
          "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": "",
          "ATTUNE_CHAT_CREDENTIALS_FILE": str(cred_file)}
     )
-    with pytest.raises(ValueError, match="service account.*OAuth user credential"):
-        load_google_chat_credentials(settings)
+    creds = load_google_chat_credentials(settings)
+    assert isinstance(creds, _FakeUserCreds)
+
+
+def test_chat_credentials_accepts_the_exact_shape_credentials_to_json_writes(
+    google_mocks,
+):
+    """Regression pin: ``google.oauth2.credentials.Credentials.to_json()``
+    — what ``cli/init_cmd.py``'s Chat OAuth flow actually writes to disk —
+    never includes a ``"type"`` key at all (verified against the real
+    google-auth library, not assumed). A stricter dispatch that required
+    ``type: "authorized_user"`` would reject the exact file `attune init`
+    itself just produced; this must not regress."""
+    _, _, _, tmp_path = google_mocks
+    cred_file = tmp_path / "chat_user.json"
+    # The real, observed output of Credentials(...).to_json() -- no "type"
+    # key, just the token fields.
+    real_shape = {
+        "token": "t", "refresh_token": "r",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "cid", "client_secret": "csec",
+        "scopes": ["https://www.googleapis.com/auth/chat.messages"],
+        "universe_domain": "googleapis.com", "account": "",
+    }
+    cred_file.write_text(json.dumps(real_shape))
+
+    from attune.credentials import load_google_chat_credentials
+    from attune.config import Settings
+
+    settings = Settings.from_env(
+        {"ATTUNE_WORKSPACE_BACKEND": "mcp",
+         "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": "",
+         "ATTUNE_CHAT_CREDENTIALS_FILE": str(cred_file)}
+    )
+    creds = load_google_chat_credentials(settings)
+    assert isinstance(creds, _FakeUserCreds)
+    assert creds.info == real_shape
