@@ -205,6 +205,62 @@ def test_init_runs_oauth_flow_for_client_secret(tmp_path):
     assert f"ATTUNE_GOOGLE_CREDENTIALS_FILE={data_dir}/google_authorized_user.json" in content
 
 
+def test_init_offers_chat_oauth_flow_as_service_account_alternative(tmp_path):
+    """Orgs that disallow creating IAM service-account keys can still wire
+    Google Chat: `_chat_credentials_step` offers the same OAuth consent
+    mechanism already used for Gmail/Calendar, scoped to Chat, saved to a
+    distinct file (docs/deployment.md's Google Chat section)."""
+    mailbox_secret = tmp_path / "mailbox_authorized_user.json"
+    mailbox_secret.write_text('{"type": "authorized_user"}')
+    chat_secret = tmp_path / "chat_client_secret.json"
+    chat_secret.write_text('{"installed": {"client_id": "chat-app"}}')
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir)
+    flows: list[dict] = []
+
+    def fake_flow(*, client_secret_path, save_dir, scopes=None, filename=None):
+        flows.append({
+            "path": client_secret_path, "dir": save_dir,
+            "scopes": scopes, "filename": filename,
+        })
+        return os.path.join(save_dir, filename or "google_authorized_user.json")
+
+    answers = {
+        "Data directory": data_dir,
+        "mailbox email": "owner@example.com",
+        "Google Cloud project ID": "attune-project",
+        "Google credentials JSON": str(mailbox_secret),
+        "Google Chat space": "spaces/AAAA",
+        "Google Chat app service-account or OAuth JSON": str(chat_secret),
+        "Run a Chat-scoped consent flow": "y",
+        "Default chat model": "test-model",
+        "Embedding model": "test-embedding",
+        "Embedding dimensions": "1536",
+    }
+    code = run_init(
+        env_file=str(tmp_path / ".env"),
+        ask=_by_prompt(answers),
+        ask_secret=lambda p: "",
+        oauth_flow=fake_flow,
+        out=lambda s: None,
+    )
+
+    assert code == 0
+    assert flows == [{
+        "path": str(chat_secret), "dir": data_dir,
+        "scopes": ["https://www.googleapis.com/auth/chat.messages",
+                   "https://www.googleapis.com/auth/chat.spaces.readonly"],
+        "filename": "google_chat_authorized_user.json",
+    }]
+    content = (tmp_path / ".env").read_text()
+    assert (
+        f"ATTUNE_CHAT_CREDENTIALS_FILE={data_dir}/google_chat_authorized_user.json"
+        in content
+    )
+    # distinct from the mailbox credential -- never the same file.
+    assert f"ATTUNE_GOOGLE_CREDENTIALS_FILE={mailbox_secret}" in content
+
+
 def test_init_offers_guided_google_setup_when_no_client_file_exists(tmp_path):
     data_dir = str(tmp_path / "data")
     calls = []
@@ -497,6 +553,51 @@ def test_channel_routes_accept_complete_google_chat_only_configuration():
     })
 
     assert check_channel_routes(settings)[0] == PASS
+
+
+_COMPLETE_GOOGLE_CHAT_CONFIG = {
+    "ATTUNE_BRIEF_CHANNELS": "google_chat",
+    "ATTUNE_APPROVAL_CHANNEL": "google_chat",
+    "ATTUNE_NOTIFICATION_CHANNELS": "google_chat",
+    "ATTUNE_INTERACTION_CHANNELS": "google_chat",
+    "ATTUNE_CHAT_SPACE": "spaces/S1",
+    "ATTUNE_CHAT_ALLOWED_USERS": "users/U1",
+    "ATTUNE_CHAT_INTERACTION_PUBSUB_SUBSCRIPTION": "projects/p/subscriptions/chat",
+    "ATTUNE_ACK_DESTINATION_VISIBILITY": "1",
+}
+
+
+def test_channel_routes_pass_when_chat_credential_differs_from_google_credential():
+    """A distinct Chat OAuth-user credential (the service-account
+    alternative, credentials.py) is fine alongside the principal's own
+    Google credentials file, as long as the two paths differ."""
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        **_COMPLETE_GOOGLE_CHAT_CONFIG,
+        "ATTUNE_CHAT_CREDENTIALS_FILE": "/secrets/chat_authorized_user.json",
+        "ATTUNE_GOOGLE_CREDENTIALS_FILE": "/secrets/mailbox_authorized_user.json",
+    })
+
+    assert check_channel_routes(settings)[0] == PASS
+
+
+def test_channel_routes_fail_when_chat_credential_is_the_google_credential():
+    """design.md rule 4: the Chat app identity must never be the same
+    credential as the principal's Gmail/Calendar OAuth grant, regardless of
+    whether it's a service account or (credentials.py's alternative) an
+    OAuth user credential."""
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        **_COMPLETE_GOOGLE_CHAT_CONFIG,
+        "ATTUNE_CHAT_CREDENTIALS_FILE": "/secrets/shared.json",
+        "ATTUNE_GOOGLE_CREDENTIALS_FILE": "/secrets/shared.json",
+    })
+
+    status, detail = check_channel_routes(settings)
+    assert status == FAIL
+    assert "must not be the same file" in detail
 
 
 # ---------------------------------------------------------------------------

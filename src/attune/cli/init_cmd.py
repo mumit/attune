@@ -365,9 +365,14 @@ def run_init(
             "Google Chat space (spaces/..., blank to skip)",
             current.get("ATTUNE_CHAT_SPACE", ""),
         )
-        chat_creds = ask_default(
-            "Google Chat app service-account JSON",
-            current.get("ATTUNE_CHAT_CREDENTIALS_FILE", ""),
+        chat_creds = _chat_credentials_step(
+            ask=ask,
+            ask_default=ask_default,
+            out=out,
+            data_dir=data_dir,
+            oauth_flow=oauth_flow,
+            default=current.get("ATTUNE_CHAT_CREDENTIALS_FILE", ""),
+            google_creds_path=google_creds,
         ) if chat_space else ""
         chat_allowed = ask_default(
             "Allowed Google Chat user IDs", current.get("ATTUNE_CHAT_ALLOWED_USERS", "")
@@ -642,17 +647,91 @@ def _google_credentials_step(
     return saved
 
 
-def _run_oauth_flow(*, client_secret_path: str, save_dir: str) -> str:  # pragma: no cover
+def _run_oauth_flow(
+    *,
+    client_secret_path: str,
+    save_dir: str,
+    scopes: list[str] | None = None,
+    filename: str = "google_authorized_user.json",
+) -> str:  # pragma: no cover
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     from ..credentials import SCOPES_DEFAULT
 
     flow = InstalledAppFlow.from_client_secrets_file(
-        client_secret_path, scopes=list(SCOPES_DEFAULT)
+        client_secret_path, scopes=list(scopes or SCOPES_DEFAULT)
     )
     creds = flow.run_local_server(port=0)
-    save_path = os.path.join(save_dir, "google_authorized_user.json")
+    save_path = os.path.join(save_dir, filename)
     with open(save_path, "w") as fh:
         fh.write(creds.to_json())
     os.chmod(save_path, 0o600)
     return save_path
+
+
+def _chat_credentials_step(
+    *,
+    ask,
+    ask_default,
+    out,
+    data_dir: str,
+    oauth_flow,
+    default: str = "",
+    google_creds_path: str = "",
+) -> str:
+    """The Chat app identity's credentials file (design rule 4): a service
+    account by default, or — for organizations that disallow creating IAM
+    service-account keys — an OAuth user credential obtained the same way
+    as the Gmail/Calendar one, but scoped to Chat and saved to a distinct
+    file (see ``credentials.load_google_chat_credentials`` and
+    ``docs/deployment.md``'s Google Chat section for the tradeoffs, in
+    particular that this project has not verified interactive Cards click
+    routing under the OAuth-user path against a live Chat app)."""
+    path = ask_default(
+        "Google Chat app service-account or OAuth JSON (blank to skip)",
+        default,
+    )
+    if not path:
+        return ""
+    resolved = os.path.expanduser(path)
+    if not os.path.exists(resolved):
+        out(f"  note: {resolved} does not exist yet; preserving the setting")
+        return path
+    try:
+        with open(resolved) as fh:
+            data = json.load(fh)
+    except ValueError:
+        return path
+    if "installed" in data or "web" in data:
+        if ask(
+            "That looks like an OAuth client (not a service account). Run a "
+            "Chat-scoped consent flow now to produce an OAuth user "
+            "credential for the Chat app? (y/N): "
+        ).strip().lower() == "y":
+            out(
+                "  Sign in with the Chat app's OWN Google account, not the "
+                "principal's mailbox account — this credential must stay "
+                "separate from ATTUNE_GOOGLE_CREDENTIALS_FILE."
+            )
+            from ..credentials import SCOPES_CHAT
+
+            flow = oauth_flow or _run_oauth_flow
+            saved = flow(
+                client_secret_path=resolved,
+                save_dir=data_dir,
+                scopes=list(SCOPES_CHAT),
+                filename="google_chat_authorized_user.json",
+            )
+            out(f"  Chat OAuth user credentials saved to {saved}")
+            path = saved
+    if (
+        google_creds_path
+        and os.path.abspath(os.path.expanduser(path))
+        == os.path.abspath(os.path.expanduser(google_creds_path))
+    ):
+        out(
+            "  warning: this is the same file as your Google credentials — "
+            "the Chat app identity must be a separate credential; "
+            "`attune doctor` will refuse to start until this differs"
+        )
+    return path

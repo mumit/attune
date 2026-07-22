@@ -434,7 +434,9 @@ Slack can remain the only channel. If Google Chat is also selected:
 
 1. Create a service account for the Chat app and download its JSON key. This is
    configured as `ATTUNE_CHAT_CREDENTIALS_FILE` and is separate from the
-   principal's authorized-user JSON.
+   principal's authorized-user JSON. **If your organization does not allow
+   creating IAM service-account keys**, see "Alternative: OAuth user
+   credential instead of a service account" below before continuing.
 2. Configure the Google Chat API app, enable interactive features, and add the
    app to the intended space.
 3. Set its HTTP endpoint URL to
@@ -459,6 +461,43 @@ https://www.googleapis.com/auth/chat.spaces.readonly
 optional user-authenticated Chat ingestion path is selected, regenerate the
 authorized-user file with the core scopes plus these Chat scopes before
 enabling it. The Chat app service-account credential remains separate.
+
+### Alternative: OAuth user credential instead of a service account
+
+Google's Chat API documents two ways for an app to authenticate — see
+["Authentication types for Google Chat
+API"](https://developers.google.com/workspace/chat/authenticate-authorize):
+**app authentication** (a service account, step 1 above, the recommended and
+best-tested path) and **user authentication** (an OAuth user credential).
+`credentials.load_google_chat_credentials` accepts either: point
+`ATTUNE_CHAT_CREDENTIALS_FILE` at a JSON file whose `type` is
+`"service_account"` (unchanged) or `"authorized_user"` (new).
+
+To produce the OAuth user credential without ever creating a service account:
+
+1. Create an OAuth **Desktop app** client for the Chat app in the same Google
+   Cloud project (a client, not a service account — no IAM key creation
+   involved), and download its client-secret JSON.
+2. Run `attune init` and, at the "Google Chat app service-account or OAuth
+   JSON" prompt, give that client-secret path. When asked to run the
+   Chat-scoped consent flow, answer yes and **sign in with the Chat app's own
+   Google account, not the principal's mailbox account** — this credential
+   must stay a distinct identity from `ATTUNE_GOOGLE_CREDENTIALS_FILE`, and
+   `attune doctor` refuses to start if the two paths are ever the same file.
+3. `attune init` saves the resulting authorized-user JSON as
+   `google_chat_authorized_user.json` in the data directory and writes its
+   path into `ATTUNE_CHAT_CREDENTIALS_FILE`.
+
+**Honest limitation:** this project has not exercised the user-authentication
+path against a live Chat app with interactive Cards (approval buttons).
+Plain-text messages (briefs, notifications) should behave identically either
+way, since `spaces.messages.create` does not distinguish caller identity type.
+Whether a button click on a user-authored message still routes to the app's
+configured interaction endpoint is a question about Google's current Chat
+platform behavior, not about this codebase — confirm it against Google's own
+documentation (linked above) before relying on it for approval cards in
+production; if in doubt, keep interactive approvals on Slack and use Chat for
+read-only briefs and notifications.
 
 ## 10. Create the Compute Engine VM
 
