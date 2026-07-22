@@ -3181,3 +3181,78 @@ that closes that gap — Terraform wiring only, no activation.
   already had a working `if __name__ == "__main__": main()` shim, so the
   one permissible Python change this task's scope allowed (a tiny
   `__main__` shim) turned out not to be needed at all.
+
+## 2026-07-21 — Google Chat app identity: an OAuth user credential as a service-account alternative
+
+An operator asked how to run self-hosted Google Chat when their
+organization does not permit creating IAM service-account keys —
+`docs/deployment.md`'s Google Chat section previously had exactly one path
+(step 1: "create a service account for the Chat app and download its JSON
+key"), and `credentials.load_google_chat_credentials` hard-rejected
+anything else.
+
+- **What actually needs a service account, and what doesn't.** Reading
+  Google Chat — the interaction-command poll, `chat_events.py`'s Workspace
+  Events subscriptions, and Phase 2's attended-source ingestion
+  (`ingestion/sources.py::poll_chat_source`) — already ran on the
+  principal's own Google OAuth credential (`runtime.py`'s
+  `resolved_credentials`, the same object used for Gmail/Calendar), not on
+  `load_google_chat_credentials` at all. Only *sending* — briefs,
+  approvals, notifications, and interaction replies, via
+  `make_chat_send_fn` — went through the service-account-only loader. That
+  loader's own docstring already named this exact gap: "Proactive Cards v2
+  use a separate app-auth credential and chat.bot (**not wired yet**)."
+- **The alternative, not a workaround.** Google's Chat API documents two
+  supported authentication types for an app: app authentication (service
+  account) and user authentication (an OAuth user credential) — see
+  "Authentication types for Google Chat API" at
+  developers.google.com/workspace/chat/authenticate-authorize.
+  `load_google_chat_credentials` now detects `type: "authorized_user"` in
+  `ATTUNE_CHAT_CREDENTIALS_FILE` the same way `load_google_credentials`
+  already detects it for Gmail/Calendar, requesting `SCOPES_CHAT`
+  (`chat.messages`, `chat.spaces.readonly`) instead of the app-only
+  `chat.bot` scope. `make_chat_send_fn` needed no change at all — it only
+  ever called `googleapiclient.discovery.build("chat", "v1",
+  credentials=...)`, which never inspected the credential's type.
+- **Design rule 4 still holds: a second, distinct credential, not a
+  mechanism requirement.** `design.md`'s "proactive messages use a separate
+  app service account" is reworded to "a separate app identity — a
+  dedicated service account by default, or … a dedicated OAuth user
+  credential" — the invariant being protected is that Chat authorship is
+  never the principal's Gmail/Calendar OAuth grant reused, not that the
+  credential object must specifically be a GCP IAM service-account key.
+  `attune doctor`'s `check_channel_routes` now FAILs outright if
+  `ATTUNE_CHAT_CREDENTIALS_FILE` and `ATTUNE_GOOGLE_CREDENTIALS_FILE`
+  resolve to the same path, regardless of which credential type either
+  one is — a structural backstop for the invariant, not just documentation
+  of it.
+- **`attune init` produces the alternative, it doesn't just accept it.**
+  `cli/init_cmd.py`'s `_chat_credentials_step` mirrors
+  `_google_credentials_step`'s existing "is this a downloaded OAuth client?
+  offer to run the consent flow" pattern: given an OAuth Desktop-client
+  JSON, it offers a Chat-scoped consent flow (reusing
+  `_run_oauth_flow`, generalized with optional `scopes`/`filename`
+  parameters so the Gmail flow's exact behavior — and its existing test —
+  are unchanged), explicitly prompts the operator to sign in with the
+  Chat app's own Google account rather than the principal's, and saves the
+  result to a distinct `google_chat_authorized_user.json`, warning inline
+  if it ever matches the Gmail/Calendar file (Doctor is the hard gate;
+  `init` is advisory, the established split throughout this file).
+- **Honest limitation, stated in both `credentials.py`'s docstring and
+  `deployment.md`.** This project has not exercised the user-authentication
+  path against a live Chat app with interactive Cards — whether a button
+  click on a user-authored message still reaches the app's configured
+  interaction endpoint is a question about Google's current platform
+  behavior, not this codebase, and operators are pointed at Google's own
+  documentation to confirm it before relying on it for approval cards
+  rather than briefs/notifications alone.
+- **Verification.** New tests: `test_credentials.py` (service-account path
+  unchanged, the new OAuth-user path, unknown-type still raises);
+  `test_cli.py` (the same-path collision FAIL, a distinct-paths PASS
+  regression, and an end-to-end scripted `run_init` test proving the
+  Chat-scoped flow is invoked with `SCOPES_CHAT` and a distinct filename).
+  Full offline suite: 1927 passed, 57 skipped (was 1920; seven new tests,
+  zero regressions). `ruff check` on every touched file: identical to the
+  pre-change baseline (two pre-existing, unrelated findings in
+  `test_credentials.py`, confirmed via `git stash` diff) — nothing new
+  introduced.

@@ -89,9 +89,14 @@ arguments, and enforces the maximum risk tier. Successful history cannot grant
 authority beyond that product-defined ceiling.
 
 Google Chat app messages and card actions arrive through its verified callback;
-proactive messages use a separate app service account. Google Workspace OAuth
-is not reused as Chat app authentication. Sender allowlists and destination
-visibility acknowledgement are mandatory safety controls.
+proactive messages use a separate app identity — a dedicated service account
+by default, or (for organizations that disallow creating IAM service-account
+keys) a dedicated OAuth user credential obtained the same way as the
+principal's Gmail/Calendar credential but scoped to Chat and saved to its own
+file. Either way, Google Workspace OAuth is not reused as Chat app
+authentication: the Chat identity is always a second, distinct credential.
+Sender allowlists and destination visibility acknowledgement are mandatory
+safety controls.
 
 ## Workflow and data model
 

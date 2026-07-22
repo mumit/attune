@@ -199,3 +199,87 @@ def test_missing_credentials_file_raises(google_mocks):
     )
     with pytest.raises(FileNotFoundError):
         load_google_credentials(settings)
+
+
+# ---------------------------------------------------------------------------
+# Google Chat app identity (credentials.load_google_chat_credentials) —
+# service account (default) or an OAuth user credential (the alternative
+# for organizations that disallow creating IAM service-account keys).
+# ---------------------------------------------------------------------------
+
+def test_chat_service_account_creds_loaded(google_mocks):
+    sa_mod, _, _, tmp_path = google_mocks
+    cred_file = tmp_path / "chat_sa.json"
+    sa_info = {"type": "service_account", "project_id": "chat"}
+    cred_file.write_text(json.dumps(sa_info))
+
+    from attune.credentials import SCOPE_CHAT_BOT, load_google_chat_credentials
+    from attune.config import Settings
+
+    settings = Settings.from_env(
+        {"ATTUNE_WORKSPACE_BACKEND": "mcp",
+         "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": "",
+         "ATTUNE_CHAT_CREDENTIALS_FILE": str(cred_file)}
+    )
+    creds = load_google_chat_credentials(settings)
+
+    assert isinstance(creds, _FakeSACreds)
+    assert creds.info == sa_info
+    assert creds.scopes == [SCOPE_CHAT_BOT]
+
+
+def test_chat_oauth_user_creds_loaded_as_service_account_alternative(google_mocks):
+    """Orgs that disallow creating service-account keys can point
+    ATTUNE_CHAT_CREDENTIALS_FILE at an OAuth user credential instead —
+    the same on-disk shape `attune init`'s Chat-scoped consent flow
+    produces (cli/init_cmd.py's `_chat_credentials_step`)."""
+    _, user_creds_mod, _, tmp_path = google_mocks
+    cred_file = tmp_path / "chat_user.json"
+    user_info = {
+        "type": "authorized_user", "client_id": "c", "client_secret": "s",
+        "refresh_token": "r",
+    }
+    cred_file.write_text(json.dumps(user_info))
+
+    from attune.credentials import load_google_chat_credentials
+    from attune.config import Settings
+
+    settings = Settings.from_env(
+        {"ATTUNE_WORKSPACE_BACKEND": "mcp",
+         "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": "",
+         "ATTUNE_CHAT_CREDENTIALS_FILE": str(cred_file)}
+    )
+    creds = load_google_chat_credentials(settings)
+
+    assert isinstance(creds, _FakeUserCreds)
+    assert creds.info == user_info
+
+
+def test_chat_credentials_missing_path_raises(google_mocks):
+    from attune.credentials import load_google_chat_credentials
+    from attune.config import Settings
+
+    settings = Settings.from_env(
+        {"ATTUNE_WORKSPACE_BACKEND": "mcp",
+         "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": ""}
+        # no ATTUNE_CHAT_CREDENTIALS_FILE
+    )
+    with pytest.raises(ValueError, match="ATTUNE_CHAT_CREDENTIALS_FILE"):
+        load_google_chat_credentials(settings)
+
+
+def test_chat_credentials_unknown_type_raises(google_mocks):
+    _, _, _, tmp_path = google_mocks
+    cred_file = tmp_path / "chat_bad.json"
+    cred_file.write_text(json.dumps({"type": "not_a_real_type"}))
+
+    from attune.credentials import load_google_chat_credentials
+    from attune.config import Settings
+
+    settings = Settings.from_env(
+        {"ATTUNE_WORKSPACE_BACKEND": "mcp",
+         "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": "",
+         "ATTUNE_CHAT_CREDENTIALS_FILE": str(cred_file)}
+    )
+    with pytest.raises(ValueError, match="service account.*OAuth user credential"):
+        load_google_chat_credentials(settings)

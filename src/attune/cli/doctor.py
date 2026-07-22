@@ -40,6 +40,8 @@ def _qdrant_ready_url(settings) -> str:
 
 def check_channel_routes(settings) -> tuple[str, str]:
     """Validate that every selected route has usable local configuration."""
+    import os
+
     routed = (
         settings.brief_channels
         | settings.notification_channels
@@ -71,6 +73,22 @@ def check_channel_routes(settings) -> tuple[str, str]:
             errors.append("Google Chat routes require ATTUNE_CHAT_SPACE")
         if not settings.chat_credentials_file:
             errors.append("Google Chat routes require ATTUNE_CHAT_CREDENTIALS_FILE")
+        elif (
+            settings.google_credentials_file
+            and os.path.abspath(settings.chat_credentials_file)
+            == os.path.abspath(settings.google_credentials_file)
+        ):
+            # design.md rule 4: the Chat app identity (service account OR,
+            # per credentials.py, an OAuth user credential for orgs that
+            # disallow service-account keys) must never be the same
+            # credential as the principal's Gmail/Calendar OAuth grant.
+            errors.append(
+                "ATTUNE_CHAT_CREDENTIALS_FILE must not be the same file as "
+                "ATTUNE_GOOGLE_CREDENTIALS_FILE — the Chat app identity must "
+                "be a separate credential (a distinct service account, or a "
+                "distinct OAuth user credential); see "
+                "docs/deployment.md's Google Chat section"
+            )
         if (
             "google_chat" in settings.interaction_channels
             and not settings.chat_allowed_users
