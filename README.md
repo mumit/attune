@@ -131,9 +131,14 @@ cloud mutations.
   boundaries, control requirements, red-team cases, and hosted launch gates.
 - **I'm implementing an MCP server** — use the
   [versioned Workspace contract](docs/mcp-contract.md).
+- **I want the plan** — the active product plan is
+  [plan-2026-h2.md](docs/plan-2026-h2.md), evidenced by the
+  [landscape review](docs/landscape-2026.md) (how Attune compares to what
+  shipped elsewhere in 2026). Open implementation prompts are
+  [24–36](docs/build-prompts/README.md).
 - **I want the design history** — read [Design](docs/design.md), the
   [durable decisions record](docs/decisions.md), and the
-  [roadmap](docs/roadmap.md), plus the point-in-time review trilogy: a full
+  [roadmap](docs/roadmap.md), plus the 2026-07-18 review trilogy: a full
   [current state](docs/current-state.md) review, the
   [gap analysis](docs/gap-analysis.md) against the product goal, and the
   [future-state plan](docs/future-state.md).

@@ -1,5 +1,15 @@
 # Roadmap
 
+> **Superseded for product sequencing.** The active plan is
+> [`plan-2026-h2.md`](plan-2026-h2.md) (2026-07-31), whose evidence base is the
+> [landscape review](landscape-2026.md). `future-state.md`'s Phases 1–6 are
+> recorded as shipped in [`decisions.md`](decisions.md), and
+> `gap-analysis.md`'s G9 is stale — `DECLINE_INVITE`, `RESCHEDULE`, and `LABEL`
+> are implemented. The "Later" section below is also revised: the **Graphiti
+> migration path is dropped** (see landscape §5 — bitemporal metadata on Mem0
+> records instead), and **voice moves behind the attention-budget work**. This
+> file remains authoritative for the hosted assurance sequence.
+
 A full 2026-07-18 review of the implementation is recorded in
 [`current-state.md`](current-state.md); its
 [gap analysis](gap-analysis.md) and the phased
