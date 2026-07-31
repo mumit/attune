@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Daily, so a time-dependent regression (e.g. a non-hermetic clock)
+    # surfaces within 24h instead of waiting on the next PR.
+    - cron: "0 7 * * *"
 
 jobs:
   test:
