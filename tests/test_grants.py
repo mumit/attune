@@ -30,11 +30,13 @@ class FakeAuditLog:
     def __init__(self, entries=None):
         self.records: list[dict] = []
         self._entries = entries or []
+        self.query_calls = 0
 
     def record(self, **kwargs):
         self.records.append(kwargs)
 
     def query(self, **kwargs):
+        self.query_calls += 1
         return self._entries
 
 
@@ -471,6 +473,44 @@ def test_demotion_examines_scoped_grants_and_preserves_scope(tmp_path):
     assert suggestions[0].scope == scope
     assert "routine" in suggestions[0].render()
     assert "--priority routine" in suggestions[0].render()
+
+
+class _CountingAuditLog:
+    """Wraps a real audit log and counts .query() calls — used to prove
+    suggest_demotions no longer runs a full audit-log scan per grant."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.query_calls = 0
+
+    def record(self, **kwargs):
+        return self._inner.record(**kwargs)
+
+    def query(self, **kwargs):
+        self.query_calls += 1
+        return self._inner.query(**kwargs)
+
+
+def test_suggest_demotions_queries_audit_log_once_regardless_of_grant_count(tmp_path):
+    """Perf: _recent_decisions used to run a full, unbounded audit_log.query()
+    scan once per granted scope above PROPOSE. With several scoped grants on
+    the same (action, domain), the audit log must be queried exactly once
+    per suggest_demotions call, not once per grant (defect #9, roadmap
+    prompt 24)."""
+    from attune.orchestrator import suggest_demotions
+
+    rows = [("approved", "approve") for _ in range(10)]
+    log = _CountingAuditLog(_audit_file_with_routed_decisions(tmp_path, rows))
+
+    matrix = default_matrix()
+    for tier in ("routine", "urgent", "low"):
+        matrix = matrix.grant(
+            Action.DRAFT_REPLY, Domain.MAIL, Rung.ACT_NOTIFY,
+            scope=GrantScope(priorities=frozenset({tier})),
+        )
+
+    suggest_demotions(log, matrix)
+    assert log.query_calls == 1
 
 
 def test_demotion_window_is_last_ten_decisions_not_full_history(tmp_path):

@@ -548,18 +548,19 @@ def _scope_cli_flags(scope: GrantScope | None) -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
-def _recent_decisions(
-    audit_log: Any, action: Action, domain: Domain, *, limit: int,
-) -> list[tuple[str, str]]:
-    """The last ``limit`` human decisions recorded for (action, domain),
-    oldest-first trimmed to the most recent ``limit`` — reuses
-    ``track_records``' event vocabulary (``autonomy_gate`` ties action/
-    domain + ``routed_to`` to a thread_id; ``human_decision``/
-    ``approval_ignored`` supply the decision) but windows by COUNT, not
-    calendar time (see :data:`DEMOTION_WINDOW_DECISIONS`).
+def _decisions_by_key(
+    audit_log: Any,
+) -> dict[tuple[Action, Domain], list[tuple[str, str, str]]]:
+    """Every recorded human decision, grouped by (action, domain) and sorted
+    oldest-first — one full audit-log fold, reused across every granted
+    scope in :func:`suggest_demotions` instead of re-querying (and
+    re-folding) the whole log once per grant per digest run.
 
-    Each returned entry is ``(decision, routed_to)`` — ``routed_to`` is
-    "approve" or "auto_apply" per the gate's own audit event, letting
+    Reuses ``track_records``' event vocabulary (``autonomy_gate`` ties
+    action/domain + ``routed_to`` to a thread_id; ``human_decision``/
+    ``approval_ignored`` supply the decision). Each row is
+    ``(ts, decision, routed_to)`` — ``routed_to`` is "approve" or
+    "auto_apply" per the gate's own audit event, letting
     :func:`suggest_demotions` tell an ordinary approval-card rejection
     apart from a rejection recorded against an auto-applied effect (a
     materially stronger signal).
@@ -579,15 +580,31 @@ def _recent_decisions(
         elif entry.event == "approval_ignored":
             outcome.setdefault(entry.thread_id, "ignored")
 
-    rows = []
+    by_key: dict[tuple[Action, Domain], list[tuple[str, str, str]]] = {}
     for tid, (a, d, routed_to, ts) in gate.items():
-        if (a, d) != (action, domain):
-            continue
         decision = outcome.get(tid)
         if decision not in ("approved", "edited", "rejected", "ignored"):
             continue  # still pending, or auto_applied with no later decision
-        rows.append((ts, decision, routed_to))
-    rows.sort(key=lambda r: r[0])
+        by_key.setdefault((a, d), []).append((ts, decision, routed_to))
+    for rows in by_key.values():
+        rows.sort(key=lambda r: r[0])
+    return by_key
+
+
+def _recent_decisions(
+    by_key: dict[tuple[Action, Domain], list[tuple[str, str, str]]],
+    action: Action,
+    domain: Domain,
+    *,
+    limit: int,
+) -> list[tuple[str, str]]:
+    """The last ``limit`` decisions for (action, domain) out of ``by_key``
+    (see :func:`_decisions_by_key`), oldest-first trimmed to the most
+    recent ``limit`` — windows by COUNT, not calendar time (see
+    :data:`DEMOTION_WINDOW_DECISIONS`). Each returned entry is
+    ``(decision, routed_to)``.
+    """
+    rows = by_key.get((action, domain), [])
     return [(decision, routed_to) for _, decision, routed_to in rows[-limit:]]
 
 
@@ -618,12 +635,13 @@ def suggest_demotions(
     wrong" — is already covered, see docs/decisions.md).
     """
     suggestions: list[DemotionSuggestion] = []
+    by_key = _decisions_by_key(audit_log)
     for (action, domain), entries in matrix.grants.items():
         for sg in entries:
             if sg.rung <= Rung.PROPOSE:
                 continue
             recent = _recent_decisions(
-                audit_log, action, domain, limit=window_decisions
+                by_key, action, domain, limit=window_decisions
             )
             rejected = sum(1 for decision, _ in recent if decision == "rejected")
             auto_rejected = any(
