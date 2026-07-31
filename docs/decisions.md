@@ -2,6 +2,108 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-31 — Repair: green suite, hermetic clocks, retrieval precision (Phase P0, build prompt 24)
+
+Nine independent defects found by the H2 landscape review, each landed as its
+own commit (`docs/plan-2026-h2.md` Phase P0): a hermeticity bug, two CI/eval
+wiring gaps, a missing relevance floor on retrieval, an unbounded embedding
+input, and four performance defects where a hot path re-did O(n) or O(1
+network round trip) work that should have run once. None changed retention
+semantics, the audit hash-chain format, or the importance rule engine's
+outputs for identical inputs.
+
+- **Hermeticity rule: every clock reaches the code as a parameter, never a
+  bare `datetime.now()`/`time.time()` inside logic that a test needs to
+  freeze.** `JsonAttentionStore` called `datetime.now(timezone.utc)` directly
+  inside a retention-filter comparison instead of accepting the caller's
+  `now`, so a system clock 60+ days ahead of a fixture's recorded timestamps
+  silently changed which items survived — a bug that no test at a fixed
+  system time could ever catch. Fixed to take `now` the same way every other
+  clock-sensitive function in this codebase already does (`now or
+  datetime.now(timezone.utc)`), and pinned with a regression test that
+  fails if the direct call is reintroduced. This is now the enforced house
+  rule: acceptance for this prompt required a full green run with the system
+  clock set 60 days ahead, specifically to catch this class of bug rather
+  than assert it away.
+- **Retrieval precision, two defects, one rationale.** Memory search had no
+  relevance floor (`ATTUNE_MEMORY_MIN_SCORE`, wired through to `min_score` at
+  all four `Mem0Store.search` call sites: draft-approve's `retrieve` node,
+  triage's past-reactions garnish, the brief's meeting prep, and the
+  conversational fallback) and no bound on the embedding query text
+  (`submit_gmail_thread` built `incoming_summary` from a full, unbounded
+  decoded body; the draft-approve graph's `retrieve` node embedded that same
+  string as its search query). Both are the same underlying concern — the
+  set of memories a prompt sees should be *relevant*, not merely *whatever a
+  raw vector search returned* — so they're recorded together even though
+  they landed as separate commits. `retrieval_query` (subject + sender + a
+  short lead of the body) is now distinct from `incoming_summary` (which
+  still needs the fuller, but still capped, text for the model prompt
+  itself); other callers with already-short summaries fall back to
+  `incoming_summary` unchanged.
+- **CI must actually re-run, and the live eval must actually reach the eval
+  step.** `.github/workflows/ci.yml` had no `schedule:` trigger, so once
+  nothing touched the tracked paths, CI simply stopped running — a green
+  badge that had quietly become an artifact of history rather than a live
+  signal. `.github/workflows/memory-eval.yml` was missing
+  `ATTUNE_EMBEDDING_DIMENSIONS`, so the live memory eval raised before it
+  ever reached the step meant to measure retrieval quality. Both are
+  wiring-only fixes; neither changes what either workflow measures.
+- **Two caches, one pattern: cache raw data behind a cheap external-change
+  check, invalidate per-write, never cache a computed result that a caller's
+  `now` should still be free to reinterpret.** `JsonlAuditLog._last_hash()`
+  linearly rescanned the entire JSONL file on every `record()` call — O(n)
+  per append, O(n²) for a run of n appends — to find the tail hash for the
+  next entry's `prev_hash`. `JsonImportanceProfile.assess()` (local) and
+  `PostgresImportanceProfile.assess()` (hosted) each redid a full reload (a
+  JSON file re-parse, or two DB round trips) on every call, even though one
+  triage/brief run assesses the same sender repeatedly. All three now cache
+  behind a cheap staleness check — the audit log's cache is keyed by file
+  *size*, the importance profile's local cache by file *mtime*, the hosted
+  profile's cache per sender hash — because in every case the guarded state
+  can legitimately be written by another process or instance (`fslock`
+  permits concurrent writers), so a cache must detect an external change
+  rather than trust itself blindly. The importance caches store the raw,
+  undecayed signal rows rather than a computed `TierAssessment`/tier, so two
+  calls passing different `now` values (hermetic-clock tests, the +60-day
+  acceptance check) still get decay filtering applied fresh at read time
+  instead of freezing to whichever `now` happened to populate the cache
+  first. Write paths (`record()`, `record_signal`/`pin`/`unpin`) only update
+  the cache *after* the underlying write succeeds, and mutate a copy of the
+  cached data rather than the cached object itself, so a disk/DB failure
+  partway through a write can never leave the cache holding state that was
+  never actually persisted.
+  - Audit log append throughput, 10,000 sequential appends to one file:
+    ~1,332 appends/sec before (7.509s total) → ~11,353 appends/sec after
+    (0.881s total), roughly 8.5x.
+  - Importance-profile file reads for one brief run's assess() call pattern
+    (36 `assess()` calls: 20 unread-mail senders, 10 correlation/meeting-prep
+    lookups, 6 waiting-on counterparts, drawn from 15 distinct senders):
+    36 file reads before → 1 file read after.
+- **A digest must fold the audit log once, not once per grant.**
+  `suggest_demotions` called `_recent_decisions`, which ran its own full
+  `audit_log.query()` and re-built the same gate/outcome join, once per
+  granted scope above `PROPOSE` — a full audit-log scan per grant per digest
+  run. Split into `_decisions_by_key()` (the one full query + fold, grouping
+  decisions by `(action, domain)`) and a trimmed-down `_recent_decisions()`
+  that just slices the already-grouped rows to the last `window_decisions`.
+  Deliberately did **not** add a `since` bound to that single query, unlike
+  `track_records`' calendar-windowed query for graduation: the demotion
+  window is a *count* of recent decisions, not a time span, and bounding the
+  query by calendar time could silently drop decisions that would otherwise
+  count toward reaching that number, changing which grants get flagged for a
+  sparsely-active (action, domain) pair. The fix is purely "query once,
+  reuse across grants," not "query less."
+- **Retrieved memory text must always carry its provenance framing, at every
+  site that turns a `MemoryRecord` into prompt text.** `brief._meeting_prep`
+  was the one retrieval site that extended prep notes with a memory's raw
+  `.text`, skipping `frame_memory_text` (the correction-vs-explicit-teaching
+  annotation already applied at every other retrieval site — dispatcher's
+  past-reactions block, triage, draft-approve's `retrieve` node). Fixed to
+  match; a memory whose provenance traces to a correction now reads as
+  lower-confidence than one the principal explicitly taught in the brief's
+  meeting prep too, closing the one gap where that distinction silently
+  disappeared.
+
 ## 2026-07-19 — Per-tenant model configuration and usage metering (Phase 6, hosted review gaps #1/#2)
 
 Closes `docs/future-state.md` Phase 6's "per-tenant model configuration and
