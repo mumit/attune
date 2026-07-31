@@ -40,6 +40,7 @@ jobs:
           ATTUNE_EMBEDDING_BASE_URL: ${{ secrets.ATTUNE_EMBEDDING_BASE_URL }}
           ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
           ATTUNE_EMBEDDING_MODEL: ${{ secrets.ATTUNE_EMBEDDING_MODEL }}
+          ATTUNE_EMBEDDING_DIMENSIONS: ${{ secrets.ATTUNE_EMBEDDING_DIMENSIONS }}
         # Secrets can't be referenced directly in `if:` conditionals, so
         # they're exported to the environment above and checked here; a
         # missing gateway configuration skips the job cleanly (exit 0 with
@@ -47,8 +48,9 @@ jobs:
         run: |
           if [ -z "$ATTUNE_LLM_API_KEY" ] || [ -z "$ATTUNE_LLM_BASE_URL" ] || \
              [ -z "$ATTUNE_EMBEDDING_API_KEY" ] || [ -z "$ATTUNE_EMBEDDING_BASE_URL" ] || \
-             [ -z "$ATTUNE_MODEL_DEFAULT" ] || [ -z "$ATTUNE_EMBEDDING_MODEL" ]; then
-            echo "::notice::Live memory eval secrets are not configured (ATTUNE_LLM_API_KEY, ATTUNE_LLM_BASE_URL, ATTUNE_EMBEDDING_API_KEY, ATTUNE_EMBEDDING_BASE_URL, ATTUNE_MODEL_DEFAULT, ATTUNE_EMBEDDING_MODEL) — skipping this run."
+             [ -z "$ATTUNE_MODEL_DEFAULT" ] || [ -z "$ATTUNE_EMBEDDING_MODEL" ] || \
+             [ -z "$ATTUNE_EMBEDDING_DIMENSIONS" ]; then
+            echo "::notice::Live memory eval secrets are not configured (ATTUNE_LLM_API_KEY, ATTUNE_LLM_BASE_URL, ATTUNE_EMBEDDING_API_KEY, ATTUNE_EMBEDDING_BASE_URL, ATTUNE_MODEL_DEFAULT, ATTUNE_EMBEDDING_MODEL, ATTUNE_EMBEDDING_DIMENSIONS) — skipping this run."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -63,6 +65,7 @@ jobs:
           ATTUNE_EMBEDDING_BASE_URL: ${{ secrets.ATTUNE_EMBEDDING_BASE_URL }}
           ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
           ATTUNE_EMBEDDING_MODEL: ${{ secrets.ATTUNE_EMBEDDING_MODEL }}
+          ATTUNE_EMBEDDING_DIMENSIONS: ${{ secrets.ATTUNE_EMBEDDING_DIMENSIONS }}
           ATTUNE_QDRANT_HOST: "localhost"
           ATTUNE_QDRANT_PORT: "6333"
         run: pytest tests/test_memory_quality.py -q -k live
