@@ -65,11 +65,15 @@ class SourceChangedError(Exception):
     approval must not act on it (review finding #6)."""
 
 
-def _audit(event: str, **fields: Any) -> dict[str, Any]:
+def _audit(event: str, *, now: Any = None, **fields: Any) -> dict[str, Any]:
     """A single structured reason-for-action entry (design 4.7)."""
     from datetime import datetime, timezone
 
-    return {"event": event, "ts": datetime.now(timezone.utc).isoformat(), **fields}
+    return {
+        "event": event,
+        "ts": (now or datetime.now(timezone.utc)).isoformat(),
+        **fields,
+    }
 
 
 def build_draft_approve_graph(

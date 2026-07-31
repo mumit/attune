@@ -961,7 +961,7 @@ def test_render_scope_matches_show_matrix_format():
 def test_cli_record_renders_track_record(tmp_path, capsys):
     settings = _settings(tmp_path)
     log = _audit_file_with_decisions(tmp_path, ["approved", "edited"])
-    code = run_autonomy_record(settings=settings, audit_log=log)
+    code = run_autonomy_record(settings=settings, audit_log=log, now=NOW)
     assert code == 0
     out = capsys.readouterr().out
     assert "1 approved unedited, 1 edited" in out
@@ -991,7 +991,7 @@ def test_chat_autonomy_command_shows_posture_never_grants(tmp_path):
     replies: list[str] = []
     handle_slack_message(
         app, text="autonomy", user_id="U1", post_text=replies.append,
-        audit_log=log, memory_ui={},
+        audit_log=log, memory_ui={}, now=NOW,
     )
 
     assert "draft_reply" in replies[0]

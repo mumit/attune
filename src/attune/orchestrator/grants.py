@@ -821,7 +821,7 @@ def resolve_autonomy_card(
         cooldown_state.remove_card(thread_id)
         _audit_grant_event(
             audit_log, "autonomy_card_refused", action, domain, user_id,
-            to_rung=int(to_rung), reason="ceiling",
+            to_rung=int(to_rung), reason="ceiling", now=now,
         )
         return {
             "card_kind": "autonomy", "resolution": "refused_ceiling",
@@ -845,7 +845,7 @@ def resolve_autonomy_card(
     cooldown_state.remove_card(thread_id)
     _audit_grant_event(
         audit_log, "autonomy_card_rejected", action, domain, user_id,
-        to_rung=int(to_rung),
+        to_rung=int(to_rung), now=now,
     )
     return {
         "card_kind": "autonomy", "resolution": "rejected",
@@ -904,6 +904,8 @@ def _audit_grant_event(
     action: Action,
     domain: Domain,
     user_id: str,
+    *,
+    now: datetime | None = None,
     **fields: Any,
 ) -> None:
     if audit_log is None:
@@ -913,7 +915,7 @@ def _audit_grant_event(
         workflow="autonomy",
         events=[{
             "event": event,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": (now or datetime.now(timezone.utc)).isoformat(),
             "action": action.value,
             "domain": domain.value,
             **fields,

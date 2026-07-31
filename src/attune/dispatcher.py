@@ -931,7 +931,7 @@ def handle_source_message(
         priority=triage.priority,
         mentions_principal=message.mentions_principal,
         thread_ref=message.thread_ref,
-    ))
+    ), now=message.ts)
 
     if triage.priority == Priority.URGENT and notify is not None:
         notify(
@@ -2014,7 +2014,7 @@ def _respond_to_message(
             )
         return
 
-    response = _autonomy_status(app_ctx, text, audit_log=audit_log)
+    response = _autonomy_status(app_ctx, text, audit_log=audit_log, now=now)
     if response is None:
         response = _try_memory_command(
             app_ctx, text, user_id,
@@ -2310,7 +2310,11 @@ def _chat_refusal(actor: str) -> str:
 
 
 def _autonomy_status(
-    app_ctx: AppContext, text: str, *, audit_log: Any = None
+    app_ctx: AppContext,
+    text: str,
+    *,
+    audit_log: Any = None,
+    now: datetime | None = None,
 ) -> str | None:
     """The chat "autonomy" command: show the posture + any graduation
     suggestions. **Show-only by design** — grant/revoke is CLI-only, because
@@ -2324,7 +2328,7 @@ def _autonomy_status(
     matrix = app_ctx.current_matrix()
     lines = ["Current autonomy posture:", show_matrix(matrix)]
     if audit_log is not None:
-        suggestions = suggest_graduations(audit_log, matrix)
+        suggestions = suggest_graduations(audit_log, matrix, now=now)
         if suggestions:
             lines.append("")
             lines.append("Earned-graduation suggestions (grants are CLI-only):")

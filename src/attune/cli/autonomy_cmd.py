@@ -168,12 +168,13 @@ def run_autonomy_record(
     settings: Any = None,
     audit_log: Any = None,
     out: Callable[[str], None] = print,
+    now: Any = None,
 ) -> int:
     from ..orchestrator import track_records
     from ..orchestrator.grants import parse_action, parse_domain
 
     settings, store, matrix, audit = _resolve(settings, audit_log)
-    records = track_records(audit)
+    records = track_records(audit, now=now)
     if action and domain:
         try:
             key = (parse_action(action), parse_domain(domain))

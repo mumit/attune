@@ -2383,7 +2383,7 @@ class _FakeAttentionStore:
     def __init__(self):
         self.items: list = []
 
-    def add(self, item) -> None:
+    def add(self, item, *, now=None) -> None:
         self.items.append(item)
 
     def recent(self, *, since=None, limit=None):

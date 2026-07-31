@@ -39,8 +39,8 @@ def _store(tmp_path):
 
 def test_add_and_recent_round_trips(tmp_path):
     store = _store(tmp_path)
-    store.add(_item(ts=T0, sender_ref="alice"))
-    store.add(_item(ts=T0 + timedelta(minutes=1), sender_ref="bob"))
+    store.add(_item(ts=T0, sender_ref="alice"), now=T0)
+    store.add(_item(ts=T0 + timedelta(minutes=1), sender_ref="bob"), now=T0)
 
     recent = store.recent()
     assert [it.sender_ref for it in recent] == ["bob", "alice"]  # newest first
@@ -50,8 +50,8 @@ def test_add_and_recent_round_trips(tmp_path):
 
 def test_recent_since_filters_older_items(tmp_path):
     store = _store(tmp_path)
-    store.add(_item(ts=T0, sender_ref="old"))
-    store.add(_item(ts=T0 + timedelta(hours=2), sender_ref="new"))
+    store.add(_item(ts=T0, sender_ref="old"), now=T0)
+    store.add(_item(ts=T0 + timedelta(hours=2), sender_ref="new"), now=T0)
 
     recent = store.recent(since=T0 + timedelta(hours=1))
     assert [it.sender_ref for it in recent] == ["new"]
@@ -60,7 +60,7 @@ def test_recent_since_filters_older_items(tmp_path):
 def test_recent_limit_caps_results(tmp_path):
     store = _store(tmp_path)
     for i in range(5):
-        store.add(_item(ts=T0 + timedelta(minutes=i), sender_ref=f"u{i}"))
+        store.add(_item(ts=T0 + timedelta(minutes=i), sender_ref=f"u{i}"), now=T0)
 
     recent = store.recent(limit=2)
     assert len(recent) == 2
@@ -71,9 +71,9 @@ def test_recent_limit_caps_results(tmp_path):
 def test_retention_window_drops_items_older_than_7_days(tmp_path):
     store = _store(tmp_path)
     old_ts = T0 - timedelta(days=RETENTION_DAYS + 1)
-    store.add(_item(ts=old_ts, sender_ref="stale"))
+    store.add(_item(ts=old_ts, sender_ref="stale"), now=T0)
     # A later add triggers the retention sweep on write.
-    store.add(_item(ts=T0, sender_ref="fresh"))
+    store.add(_item(ts=T0, sender_ref="fresh"), now=T0)
 
     recent = store.recent()
     assert [it.sender_ref for it in recent] == ["fresh"]
@@ -83,7 +83,7 @@ def test_item_cap_keeps_most_recent(tmp_path):
     store = _store(tmp_path)
     base = T0
     for i in range(MAX_ITEMS + 10):
-        store.add(_item(ts=base + timedelta(minutes=i), sender_ref=f"u{i}"))
+        store.add(_item(ts=base + timedelta(minutes=i), sender_ref=f"u{i}"), now=T0)
 
     recent = store.recent(limit=None)
     assert len(recent) == MAX_ITEMS
@@ -95,7 +95,7 @@ def test_item_cap_keeps_most_recent(tmp_path):
 
 def test_persists_across_store_instances(tmp_path):
     path = str(tmp_path / "attention.json")
-    JsonAttentionStore(path).add(_item(sender_ref="alice"))
+    JsonAttentionStore(path).add(_item(sender_ref="alice"), now=T0)
 
     reopened = JsonAttentionStore(path)
     assert [it.sender_ref for it in reopened.recent()] == ["alice"]
@@ -108,7 +108,7 @@ def test_empty_store_returns_no_items(tmp_path):
 
 def test_urgent_priority_round_trips(tmp_path):
     store = _store(tmp_path)
-    store.add(_item(priority=Priority.URGENT, mentions=True))
+    store.add(_item(priority=Priority.URGENT, mentions=True), now=T0)
     item = store.recent()[0]
     assert item.priority == Priority.URGENT
     assert item.mentions_principal is True
@@ -123,8 +123,8 @@ def test_concurrent_processes_serialize_via_fslock(tmp_path):
     store_a = JsonAttentionStore(path)
     store_b = JsonAttentionStore(path)
 
-    store_a.add(_item(sender_ref="from-a"))
-    store_b.add(_item(sender_ref="from-b", ts=T0 + timedelta(minutes=1)))
+    store_a.add(_item(sender_ref="from-a"), now=T0)
+    store_b.add(_item(sender_ref="from-b", ts=T0 + timedelta(minutes=1)), now=T0)
 
     senders = {it.sender_ref for it in JsonAttentionStore(path).recent()}
     assert senders == {"from-a", "from-b"}

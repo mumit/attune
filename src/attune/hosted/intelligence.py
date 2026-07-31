@@ -296,7 +296,7 @@ class PostgresAttentionStore:
         self._principal_id = principal_id
         self._hasher = reference_hasher
 
-    def add(self, item: AttentionItem) -> None:
+    def add(self, item: AttentionItem, *, now: datetime | None = None) -> None:
         if item.source not in {"slack", "google_chat"}:
             raise ValueError("attention item source must be slack or google_chat")
         if not isinstance(item.priority, Priority):
@@ -330,7 +330,9 @@ class PostgresAttentionStore:
                 )
                 # Retention window then item cap, in that order -- exactly
                 # JsonAttentionStore._bounded's own sequence and rationale.
-                retention_cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
+                retention_cutoff = (now or datetime.now(timezone.utc)) - timedelta(
+                    days=RETENTION_DAYS
+                )
                 cursor.execute(
                     """
                     DELETE FROM attune.attention_items

@@ -1518,7 +1518,7 @@ class _FakeAttentionStore:
     def __init__(self):
         self.items: list[AttentionItem] = []
 
-    def add(self, item: AttentionItem) -> None:
+    def add(self, item: AttentionItem, *, now=None) -> None:
         self.items.append(item)
 
     def recent(self, *, since=None, limit=None):

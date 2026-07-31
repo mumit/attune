@@ -147,7 +147,13 @@ class JsonPendingApprovals:
                 data[lg_tid]["status"] = STATUS_RESOLVED
                 self._save(data)
 
-    def claim(self, lg_tid: str, *, actor: str | None = None) -> bool | None:
+    def claim(
+        self,
+        lg_tid: str,
+        *,
+        actor: str | None = None,
+        now: datetime | None = None,
+    ) -> bool | None:
         """Cross-process atomic claim shared by Slack and Chat callbacks:
         the load-check-mutate-save sequence runs under both the in-process
         ``threading.RLock`` and the advisory ``fslock`` on ``path + ".lock"``
@@ -162,7 +168,7 @@ class JsonPendingApprovals:
                 return False
             entry["status"] = STATUS_RESOLVED
             entry["resolved_by"] = actor
-            entry["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            entry["resolved_at"] = (now or datetime.now(timezone.utc)).isoformat()
             self._save(data)
             return True
 

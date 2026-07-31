@@ -87,8 +87,12 @@ class AttentionItem:
 
 
 class AttentionStore(Protocol):
-    def add(self, item: AttentionItem) -> None:
-        """Record one item, applying retention + the item cap on write."""
+    def add(self, item: AttentionItem, *, now: datetime | None = None) -> None:
+        """Record one item, applying retention + the item cap on write.
+
+        ``now`` anchors the retention cutoff; absent, the wall clock is used
+        (production default). Callers that need hermetic tests inject it.
+        """
         ...
 
     def recent(
@@ -142,11 +146,11 @@ class JsonAttentionStore:
         self._path = path
         self._lock = threading.RLock()
 
-    def add(self, item: AttentionItem) -> None:
+    def add(self, item: AttentionItem, *, now: datetime | None = None) -> None:
         with self._lock, locked(self._path + ".lock"):
             items = self._load()
             items.append(_to_dict(item))
-            items = self._bounded(items)
+            items = self._bounded(items, now=now)
             self._save(items)
 
     def recent(
@@ -162,10 +166,13 @@ class JsonAttentionStore:
             items = items[:limit]
         return items
 
-    def _bounded(self, raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _bounded(
+        self, raw_items: list[dict[str, Any]], *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
         """Apply the retention window then the item cap (module docstring),
         oldest-first so the cap keeps the MOST RECENT ``MAX_ITEMS``."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=RETENTION_DAYS)
         kept = [
             raw for raw in raw_items
             if _from_dict(raw).ts >= cutoff
