@@ -765,6 +765,7 @@ def assemble_brief(
     pending: Any = None,
     snapshot_store: Any = None,
     approval_channel_name: str | None = None,
+    memory_min_score: float | None = None,
 ) -> Brief:
     """Read unread mail + today's events (+ prep and quiet threads) and
     produce a short summary.
@@ -827,7 +828,9 @@ def assemble_brief(
     )
     pending_tally = _pending_tally_line(pending, approval_channel_name)
 
-    meetings = _meeting_prep(connector, store, events, user_id=user_id)
+    meetings = _meeting_prep(
+        connector, store, events, user_id=user_id, min_score=memory_min_score
+    )
     waiting_on: list[EmailThread] = []
     if user_email:
         waiting_on = find_quiet_threads(
@@ -931,6 +934,7 @@ def _meeting_prep(
     events: list[CalendarEvent],
     *,
     user_id: str,
+    min_score: float | None = None,
 ) -> list[MeetingPrep]:
     """A line or two of context per meeting: remembered facts (memory) plus
     the most recent related thread (one capped metadata query per event —
@@ -941,7 +945,9 @@ def _meeting_prep(
         if store is not None:
             query = " ".join([e.summary, *e.attendees[:3]]).strip()
             try:
-                mems = store.search(query, user_id=user_id, limit=2)
+                mems = store.search(
+                    query, user_id=user_id, limit=2, min_score=min_score
+                )
             except Exception:  # noqa: BLE001 — prep is garnish, never fatal
                 mems = []
             notes.extend(m.text for m in mems)

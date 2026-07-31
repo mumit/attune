@@ -78,6 +78,7 @@ planned re-embedding/migration.
 | `ATTUNE_EMBEDDING_DIMENSIONS` | blank | Required vector length. Use `1536` with the default `text-embedding-3-small`, or `3072` with full-size `text-embedding-3-large`. It must match the model output and existing Qdrant collection. |
 | `ATTUNE_QDRANT_HOST` | `127.0.0.1` | Durable Qdrant server host used by both runtime and Doctor. Keep the default when Attune runs on the host; the Compose assistant overrides it with the service name `qdrant`. Embedded Qdrant is intentionally not an implicit fallback. |
 | `ATTUNE_QDRANT_PORT` | `6333` | Qdrant HTTP port used by both runtime and Doctor. Keep `6333` unless the private service uses another port. |
+| `ATTUNE_MEMORY_MIN_SCORE` | blank (no floor) | Relevance floor applied to every memory retrieval (drafting, triage, conversation, meeting prep). Records scoring below it never reach a prompt. |
 
 ## Principal and runtime
 

@@ -58,6 +58,16 @@ def test_qdrant_server_accepts_compose_service_override():
     assert s.qdrant_port == 7333
 
 
+def test_memory_min_score_defaults_to_no_floor():
+    s = Settings.from_env({})
+    assert s.memory_min_score is None
+
+
+def test_memory_min_score_parses_from_env():
+    s = Settings.from_env({"ATTUNE_MEMORY_MIN_SCORE": "0.5"})
+    assert s.memory_min_score == 0.5
+
+
 def test_owner_private_slack_dm_needs_no_visibility_ack():
     for destination in ("U0123", "D0123"):
         Settings.from_env({

@@ -86,6 +86,7 @@ def build_draft_approve_graph(
     apply_fn: Callable[[dict[str, Any]], str | None] | None = None,
     matrix_provider: Callable[[], PermissionMatrix] | None = None,
     importance_profile: Any = None,
+    min_score: float | None = None,
 ):
     """Compile the draft-and-approve graph.
 
@@ -113,6 +114,8 @@ def build_draft_approve_graph(
             already feeds ``store`` via ``capture_action_signal``, so
             learning stays one behavior with two stores. Absent, or with no
             ``sender`` in state, capture behaves exactly as before.
+        min_score: relevance floor passed to ``store.search`` (see
+            ``Settings.memory_min_score``); ``None`` applies no floor.
     """
     try:
         from langgraph.graph import END, START, StateGraph
@@ -142,7 +145,10 @@ def build_draft_approve_graph(
         ranking are unaffected; see ``memory.signals.frame_memory_text``.
         """
         mems = store.search(
-            state["incoming_summary"], user_id=state["user_id"], limit=8
+            state["incoming_summary"],
+            user_id=state["user_id"],
+            limit=3,
+            min_score=min_score,
         )
         snippets = [
             frame_memory_text(m.text, getattr(m, "metadata", None)) for m in mems

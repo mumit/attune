@@ -122,9 +122,11 @@ class FakeStore:
     def __init__(self, results=None):
         self._results = results or []
         self.queries: list[str] = []
+        self.min_scores: list[float | None] = []
 
     def search(self, query, *, user_id, limit=8, min_score=None):
         self.queries.append(query)
+        self.min_scores.append(min_score)
         return self._results
 
 
@@ -179,6 +181,20 @@ def test_meeting_prep_from_memory_and_related_thread():
     assert "prep: last thread: Falcon timeline" in content
     # and exposed structurally on the Brief
     assert brief.meetings[0].notes[0] == "Priya is the PM for Falcon"
+
+
+def test_meeting_prep_passes_configured_min_score_to_store_search():
+    conn = FakeConnector(
+        events=[_event(summary="Falcon sync", attendees=["priya@x.com"])],
+        threads=[_thread(subject="Falcon timeline", snippet="latest numbers")],
+    )
+    store = FakeStore(results=[])
+    assemble_brief(
+        conn, FakeClient(), store=store, user_id="u1",
+        now=datetime(2026, 7, 10, 7, tzinfo=timezone.utc),
+        memory_min_score=0.3,
+    )
+    assert store.min_scores == [0.3]
 
 
 def test_still_exactly_one_model_call_with_prep():

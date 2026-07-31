@@ -126,6 +126,7 @@ def triage_thread(
     user_id: str = "me",
     importance_profile: Any = None,
     trusted_context: str | None = None,
+    min_score: float | None = None,
 ) -> TriageResult:
     """Classify one incoming thread as URGENT, ROUTINE, or NOISE.
 
@@ -171,7 +172,7 @@ def triage_thread(
         "REASON: <one short sentence — cite the past reactions when they "
         "informed the call>"
     )
-    reactions = _past_reactions(store, sender, user_id)
+    reactions = _past_reactions(store, sender, user_id, min_score=min_score)
     if reactions:
         system += (
             "\n\nPAST REACTIONS (the user's own captured behavior toward this "
@@ -195,7 +196,9 @@ def triage_thread(
     return _apply_importance_adjustment(result, importance_profile, sender)
 
 
-def _past_reactions(store: Any, sender: str | None, user_id: str) -> str:
+def _past_reactions(
+    store: Any, sender: str | None, user_id: str, *, min_score: float | None = None
+) -> str:
     """Up to three short reaction lines for this sender, or "". Retrieval
     failures are silently empty — memory garnish must never break triage.
 
@@ -210,7 +213,10 @@ def _past_reactions(store: Any, sender: str | None, user_id: str) -> str:
         return ""
     try:
         records = store.search(
-            f"reactions to mail from {sender}", user_id=user_id, limit=3
+            f"reactions to mail from {sender}",
+            user_id=user_id,
+            limit=3,
+            min_score=min_score,
         )
     except Exception:  # noqa: BLE001
         return ""

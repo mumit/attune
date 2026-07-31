@@ -32,12 +32,14 @@ from langgraph.types import Command  # noqa: E402
 class FakeStore(MemoryStore):
     def __init__(self):
         self.added: list[dict] = []
+        self.searches: list[dict] = []
 
     def add(self, messages, *, user_id, metadata=None, infer=True):
         self.added.append({"metadata": metadata, "infer": infer})
         return []
 
     def search(self, query, *, user_id, limit=8, min_score=None):
+        self.searches.append({"query": query, "limit": limit, "min_score": min_score})
         return [MemoryRecord(id="1", text="prefers short replies", score=0.9)]
 
     def get_all(self, *, user_id, limit=100):
@@ -92,6 +94,14 @@ def test_pauses_at_approval_by_default():
     payload = result["__interrupt__"][0].value
     assert payload["question"] == "Approve this draft?"
     assert payload["proposed_draft"]
+
+
+def test_retrieve_passes_min_score_and_bounded_limit_to_store_search():
+    store = FakeStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store, min_score=0.42)
+    graph.invoke(_base_state(), CFG)
+    assert store.searches[0]["limit"] == 3
+    assert store.searches[0]["min_score"] == 0.42
 
 
 def test_approve_path_sets_final_and_captures_signal():

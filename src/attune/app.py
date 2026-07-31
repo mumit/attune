@@ -209,6 +209,7 @@ def build_app(
         apply_fn=apply_fn,
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
+        min_score=settings.memory_min_score,
     )
     # The archive-proposal graph (Phase 3 stage 1, G9): same collaborators,
     # a deterministic draft_fn (no model call — see archive_draft_fn) and a
@@ -225,6 +226,7 @@ def build_app(
         apply_fn=label_apply_fn,
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
+        min_score=settings.memory_min_score,
     )
     # The decline-invite/reschedule proposal graph (Phase 3 stage 2): same
     # collaborators and disjoint thread-id namespaces ("decline:..."/
@@ -239,6 +241,7 @@ def build_app(
         apply_fn=calendar_action_apply_fn,
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
+        min_score=settings.memory_min_score,
     )
 
     from .orchestrator import default_matrix as _default_matrix

@@ -69,6 +69,9 @@ class Settings:
     data_dir: str | None = None
     qdrant_host: str = "127.0.0.1"
     qdrant_port: int = 6333
+    # Relevance floor for every memory retrieval (MemoryStore.search's
+    # min_score). None means no floor. See .env.example.
+    memory_min_score: float | None = None
 
     # Principal and organization boundary.
     user_id: str = "me"
@@ -255,6 +258,11 @@ class Settings:
             data_dir=data_dir,
             qdrant_host=e.get("ATTUNE_QDRANT_HOST") or "127.0.0.1",
             qdrant_port=int(e.get("ATTUNE_QDRANT_PORT") or "6333"),
+            memory_min_score=(
+                float(e["ATTUNE_MEMORY_MIN_SCORE"])
+                if e.get("ATTUNE_MEMORY_MIN_SCORE")
+                else None
+            ),
             audit_log_path=_path("ATTUNE_AUDIT_LOG_PATH", "audit.log.jsonl"),
             user_id=user_id,
             internal_domains=domains,

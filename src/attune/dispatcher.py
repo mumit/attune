@@ -554,6 +554,7 @@ def submit_gmail_thread(
             app_ctx.client, incoming_summary,
             store=app_ctx.store, sender=thread.from_addr, user_id=user_id,
             importance_profile=app_ctx.importance_profile,
+            min_score=app_ctx.settings.memory_min_score,
         )
     else:
         triage = triage_fn(app_ctx.client, incoming_summary)
@@ -894,6 +895,7 @@ def handle_source_message(
             store=app_ctx.store, sender=message.sender_ref, user_id=user_id,
             importance_profile=app_ctx.importance_profile,
             trusted_context=trusted_context,
+            min_score=app_ctx.settings.memory_min_score,
         )
     else:
         triage = triage_fn(app_ctx.client, incoming_summary)
@@ -2441,7 +2443,9 @@ def _converse(
     replayed with the exact framing they were stored with, as user/assistant
     turns only — history is never promoted into system content.
     """
-    mems = app_ctx.store.search(text, user_id=user_id, limit=5)
+    mems = app_ctx.store.search(
+        text, user_id=user_id, limit=5, min_score=app_ctx.settings.memory_min_score
+    )
     # Security finding F6 (SEC-605): provenance-frame each retrieved memory
     # before it joins the prompt — a correction-derived memory touched
     # whatever the original mail/chat said, so it's marked lower-confidence

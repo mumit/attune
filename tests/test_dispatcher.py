@@ -134,8 +134,10 @@ class _FakeAuditLog:
 class _FakeMemoryStore:
     def __init__(self, results=None):
         self._results = results or []
+        self.searches: list[dict] = []
 
-    def search(self, query, *, user_id, limit=5):
+    def search(self, query, *, user_id, limit=5, min_score=None):
+        self.searches.append({"query": query, "limit": limit, "min_score": min_score})
         return self._results
 
     def add(self, *a, **kw): pass
@@ -159,11 +161,13 @@ class _FakeClient:
 
 def _fake_app_ctx(graph=None, store=None, client=None, audit_log=None,
                    importance_profile=None, label_graph=None,
-                   calendar_action_graph=None):
+                   calendar_action_graph=None, settings=None):
     from attune.app import AppContext
     from attune.config import Settings
-    s = Settings.from_env({"ATTUNE_WORKSPACE_BACKEND": "mcp",
-                            "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": ""})
+    s = settings or Settings.from_env({
+        "ATTUNE_WORKSPACE_BACKEND": "mcp",
+        "ATTUNE_MEM0_URL": "", "ATTUNE_AUDIT_LOG_PATH": "",
+    })
     return AppContext(
         graph=graph or _FakeGraph(),
         client=client or _FakeClient(),
@@ -3621,6 +3625,22 @@ def test_converse_includes_memory_in_prompt():
     call = client.calls[0]
     system = call["messages"][0]["content"]
     assert "user prefers short replies" in system
+
+
+def test_converse_passes_configured_min_score_to_store_search():
+    from attune.config import Settings
+
+    store = _FakeMemoryStore(results=[])
+    client = _FakeClient(reply="got it")
+    settings = Settings.from_env({
+        "ATTUNE_WORKSPACE_BACKEND": "mcp", "ATTUNE_MEM0_URL": "",
+        "ATTUNE_AUDIT_LOG_PATH": "", "ATTUNE_MEMORY_MIN_SCORE": "0.55",
+    })
+    app = _fake_app_ctx(store=store, client=client, settings=settings)
+
+    _converse(app, "help me", user_id="me@example.com")
+
+    assert store.searches[0]["min_score"] == 0.55
 
 
 def test_converse_tags_input_as_untrusted():

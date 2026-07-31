@@ -124,7 +124,7 @@ class _FakeStore:
         self._raise = raise_exc
 
     def search(self, query, *, user_id, limit=8, min_score=None):
-        self.queries.append((query, user_id, limit))
+        self.queries.append((query, user_id, limit, min_score))
         if self._raise:
             raise self._raise
         return self._results
@@ -155,8 +155,20 @@ def test_past_reactions_appear_as_trusted_context():
     assert user_msg.startswith("[UNTRUSTED mail]")
     assert "Buy now" in user_msg and "Buy now" not in system
     # the search targeted this sender under the right identity
-    assert store.queries == [("reactions to mail from spam@x.com", "u1", 3)]
+    assert store.queries == [("reactions to mail from spam@x.com", "u1", 3, None)]
     assert result.priority == Priority.NOISE
+
+
+def test_past_reactions_passes_min_score_through_to_store_search():
+    client = _FakeClient("PRIORITY: NOISE\nREASON: sender's drafts ignored 4x")
+    store = _FakeStore(results=[])
+
+    triage_thread(
+        client, "From: spam@x.com\nSubject: Buy now\n\nbody",
+        store=store, sender="spam@x.com", user_id="u1", min_score=0.6,
+    )
+
+    assert store.queries == [("reactions to mail from spam@x.com", "u1", 3, 0.6)]
 
 
 def test_prompt_identical_without_store():

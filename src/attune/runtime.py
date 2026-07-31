@@ -193,6 +193,7 @@ def _assemble_runtime_brief(
         pending=pending,
         snapshot_store=snapshot_store,
         approval_channel_name=_approval_channel_label(settings),
+        memory_min_score=settings.memory_min_score,
     )
 
 

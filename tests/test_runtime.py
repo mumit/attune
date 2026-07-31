@@ -157,7 +157,7 @@ class _FakeMemoryStore:
     def __init__(self, results=None):
         self._results = results or []
 
-    def search(self, query, *, user_id, limit=5):
+    def search(self, query, *, user_id, limit=5, min_score=None):
         return self._results
 
     def add(self, *a, **kw): pass
@@ -397,7 +397,7 @@ def test_slack_actor_uses_canonical_principal_memory_id():
             super().__init__()
             self.user_ids = []
 
-        def search(self, query, *, user_id, limit=5):
+        def search(self, query, *, user_id, limit=5, min_score=None):
             self.user_ids.append(user_id)
             return []
 
