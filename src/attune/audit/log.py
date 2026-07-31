@@ -170,6 +170,14 @@ class JsonlAuditLog:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        # _last_hash()'s tail-hash cache (perf finding: a linear scan of the
+        # whole file on every append made record() O(n) per call, O(n^2)
+        # over a run). Keyed by file size so an append from *another*
+        # process (fslock permits that; see ../fslock.py) is detected via a
+        # size mismatch and falls back to a real scan rather than serving a
+        # stale hash and forking the chain.
+        self._cached_hash: str | None = None
+        self._cached_size: int | None = None
 
     def record(
         self,
@@ -221,6 +229,10 @@ class JsonlAuditLog:
                 os.chmod(self._path, 0o600)
             except OSError:
                 pass
+            # We just wrote the new tail ourselves — cache it directly
+            # rather than re-scanning the file on the next call.
+            self._cached_hash = prev_hash
+            self._cached_size = os.path.getsize(self._path)
 
     def _last_hash(self) -> str:
         """The hash to chain the next appended entry from: the last
@@ -228,9 +240,22 @@ class JsonlAuditLog:
         :data:`GENESIS_HASH` if the file is missing/empty, unparseable, or
         its tail line predates hashing (a legacy, unhashed line) — matching
         :meth:`verify`'s rule that a new chain starts fresh after any
-        unhashed line rather than trying to chain onto it."""
+        unhashed line rather than trying to chain onto it.
+
+        Called under ``locked()`` from :meth:`record`, so a cached result is
+        safe to serve as long as nothing has appended to the file since it
+        was cached — checked cheaply via file size rather than re-scanning
+        every line on every call (that scan made a run of N appends O(n^2)).
+        A size mismatch means another process appended between our calls
+        (fslock permits that), so we fall back to a real scan.
+        """
         if not os.path.exists(self._path):
+            self._cached_hash = None
+            self._cached_size = None
             return GENESIS_HASH
+        current_size = os.path.getsize(self._path)
+        if self._cached_hash is not None and self._cached_size == current_size:
+            return self._cached_hash
         last_line = None
         with open(self._path) as fh:
             for raw_line in fh:
@@ -238,13 +263,18 @@ class JsonlAuditLog:
                 if stripped:
                     last_line = stripped
         if last_line is None:
-            return GENESIS_HASH
-        try:
-            raw = json.loads(last_line)
-        except json.JSONDecodeError:
-            return GENESIS_HASH
-        entry_hash = raw.get("entry_hash")
-        return entry_hash if isinstance(entry_hash, str) else GENESIS_HASH
+            result = GENESIS_HASH
+        else:
+            try:
+                raw = json.loads(last_line)
+            except json.JSONDecodeError:
+                result = GENESIS_HASH
+            else:
+                entry_hash = raw.get("entry_hash")
+                result = entry_hash if isinstance(entry_hash, str) else GENESIS_HASH
+        self._cached_hash = result
+        self._cached_size = current_size
+        return result
 
     def query(
         self,

@@ -363,3 +363,64 @@ def test_query_unaffected_by_hash_fields(tmp_path):
     results = log.query()
     assert len(results) == 1
     assert results[0].fields == {"chars": 3}
+
+
+# ---------------------------------------------------------------------------
+# _last_hash() tail-hash cache (perf: a linear scan on every append made a
+# run of N appends O(n^2))
+# ---------------------------------------------------------------------------
+
+
+def test_record_does_not_rescan_file_on_repeated_appends(tmp_path, monkeypatch):
+    """Once this instance's own append has cached the tail hash, later
+    appends must not re-read the whole file to find it again."""
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+
+    real_open = open
+    read_opens = []
+
+    def spy_open(file, mode="r", *a, **kw):
+        if str(file) == str(path) and "r" in mode:
+            read_opens.append(mode)
+        return real_open(file, mode, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", spy_open)
+
+    for i in range(20):
+        log.record(thread_id=f"t{i}", workflow="w", events=[
+            {"event": "a", "ts": f"2026-07-10T00:00:{i:02d}+00:00"},
+        ])
+
+    # Every append after the first is served from the in-memory cache (and
+    # the very first sees a missing file, which short-circuits before ever
+    # opening it) -- so the file is never opened for reading.
+    assert read_opens == []
+    assert len(log.query()) == 20
+
+
+def test_record_rescans_when_file_changed_externally(tmp_path):
+    """Two processes/instances can append to the same audit log (cross-
+    process fslock permits it, see fslock.py). If this instance's cached
+    tail hash goes stale because another instance appended, the next
+    record() must notice via a file-size mismatch and re-chain from the
+    real tail rather than forking the hash chain."""
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    log.record(thread_id="t1", workflow="w", events=[
+        {"event": "a", "ts": "2026-07-10T00:00:00+00:00"},
+    ])
+
+    other = JsonlAuditLog(str(path))
+    other.record(thread_id="t2", workflow="w", events=[
+        {"event": "b", "ts": "2026-07-10T00:00:01+00:00"},
+    ])
+
+    # `log`'s cache still reflects the file as of its own append above.
+    log.record(thread_id="t3", workflow="w", events=[
+        {"event": "c", "ts": "2026-07-10T00:00:02+00:00"},
+    ])
+
+    result = log.verify()
+    assert result.ok is True
+    assert result.checked == 3
