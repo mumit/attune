@@ -104,6 +104,7 @@ from zoneinfo import ZoneInfo
 from .connectors.base import CalendarEvent, EmailThread, WorkspaceConnector
 from .fslock import locked
 from .llm import Task, create_chat_completion, model_for
+from .memory.signals import frame_memory_text
 from .orchestrator.attention import AttentionItem
 from .orchestrator.correlation import (
     CorrelatableItem,
@@ -950,7 +951,9 @@ def _meeting_prep(
                 )
             except Exception:  # noqa: BLE001 — prep is garnish, never fatal
                 mems = []
-            notes.extend(m.text for m in mems)
+            notes.extend(
+                frame_memory_text(m.text, getattr(m, "metadata", None)) for m in mems
+            )
         query_parts = [f'"{e.summary}"'] + [f"from:{a}" for a in e.attendees[:2]]
         try:
             related = connector.list_threads(" OR ".join(query_parts), max_results=1)

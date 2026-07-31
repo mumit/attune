@@ -183,6 +183,31 @@ def test_meeting_prep_from_memory_and_related_thread():
     assert brief.meetings[0].notes[0] == "Priya is the PM for Falcon"
 
 
+def test_meeting_prep_frames_memory_text_by_provenance():
+    """_meeting_prep must run retrieved memory text through frame_memory_text
+    like every other retrieval site does (defect #8, roadmap prompt 24) --
+    a correction-derived memory should read as lower-confidence than an
+    explicitly taught one, not silently identical."""
+    conn = FakeConnector(
+        events=[_event(summary="Falcon sync", attendees=["priya@x.com"])],
+    )
+    store = FakeStore(results=[
+        type("M", (), {
+            "text": "Priya is the PM for Falcon",
+            "metadata": {"signal": "correction"},
+        })()
+    ])
+    client = FakeClient()
+    brief = assemble_brief(
+        conn, client, store=store, user_id="u1",
+        now=datetime(2026, 7, 10, 7, tzinfo=timezone.utc),
+    )
+    assert brief.meetings[0].notes[0] == (
+        "Priya is the PM for Falcon"
+        " (learned from an edit — lower confidence than explicit teaching)"
+    )
+
+
 def test_meeting_prep_passes_configured_min_score_to_store_search():
     conn = FakeConnector(
         events=[_event(summary="Falcon sync", attendees=["priya@x.com"])],
