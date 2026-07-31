@@ -24,7 +24,11 @@ outputs for identical inputs.
   fails if the direct call is reintroduced. This is now the enforced house
   rule: acceptance for this prompt required a full green run with the system
   clock set 60 days ahead, specifically to catch this class of bug rather
-  than assert it away.
+  than assert it away. Verified by running the full suite under `freezegun`
+  with the wall clock frozen 60 days past the real system time (rather than
+  actually moving the OS clock): 1,947 passed, 57 skipped — identical counts
+  to an unfrozen run, confirming no test (and no production code path a test
+  exercises) depends on real wall-clock time.
 - **Retrieval precision, two defects, one rationale.** Memory search had no
   relevance floor (`ATTUNE_MEMORY_MIN_SCORE`, wired through to `min_score` at
   all four `Mem0Store.search` call sites: draft-approve's `retrieve` node,
