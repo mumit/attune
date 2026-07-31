@@ -126,6 +126,18 @@ class PostgresImportanceProfile:
         self._context = context
         self._principal_id = principal_id
         self._hasher = reference_hasher
+        # Per-instance cache of each sender's raw (pinned_tier, all signal
+        # rows) -- assess() previously ran two round trips per call even
+        # though one brief/triage run often assesses the same sender
+        # repeatedly. Caching the raw rows rather than the computed
+        # TierAssessment keeps decay filtering correct for whatever `now`
+        # each call passes (assess/recent_signals filter this cached data
+        # at call time). This instance is already bound to one tenant/
+        # principal at construction (module docstring), so an instance-
+        # level cache carries no cross-tenant risk; it is invalidated
+        # per-sender (never all at once) whenever record_signal/pin/unpin
+        # writes for that sender.
+        self._raw_cache: dict[bytes, tuple[str | None, list[tuple[ActionSignal, datetime]]]] = {}
 
     def record_signal(
         self, sender: str, signal: ActionSignal, *, ts: datetime | None = None
@@ -172,28 +184,17 @@ class PostgresImportanceProfile:
                         MAX_SIGNALS,
                     ),
                 )
+        self._raw_cache.pop(sender_hash, None)
 
     def assess(self, sender: str, *, now: datetime | None = None) -> TierAssessment:
         now = now or datetime.now(timezone.utc)
         sender_hash = self._sender_hash(sender)
         cutoff = now - timedelta(days=DECAY_DAYS)
-        with closing(self._connect()) as connection:
-            with tenant_transaction(connection, self._context) as cursor:
-                cursor.execute(
-                    """
-                    SELECT pinned_tier FROM attune.importance_signals
-                     WHERE tenant_id = %s AND principal_id = %s
-                       AND sender_ref_hash = %s AND kind = 'pin'
-                    """,
-                    (self._context.tenant_id, self._principal_id, sender_hash),
-                )
-                pin_row = cursor.fetchone()
-                if pin_row is not None:
-                    tier = ImportanceTier(pin_row[0])
-                    return TierAssessment(
-                        tier, f"pinned {tier.value} by the principal", True
-                    )
-                effective = self._effective_signals(cursor, sender_hash, cutoff)
+        pinned, rows = self._cached_raw(sender_hash)
+        if pinned:
+            tier = ImportanceTier(pinned)
+            return TierAssessment(tier, f"pinned {tier.value} by the principal", True)
+        effective = [pair for pair in rows if pair[1] >= cutoff]
         if not effective:
             return TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
         return assess_from_signals(effective)
@@ -217,6 +218,7 @@ class PostgresImportanceProfile:
                     """,
                     (self._context.tenant_id, self._principal_id, sender_hash, tier.value),
                 )
+        self._raw_cache.pop(sender_hash, None)
 
     def unpin(self, sender: str) -> bool:
         sender_hash = self._sender_hash(sender)
@@ -230,7 +232,9 @@ class PostgresImportanceProfile:
                     """,
                     (self._context.tenant_id, self._principal_id, sender_hash),
                 )
-                return cursor.rowcount == 1
+                removed = cursor.rowcount == 1
+        self._raw_cache.pop(sender_hash, None)
+        return removed
 
     def senders(self) -> list[str]:
         """All sender references with any recorded state, as hex-encoded
@@ -255,28 +259,54 @@ class PostgresImportanceProfile:
         now = now or datetime.now(timezone.utc)
         sender_hash = self._sender_hash(sender)
         cutoff = now - timedelta(days=DECAY_DAYS)
-        with closing(self._connect()) as connection:
-            with tenant_transaction(connection, self._context) as cursor:
-                return self._effective_signals(cursor, sender_hash, cutoff)
+        _, rows = self._cached_raw(sender_hash)
+        return [pair for pair in rows if pair[1] >= cutoff]
 
     def _sender_hash(self, sender: str) -> bytes:
         # ``hash`` itself rejects an empty/oversized reference (before any
         # connection is opened) -- see IntelligenceReferenceHasher.hash.
         return self._hasher.hash("sender", _normalize_sender(sender))
 
-    def _effective_signals(
-        self, cursor, sender_hash: bytes, cutoff: datetime
-    ) -> list[tuple[ActionSignal, datetime]]:
-        cursor.execute(
-            """
-            SELECT signal, recorded_at FROM attune.importance_signals
-             WHERE tenant_id = %s AND principal_id = %s
-               AND sender_ref_hash = %s AND kind = 'signal' AND recorded_at >= %s
-             ORDER BY recorded_at ASC
-            """,
-            (self._context.tenant_id, self._principal_id, sender_hash, cutoff),
-        )
-        return [(ActionSignal(row[0]), row[1]) for row in cursor.fetchall()]
+    def _cached_raw(
+        self, sender_hash: bytes
+    ) -> tuple[str | None, list[tuple[ActionSignal, datetime]]]:
+        """``(pinned_tier, all signal rows)`` for ``sender_hash``, unfiltered
+        by decay so the result is reusable across calls with different
+        ``now`` values. Bounded storage already caps stored signal rows to
+        ``MAX_SIGNALS`` per sender, so fetching all of them is cheap. Cached
+        per instance (module docstring: one instance per tenant/principal),
+        invalidated per-sender by record_signal/pin/unpin -- never cleared
+        wholesale, since that would defeat the point for every other sender
+        already cached this job/request.
+        """
+        if sender_hash in self._raw_cache:
+            return self._raw_cache[sender_hash]
+        with closing(self._connect()) as connection:
+            with tenant_transaction(connection, self._context) as cursor:
+                cursor.execute(
+                    """
+                    SELECT pinned_tier FROM attune.importance_signals
+                     WHERE tenant_id = %s AND principal_id = %s
+                       AND sender_ref_hash = %s AND kind = 'pin'
+                    """,
+                    (self._context.tenant_id, self._principal_id, sender_hash),
+                )
+                pin_row = cursor.fetchone()
+                pinned = pin_row[0] if pin_row is not None else None
+
+                cursor.execute(
+                    """
+                    SELECT signal, recorded_at FROM attune.importance_signals
+                     WHERE tenant_id = %s AND principal_id = %s
+                       AND sender_ref_hash = %s AND kind = 'signal'
+                     ORDER BY recorded_at ASC
+                    """,
+                    (self._context.tenant_id, self._principal_id, sender_hash),
+                )
+                rows = [(ActionSignal(row[0]), row[1]) for row in cursor.fetchall()]
+        result = (pinned, rows)
+        self._raw_cache[sender_hash] = result
+        return result
 
 
 class PostgresAttentionStore:

@@ -70,6 +70,7 @@ piece of code either way.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -156,6 +157,18 @@ class JsonImportanceProfile:
     def __init__(self, path: str):
         self._path = path
         self._lock = threading.RLock()
+        # Per-instance cache of the whole loaded file, keyed by the file's
+        # mtime -- assess() previously re-read and re-parsed the whole JSON
+        # file on every single call (one per sender per triage/brief run).
+        # Caching the raw loaded dict rather than a computed TierAssessment
+        # keeps decay filtering correct for whatever `now` each call passes
+        # in (assess/recent_signals still filter from this cached data at
+        # call time). Every write (record_signal/pin/unpin) updates the
+        # cache directly with the data it just wrote, so it's never stale
+        # for this instance; a size/mtime change from another process
+        # writing the same file invalidates it on the next read.
+        self._cache: dict[str, Any] | None = None
+        self._cache_mtime: float | None = None
 
     # --- writes --------------------------------------------------------
 
@@ -165,32 +178,36 @@ class JsonImportanceProfile:
         key = _normalize_sender(sender)
         stamp = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
         with self._lock, locked(self._path + ".lock"):
-            data = self._load()
+            # Mutate a copy, not the cached object in place: _save_cached
+            # only refreshes the cache once the write has actually
+            # succeeded, so a disk error here must not leave the cache
+            # holding data that was never persisted.
+            data = copy.deepcopy(self._load_cached())
             entry = data.setdefault(key, {"signals": []})
             signals = entry.setdefault("signals", [])
             signals.append({"signal": signal.value, "ts": stamp.isoformat()})
             # Bounded storage (rule 3): keep only the most recently recorded
             # MAX_SIGNALS entries per sender.
             entry["signals"] = signals[-MAX_SIGNALS:]
-            self._save(data)
+            self._save_cached(data)
 
     def pin(self, sender: str, tier: ImportanceTier) -> None:
         key = _normalize_sender(sender)
         with self._lock, locked(self._path + ".lock"):
-            data = self._load()
+            data = copy.deepcopy(self._load_cached())
             entry = data.setdefault(key, {"signals": []})
             entry["pinned"] = tier.value
-            self._save(data)
+            self._save_cached(data)
 
     def unpin(self, sender: str) -> bool:
         key = _normalize_sender(sender)
         with self._lock, locked(self._path + ".lock"):
-            data = self._load()
+            data = copy.deepcopy(self._load_cached())
             entry = data.get(key)
             if entry is None or not entry.get("pinned"):
                 return False
             del entry["pinned"]
-            self._save(data)
+            self._save_cached(data)
             return True
 
     # --- reads -----------------------------------------------------------
@@ -199,7 +216,7 @@ class JsonImportanceProfile:
         key = _normalize_sender(sender)
         now = now or datetime.now(timezone.utc)
         with self._lock, locked(self._path + ".lock"):
-            data = self._load()
+            data = self._load_cached()
         entry = data.get(key)
         if entry is None:
             return TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
@@ -219,7 +236,7 @@ class JsonImportanceProfile:
 
     def senders(self) -> list[str]:
         with self._lock, locked(self._path + ".lock"):
-            data = self._load()
+            data = self._load_cached()
         return sorted(data.keys())
 
     def recent_signals(
@@ -230,7 +247,7 @@ class JsonImportanceProfile:
         key = _normalize_sender(sender)
         now = now or datetime.now(timezone.utc)
         with self._lock, locked(self._path + ".lock"):
-            data = self._load()
+            data = self._load_cached()
         entry = data.get(key)
         if entry is None:
             return []
@@ -261,6 +278,32 @@ class JsonImportanceProfile:
             return {}
         with open(self._path) as fh:
             return json.load(fh)
+
+    def _load_cached(self) -> dict[str, Any]:
+        """``_load()`` behind an in-memory, mtime-checked cache. Must be
+        called while holding ``self._lock``/``locked()`` like every other
+        read-modify-write access to ``self._path``."""
+        try:
+            mtime: float | None = os.path.getmtime(self._path)
+        except OSError:
+            mtime = None
+        if self._cache is not None and mtime == self._cache_mtime:
+            return self._cache
+        data = self._load()
+        self._cache = data
+        self._cache_mtime = mtime
+        return data
+
+    def _save_cached(self, data: dict[str, Any]) -> None:
+        """``_save()`` that also refreshes the cache with the data just
+        written, so the next read (even from this same call stack) never
+        re-parses the file it was the one to write."""
+        self._save(data)
+        self._cache = data
+        try:
+            self._cache_mtime = os.path.getmtime(self._path)
+        except OSError:
+            self._cache_mtime = None
 
     def _save(self, data: dict[str, Any]) -> None:
         parent = os.path.dirname(self._path)

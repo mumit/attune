@@ -5105,6 +5105,42 @@ def test_postgres_importance_profile_matches_the_local_tier_rule_matrix(
     _run_importance_tier_rule_matrix(profile_factory)
 
 
+def test_postgres_importance_profile_caches_raw_signals_per_sender(
+    initialized_database, database_url
+):
+    """Perf: assess() previously ran two round trips per call even when
+    called repeatedly for the same sender within one job. A cache hit must
+    not open a connection at all; a write for that sender must invalidate
+    just that sender's cache entry."""
+    hasher = IntelligenceReferenceHasher(_TEST_HMAC_KEY)
+    base_factory = _role_connection_factory(database_url, ROLE_BINDINGS["attune_worker"])
+    calls = {"n": 0}
+
+    def counting_factory():
+        calls["n"] += 1
+        return base_factory()
+
+    profile = PostgresImportanceProfile(
+        counting_factory, TenantContext(INTELLIGENCE_TENANT_A),
+        INTELLIGENCE_PRINCIPAL_A, reference_hasher=hasher,
+    )
+    profile.record_signal("cache-vip@example.com", ActionSignal.APPROVED)
+    calls["n"] = 0  # only count connections opened from here on
+
+    now = datetime.now(timezone.utc)
+    profile.assess("cache-vip@example.com", now=now)
+    after_first = calls["n"]
+    assert after_first >= 1
+
+    for _ in range(5):
+        profile.assess("cache-vip@example.com", now=now)
+    assert calls["n"] == after_first  # served from cache -- no new connections
+
+    profile.record_signal("cache-vip@example.com", ActionSignal.APPROVED)
+    profile.assess("cache-vip@example.com", now=now)
+    assert calls["n"] > after_first  # invalidated by the write, re-fetched
+
+
 def test_postgres_attention_store_recent_ordering_since_and_limit(
     initialized_database, database_url
 ):

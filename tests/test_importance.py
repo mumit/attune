@@ -245,6 +245,59 @@ def test_persistence_roundtrip_through_a_fresh_instance(tmp_path):
     assert reloaded.assess("x@example.com", now=T0).tier == ImportanceTier.NORMAL
 
 
+def test_assess_does_not_reread_file_across_repeated_calls(tmp_path, monkeypatch):
+    """Perf: assess() previously reloaded and re-parsed the whole JSON file
+    on every call. Once this instance has loaded it once, repeated assess()
+    calls must be served from the in-memory cache."""
+    path = tmp_path / "importance.json"
+    profile = JsonImportanceProfile(str(path))
+    profile.record_signal("x@example.com", ActionSignal.APPROVED, ts=T0)
+
+    real_open = open
+    read_opens = []
+
+    def spy_open(file, mode="r", *a, **kw):
+        if str(file) == str(path) and "r" in mode:
+            read_opens.append(mode)
+        return real_open(file, mode, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", spy_open)
+
+    for _ in range(20):
+        profile.assess("x@example.com", now=T0)
+    assert read_opens == []
+
+
+def test_assess_reflects_a_write_made_by_another_instance(tmp_path):
+    """Two JsonImportanceProfile instances over the same path (a CLI command
+    and the runtime process, say) must not let one instance's stale cache
+    hide a write the other one made."""
+    path = str(tmp_path / "importance.json")
+    a = JsonImportanceProfile(path)
+    b = JsonImportanceProfile(path)
+    a.assess("x@example.com", now=T0)  # populate a's cache on an empty file
+
+    b.record_signal("x@example.com", ActionSignal.APPROVED, ts=T0)
+
+    assert a.senders() == ["x@example.com"]
+
+
+def test_assess_respects_the_clock_passed_in_despite_caching(tmp_path):
+    """Caching the raw loaded data (not a computed tier) must not freeze
+    decay filtering to whatever `now` the first call happened to use."""
+    path = str(tmp_path / "importance.json")
+    profile = JsonImportanceProfile(path)
+    for i in range(LOW_RUN_THRESHOLD):
+        profile.record_signal(
+            "x@example.com", ActionSignal.IGNORED, ts=T0 - timedelta(days=i)
+        )
+    assert profile.assess("x@example.com", now=T0).tier == ImportanceTier.LOW
+    long_later = T0 + timedelta(days=DECAY_DAYS + LOW_RUN_THRESHOLD + 1)
+    assert profile.assess("x@example.com", now=long_later).tier == (
+        ImportanceTier.NORMAL
+    )
+
+
 def test_fslock_file_is_created_alongside_state(tmp_path):
     path = tmp_path / "importance.json"
     JsonImportanceProfile(str(path)).record_signal(
