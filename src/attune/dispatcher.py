@@ -199,6 +199,16 @@ MAX_DECLINE_PROPOSALS_PER_RUN = 2
 # NOISE-heavy inbox still gets every thread triaged, but never floods the
 # approval channel with archive cards.
 MAX_LABEL_PROPOSALS_PER_RUN = 3
+# Bound on the Gmail body text carried into triage/drafting as
+# incoming_summary — an unbounded body is both a prompt-size risk and (via
+# the draft-approve graph's retrieve node) an unbounded embedding call.
+# Matches the cap _mail_source already applies to a thread's body field.
+INCOMING_BODY_CHAR_LIMIT = 1600
+# The retrieve node's embedding query is deliberately much shorter than the
+# full (already-bounded) incoming_summary: subject + sender + a short lead
+# of the body is enough to find relevant memories, and keeps the embedding
+# call itself cheap and stable regardless of how long the underlying mail is.
+RETRIEVAL_QUERY_BODY_CHAR_LIMIT = 300
 # Rank key for "most confidently noise" (Phase 3 stage 1, G10): LOW-tier
 # senders first, then NORMAL, then HIGH last — the mirror image of
 # brief.py's/_rank_conflicts_by_importance's "most important first" ranking,
@@ -546,8 +556,13 @@ def submit_gmail_thread(
     """
     triage_fn = triage_fn or _default_triage
     lg_tid = f"{thread_id_prefix}:{gmail_tid}:{history_id}"
+    bounded_body = _source_text(thread.body, INCOMING_BODY_CHAR_LIMIT)
     incoming_summary = (
-        f"From: {thread.from_addr}\nSubject: {thread.subject}\n\n{thread.body}"
+        f"From: {thread.from_addr}\nSubject: {thread.subject}\n\n{bounded_body}"
+    )
+    retrieval_query = (
+        f"{thread.subject} {thread.from_addr} "
+        f"{_source_text(thread.body, RETRIEVAL_QUERY_BODY_CHAR_LIMIT)}"
     )
     if triage_fn is _default_triage:
         triage = triage_thread(
@@ -590,6 +605,7 @@ def submit_gmail_thread(
 
     state: dict[str, Any] = {
         "incoming_summary": incoming_summary,
+        "retrieval_query": retrieval_query,
         "incoming_ref": gmail_tid,
         "sender": thread.from_addr,
         "priority": triage.priority.value,

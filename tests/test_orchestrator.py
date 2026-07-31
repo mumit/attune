@@ -104,6 +104,30 @@ def test_retrieve_passes_min_score_and_bounded_limit_to_store_search():
     assert store.searches[0]["min_score"] == 0.42
 
 
+def test_retrieve_prefers_retrieval_query_over_incoming_summary():
+    """When a caller supplies a short retrieval_query (mail: bounded subject+
+    sender+lead-of-body, see dispatcher.submit_gmail_thread), retrieve() must
+    embed that instead of the (possibly much longer) incoming_summary
+    (defect #5, roadmap prompt 24)."""
+    store = FakeStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store)
+    graph.invoke(
+        _base_state(
+            incoming_summary="From: a@b.com\nSubject: Sub\n\n" + ("word " * 500),
+            retrieval_query="Sub a@b.com word word word",
+        ),
+        CFG,
+    )
+    assert store.searches[0]["query"] == "Sub a@b.com word word word"
+
+
+def test_retrieve_falls_back_to_incoming_summary_without_retrieval_query():
+    store = FakeStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store)
+    graph.invoke(_base_state(), CFG)
+    assert store.searches[0]["query"] == _base_state()["incoming_summary"]
+
+
 def test_approve_path_sets_final_and_captures_signal():
     store = FakeStore()
     graph = build_draft_approve_graph(client=FakeClient(), store=store)

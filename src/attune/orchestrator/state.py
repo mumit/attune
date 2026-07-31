@@ -42,6 +42,12 @@ class DraftApproveState(TypedDict, total=False):
                                      # thread id — what apply materializes
                                      # against); NOT the raw body
     incoming_summary: str            # short, provenance-tagged summary for the model
+    retrieval_query: Optional[str]   # short text embedded for the retrieve node's
+                                     # memory search; when absent, retrieve() falls
+                                     # back to incoming_summary (already short for
+                                     # every non-mail caller). Mail callers pass a
+                                     # bounded subject+sender+lead-of-body query so
+                                     # a long thread body never becomes the query.
     sender: Optional[str]            # the thread's counterparty address (mail:
                                      # thread.from_addr; calendar: organizer, or
                                      # None) — feeds the per-sender importance

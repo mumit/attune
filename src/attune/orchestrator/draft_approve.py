@@ -143,9 +143,17 @@ def build_draft_approve_graph(
         said, so it's annotated as lower-confidence than something the
         principal explicitly taught. Presentation only — retrieval and
         ranking are unaffected; see ``memory.signals.frame_memory_text``.
+
+        The embedding query is ``state["retrieval_query"]`` when the caller
+        supplied one (mail: a bounded subject+sender+lead-of-body string —
+        see ``dispatcher.submit_gmail_thread`` — so a long thread body never
+        becomes the query), falling back to ``incoming_summary`` for callers
+        that already pass something short (calendar holds/reschedules,
+        label/archive proposals).
         """
+        query = state.get("retrieval_query") or state["incoming_summary"]
         mems = store.search(
-            state["incoming_summary"],
+            query,
             user_id=state["user_id"],
             limit=3,
             min_score=min_score,

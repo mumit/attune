@@ -308,6 +308,62 @@ def test_gmail_graph_state_carries_thread_ref_for_apply():
     assert graph.calls[0]["state"]["incoming_ref"] == "t1"
 
 
+def test_gmail_long_body_is_bounded_in_incoming_summary():
+    """An unbounded Gmail body must not ride into incoming_summary whole --
+    it's both a prompt-size risk and (via retrieve()) an unbounded embedding
+    call. Bounded the same way _source_text/_mail_source already bound the
+    thread body elsewhere (defect #5, roadmap prompt 24)."""
+    from attune.dispatcher import INCOMING_BODY_CHAR_LIMIT
+
+    long_body = "word " * 1000  # far past the 1600-char cap
+    graph = _FakeGraph()
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({"t1": _FakeThread("t1", body=long_body)})
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "202"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+    )
+    summary = graph.calls[0]["state"]["incoming_summary"]
+    assert len(summary) < len(long_body)
+    # header + bounded body is at most a small amount over the raw cap
+    assert len(summary) <= INCOMING_BODY_CHAR_LIMIT + 100
+
+
+def test_gmail_retrieval_query_is_short_and_distinct_from_incoming_summary():
+    """The retrieve node's embedding query must be a short subject+sender+
+    lead-of-body string, not the (already-bounded but still much longer)
+    incoming_summary -- otherwise a long thread body still drives the
+    embedding call (defect #5, roadmap prompt 24)."""
+    from attune.dispatcher import RETRIEVAL_QUERY_BODY_CHAR_LIMIT
+
+    long_body = "word " * 1000
+    graph = _FakeGraph()
+    app = _fake_app_ctx(graph=graph)
+    connector = _FakeConnector({
+        "t1": _FakeThread("t1", subject="Sub", from_addr="x@y.com", body=long_body)
+    })
+    gmail = _FakeGmail(["t1"])
+    watch_state = _FakeWatchState(history_id="100")
+    handle_gmail_notification(
+        app, {"emailAddress": "me@example.com", "historyId": "202"},
+        gmail_service=gmail, watch_state=watch_state,
+        connector=connector,
+        post_approval=lambda *a: None,
+        user_id="me@example.com",
+    )
+    state = graph.calls[0]["state"]
+    query = state["retrieval_query"]
+    assert "Sub" in query
+    assert "x@y.com" in query
+    assert len(query) < len(state["incoming_summary"])
+    assert len(query) <= RETRIEVAL_QUERY_BODY_CHAR_LIMIT + 50
+
+
 def test_pending_registry_dedupes_second_notification():
     """A thread with an unanswered card gets no second card; the skip is
     audited as superseded_notification (prompt 03)."""
