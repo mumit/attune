@@ -105,10 +105,8 @@ def run_importance_unpin(
 
 def _resolve(settings: Any, importance_profile: Any):
     from ..config import Settings
-    from ..orchestrator.importance import JsonImportanceProfile
+    from ..orchestrator.importance import open_importance_profile
 
     resolved_settings = settings or Settings.from_env()
-    profile = importance_profile or JsonImportanceProfile(
-        resolved_settings.importance_profile_path
-    )
+    profile = importance_profile or open_importance_profile(resolved_settings)
     return resolved_settings, profile

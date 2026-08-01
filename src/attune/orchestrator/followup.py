@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
@@ -90,6 +91,66 @@ class JsonNudgeState:
             os.chmod(self._path, 0o600)
         except OSError:
             pass
+
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS nudge_state (
+    thread_id TEXT PRIMARY KEY,
+    nudged_at TEXT NOT NULL
+)
+"""
+
+
+class SqliteNudgeState:
+    """Build prompt 33, task 4: the same :class:`NudgeState` Protocol as
+    :class:`JsonNudgeState`, backed by SQLite."""
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(_SQLITE_SCHEMA)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
+        return conn
+
+    def last_nudged(self, thread_id: str) -> datetime | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT nudged_at FROM nudge_state WHERE thread_id = ?", (thread_id,),
+            ).fetchone()
+        return datetime.fromisoformat(row["nudged_at"]) if row is not None else None
+
+    def record_nudge(self, thread_id: str, *, at: datetime) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO nudge_state (thread_id, nudged_at) VALUES (?, ?) "
+                "ON CONFLICT(thread_id) DO UPDATE SET nudged_at = excluded.nudged_at",
+                (thread_id, at.astimezone(timezone.utc).isoformat()),
+            )
+
+
+def open_nudge_state(settings: Any) -> "NudgeState":
+    """The one entry point every caller (``runtime.build_runtime``) uses to
+    reach the nudge cooldown state (build prompt 33, task 4) — JSON or
+    SQLite, chosen by ``settings.local_store_backend``. Migrating an
+    existing deployment: the SQLite store starts empty; the cooldown is
+    short (:data:`DEFAULT_COOLDOWN_DAYS`, 7) so a cutover simply resumes
+    with every thread eligible again rather than needing a one-time import
+    (see ``docs/decisions.md``)."""
+    from ..config import LocalStoreBackend
+
+    if settings.local_store_backend == LocalStoreBackend.SQLITE:
+        return SqliteNudgeState(settings.nudge_db_path)
+    return JsonNudgeState(settings.nudge_state_path)
 
 
 def _rank_by_counterpart_tier(

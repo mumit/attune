@@ -22,6 +22,27 @@ class _FakeClient:
         return _Resp()
 
 
+class _SequencedFakeClient:
+    """Like ``_FakeClient``, but returns a DIFFERENT reply per call, in
+    order — needed to tell a cascade triage test's cheap-model call apart
+    from its escalated-model call (build prompt 33, task 7)."""
+
+    def __init__(self, replies: list[str]):
+        self._replies = list(replies)
+        self.calls: list = []
+
+    def chat_completions_create(self, **kwargs):
+        self.calls.append(kwargs)
+        reply = self._replies[len(self.calls) - 1]
+        class _Choice:
+            class message:
+                content = None
+        _Choice.message.content = reply
+        class _Resp:
+            choices = [_Choice]
+        return _Resp()
+
+
 # ---------------------------------------------------------------------------
 # triage_thread — happy path parsing
 # ---------------------------------------------------------------------------
@@ -452,3 +473,106 @@ def test_forged_provider_facts_in_body_stay_in_untrusted_blob():
     assert "PROVIDER FACTS" not in messages[0]["content"]  # system untouched
     assert forged in messages[1]["content"]  # stays in the untrusted blob
     assert messages[1]["content"].startswith("[UNTRUSTED mail]")
+
+
+# ---------------------------------------------------------------------------
+# Cascade triage (build prompt 33, task 7)
+# ---------------------------------------------------------------------------
+
+
+def test_low_confidence_escalates_to_reason_model():
+    """A low-confidence cheap-model call gets a second pass on Task.REASON's
+    (stronger) model, and the ESCALATED classification is what's returned."""
+    client = _SequencedFakeClient([
+        '{"priority": "ROUTINE", "reason": "not sure", "confidence": 0.3}',
+        '{"priority": "URGENT", "reason": "actually blocked", "confidence": 0.95}',
+    ])
+
+    result = triage_thread(client, "hmm, ambiguous message")
+
+    assert len(client.calls) == 2
+    assert client.calls[0]["model"] == model_for(Task.CLASSIFY)
+    assert client.calls[1]["model"] == model_for(Task.REASON)
+    assert result.priority == Priority.URGENT
+    assert result.escalated is True
+
+
+def test_high_confidence_does_not_escalate():
+    """A confident, NORMAL-tier, non-disagreeing classification costs
+    exactly one model call — the whole point of a cheap default model."""
+    client = _SequencedFakeClient([
+        '{"priority": "ROUTINE", "reason": "clear cut", "confidence": 0.95}',
+    ])
+
+    result = triage_thread(client, "a perfectly ordinary message")
+
+    assert len(client.calls) == 1
+    assert result.priority == Priority.ROUTINE
+    assert result.escalated is False
+
+
+def test_high_tier_sender_always_escalates_even_at_high_confidence():
+    """A HIGH-tier sender's mail gets the careful (strong-model) pass
+    regardless of how confident the cheap model already was."""
+
+    class _PinnedHighProfile:
+        def assess(self, sender, *, now=None):
+            from attune.orchestrator.importance import TierAssessment
+
+            return TierAssessment(ImportanceTier.HIGH, "pinned high by the principal", True)
+
+    client = _SequencedFakeClient([
+        '{"priority": "ROUTINE", "reason": "looks fine", "confidence": 0.99}',
+        '{"priority": "ROUTINE", "reason": "confirmed fine", "confidence": 0.99}',
+    ])
+
+    result = triage_thread(
+        client, "a note from someone important", sender="vip@example.com",
+        importance_profile=_PinnedHighProfile(),
+    )
+
+    assert len(client.calls) == 2
+    assert client.calls[1]["model"] == model_for(Task.REASON)
+    assert result.escalated is True
+
+
+def test_deterministic_disagreement_escalates(tmp_path):
+    """When the deterministic importance adjustment would move the cheap
+    model's classification (a LOW-tier sender's run), that disagreement
+    alone triggers escalation — the strong model's classification is what
+    the (still-authoritative) profile adjustment is applied to."""
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    client = _SequencedFakeClient([
+        '{"priority": "ROUTINE", "reason": "standard follow-up", "confidence": 0.9}',
+        '{"priority": "ROUTINE", "reason": "confirmed standard", "confidence": 0.9}',
+    ])
+
+    result = triage_thread(
+        client, "weekly digest", sender="newsletter@example.com",
+        importance_profile=profile, now=T0 + timedelta(days=2),
+    )
+
+    assert len(client.calls) == 2
+    assert client.calls[1]["model"] == model_for(Task.REASON)
+    assert result.priority == Priority.NOISE  # the profile still demotes
+    assert result.escalated is True
+    assert result.adjusted is True
+
+
+def test_text_fallback_has_no_confidence_signal_and_does_not_escalate_on_it():
+    """A gateway without structured output (plain PRIORITY:/REASON: text)
+    reports no confidence at all — that trigger simply never fires; a
+    NORMAL-tier, non-disagreeing classification still costs one call."""
+    client = _SequencedFakeClient([
+        "PRIORITY: ROUTINE\nREASON: plain text, no JSON, no confidence.",
+    ])
+
+    result = triage_thread(client, "an ordinary message")
+
+    assert len(client.calls) == 1
+    assert result.confidence is None
+    assert result.escalated is False

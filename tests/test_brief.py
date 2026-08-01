@@ -668,7 +668,10 @@ def test_first_run_has_no_since_yesterday_but_writes_a_snapshot(tmp_path):
     assert brief.since_yesterday == []
     written = store.load()
     assert written is not None
-    assert written.unread == [{"id": "t1", "text": "Contract redline"}]
+    assert written.unread == [{
+        "id": "t1", "text": "Contract redline",
+        "from_addr": "someone@x.com", "snippet": "snippet text",
+    }]
     assert written.events[0]["id"] == "e1"
     assert written.ts == NOW
 
@@ -732,6 +735,98 @@ def test_stale_snapshot_older_than_48h_is_ignored(tmp_path):
     brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
 
     assert brief.since_yesterday == []
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 5 — the incremental brief.
+# ---------------------------------------------------------------------------
+
+
+class _IdListingConnector(FakeConnector):
+    """A connector that supports the cheap ``list_thread_ids`` listing (build
+    prompt 33), so :func:`_incremental_unread_threads` can take the
+    optimized path instead of falling back to a full ``list_threads`` call.
+    Records every ``get_thread`` call so tests can assert exactly which
+    thread ids were actually fetched."""
+
+    def __init__(self, *, ids, by_id, **kw):
+        super().__init__(**kw)
+        self._ids = ids
+        self._by_id = by_id
+        self.get_thread_calls: list[str] = []
+        self.list_thread_ids_calls: list[str] = []
+
+    def list_thread_ids(self, query="is:unread", *, max_results=20):
+        self.list_thread_ids_calls.append(query)
+        return self._ids
+
+    def get_thread(self, thread_id):
+        self.get_thread_calls.append(thread_id)
+        return self._by_id[thread_id]
+
+
+def test_incremental_brief_skips_fetch_for_unchanged_threads(tmp_path):
+    """The build prompt's own acceptance intent: a thread still unread
+    today, exactly as it was in yesterday's snapshot, is reconstructed from
+    the snapshot alone — no ``get_thread`` call — while a genuinely NEW
+    thread id still gets a full fetch."""
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    store.save(BriefSnapshot(
+        unread=[{
+            "id": "old1", "text": "Unchanged thread",
+            "from_addr": "vip@example.com", "snippet": "still here",
+        }],
+        events=[], quiet_thread_ids=[], ts=NOW - timedelta(hours=2),
+    ))
+    new_thread = _thread(thread_id="new1", subject="Brand new thread")
+    conn = _IdListingConnector(
+        ids=["old1", "new1"],
+        by_id={"new1": new_thread},
+    )
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    assert conn.get_thread_calls == ["new1"]  # only the NEW id was fetched
+    assert conn.list_thread_ids_calls == ["is:unread newer_than:1d"]
+    assert conn.thread_queries == []  # the full list_threads path never ran
+    mail_text = client.calls[0]["messages"][-1]["content"]
+    assert "Unchanged thread" in mail_text
+    assert "vip@example.com" in mail_text
+    assert "Brand new thread" in mail_text
+
+
+def test_incremental_brief_drops_id_when_reconstruction_and_fetch_both_fail(tmp_path):
+    """A thread id present in neither the snapshot nor a successful fetch
+    (e.g. deleted, or a transient error) is skipped — the incremental path
+    must never break the brief over one bad id."""
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    store.save(BriefSnapshot(unread=[], events=[], quiet_thread_ids=[], ts=NOW))
+    conn = _IdListingConnector(ids=["missing1"], by_id={})  # get_thread raises KeyError
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    assert brief.unread_count == 0
+    assert brief.summary
+
+
+def test_incremental_brief_falls_back_without_list_thread_ids(tmp_path):
+    """A connector with no ``list_thread_ids`` (an older backend, or a
+    minimal test fake) degrades to today's exact full ``list_threads``
+    call — identical results, just not the optimization."""
+    store = JsonBriefSnapshot(str(tmp_path / "snap.json"))
+    store.save(BriefSnapshot(
+        unread=[{"id": "old1", "text": "Unchanged thread"}],
+        events=[], quiet_thread_ids=[], ts=NOW - timedelta(hours=2),
+    ))
+    conn = FakeConnector(threads=[_thread(thread_id="old1", subject="Unchanged thread")])
+    client = FakeClient()
+
+    brief = assemble_brief(conn, client, now=NOW, snapshot_store=store)
+
+    assert conn.thread_queries == ["is:unread newer_than:1d"]  # full path ran
+    assert brief.unread_count == 1
 
 
 def test_snapshot_read_failure_never_breaks_the_brief():
@@ -912,3 +1007,62 @@ def test_pending_lookup_failure_never_breaks_the_brief():
 
     assert brief.pending_tally is None
     assert brief.summary
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 5 — brief memoization.
+# ---------------------------------------------------------------------------
+
+from attune.brief import InMemoryBriefCache  # noqa: E402
+
+
+def test_second_request_within_ttl_is_served_from_cache_not_recomputed():
+    conn = FakeConnector(threads=[_thread(subject="Contract redline")])
+    client = FakeClient()
+    cache = InMemoryBriefCache(ttl_seconds=300)
+
+    first = assemble_brief(conn, client, now=NOW, cache=cache, cache_key="me")
+    second = assemble_brief(
+        conn, client, now=NOW + timedelta(minutes=2), cache=cache, cache_key="me",
+    )
+
+    assert second is first  # the exact cached object, not a recomputed one
+    assert len(client.calls) == 1  # only ONE model call across both requests
+    assert conn.thread_queries == ["is:unread newer_than:1d"]  # only ONE fetch
+
+
+def test_cache_expires_after_ttl():
+    conn = FakeConnector(threads=[_thread(subject="Contract redline")])
+    client = FakeClient()
+    cache = InMemoryBriefCache(ttl_seconds=300)
+
+    assemble_brief(conn, client, now=NOW, cache=cache, cache_key="me")
+    assemble_brief(conn, client, now=NOW + timedelta(minutes=10), cache=cache, cache_key="me")
+
+    assert len(client.calls) == 2  # the TTL lapsed, so it recomputed
+    assert len(conn.thread_queries) == 2
+
+
+def test_different_cache_keys_never_share_a_cached_brief():
+    """A multi-tenant caller sharing one cache instance must never serve
+    one principal's cached brief to another's request."""
+    conn = FakeConnector(threads=[_thread(subject="Contract redline")])
+    client = FakeClient()
+    cache = InMemoryBriefCache(ttl_seconds=300)
+
+    assemble_brief(conn, client, now=NOW, cache=cache, cache_key="tenant-a")
+    assemble_brief(conn, client, now=NOW, cache=cache, cache_key="tenant-b")
+
+    assert len(client.calls) == 2  # each tenant's first request recomputes
+
+
+def test_no_cache_means_always_recomputed():
+    """Absent cache/cache_key (every pre-existing caller), behavior is
+    exactly today's: always recomputed."""
+    conn = FakeConnector(threads=[_thread(subject="Contract redline")])
+    client = FakeClient()
+
+    assemble_brief(conn, client, now=NOW)
+    assemble_brief(conn, client, now=NOW)
+
+    assert len(client.calls) == 2

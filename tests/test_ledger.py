@@ -265,6 +265,40 @@ def test_metrics_slice_with_no_rows_is_all_none():
     assert m.proposals == 0
     assert m.edit_burden is None
     assert m.coverage is None
+    assert m.triage_escalation_rate is None
+
+
+def test_triage_escalation_rate_is_distinct_from_autonomy_escalation_rate(tmp_path):
+    """Build prompt 33, task 7: cascade triage's escalation rate (cheap ->
+    strong model) must be its own metric, never conflated with the
+    pre-existing ``escalation_rate`` (autonomy-rung fallback to a human
+    interrupt) — the two measure unrelated things."""
+    ledger = SqliteDecisionLedger(str(tmp_path / "ledger.db"))
+    ledger.propose(_row(
+        proposal_id="a", thread_id="a", triage_escalated=True,
+        autonomy_rung_granted=3, autonomy_rung_used=3,
+    ))
+    ledger.propose(_row(
+        proposal_id="b", thread_id="b", triage_escalated=False,
+        autonomy_rung_granted=3, autonomy_rung_used=1,  # an autonomy escalation
+    ))
+    m = compute_metrics_slice(ledger.rows())
+
+    assert m.triage_escalation_rate == pytest.approx(1 / 2)
+    assert m.escalation_rate == pytest.approx(1 / 2)  # unrelated, happens to also be 1/2
+    # A row that never recorded a triage decision (e.g. calendar) must not
+    # count toward the denominator at all.
+    ledger.propose(_row(proposal_id="c", thread_id="c"))
+    m2 = compute_metrics_slice(ledger.rows())
+    assert m2.triage_escalation_rate == pytest.approx(1 / 2)
+
+
+def test_render_metrics_table_shows_triage_escalation_column(tmp_path):
+    ledger = SqliteDecisionLedger(str(tmp_path / "ledger.db"))
+    ledger.propose(_row(triage_escalated=True, eligible_item_count=1, batch_id="b1"))
+    ledger.complete("gmail:t1:100", decision="approved", applied_ok=True)
+    text = render_metrics_table(ledger.rows(), window_days=14, now=NOW)
+    assert "triage_esc%" in text
 
 
 def test_render_metrics_table_always_shows_coverage(tmp_path):

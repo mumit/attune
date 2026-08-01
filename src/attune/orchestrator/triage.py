@@ -104,15 +104,33 @@ logger = logging.getLogger(__name__)
 # stays the fallback parse path either way (_parse_triage_response tries
 # JSON first, then falls back to the line parse) -- a malformed response
 # under either path still yields the fail-closed ROUTINE default.
+#
+# ``confidence`` (build prompt 33, task 7 — cascade triage) is the signal
+# that makes escalation worth reading at all: without it, "escalate on low
+# confidence" has nothing to threshold against. Only available on the
+# structured-output path; the plain PRIORITY:/REASON: text fallback has no
+# confidence line, so a gateway without structured output simply never
+# escalates on this one trigger (the other two — HIGH-tier sender, a
+# deterministic-adjustment disagreement — still work either way).
 _TRIAGE_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "priority": {"type": "string", "enum": ["URGENT", "ROUTINE", "NOISE"]},
         "reason": {"type": "string"},
+        "confidence": {"type": "number"},
     },
-    "required": ["priority", "reason"],
+    "required": ["priority", "reason", "confidence"],
     "additionalProperties": False,
 }
+
+# Cascade triage (build prompt 33, task 7): below this confidence, the cheap
+# CLASSIFY model's own call is escalated to a second pass on Task.REASON's
+# (stronger) model. 0.6 is a conservative middle ground — low enough that a
+# merely-uncertain-sounding but plausible call doesn't escalate on every
+# request (defeating the point of a cheap default model), high enough that
+# a model reporting a coin-flip guess gets a second opinion before anything
+# ships to a human as a proposal.
+CASCADE_CONFIDENCE_THRESHOLD = 0.6
 
 
 class Priority(str, Enum):
@@ -132,12 +150,21 @@ class TriageResult:
     ``TriageResult(priority, reason)`` directly — tests, injected
     ``triage_fn`` overrides — keeps working unchanged and unadjusted.
     ``adjusted`` is True only when the profile actually moved the tier.
+
+    ``confidence`` (build prompt 33, task 7) is the cheap model's own
+    reported confidence, 0.0-1.0 — ``None`` when the gateway doesn't
+    support structured output (the text-parse fallback has no confidence
+    line) or a direct-construction call site never set one. ``escalated``
+    is True only when cascade triage actually invoked the strong
+    (Task.REASON) model for a second pass — see :func:`_should_escalate`.
     """
 
     priority: Priority
     reason: str
     base_priority: Priority | None = None
     adjusted: bool = False
+    confidence: float | None = None
+    escalated: bool = False
 
     def __post_init__(self) -> None:
         if self.base_priority is None:
@@ -218,20 +245,38 @@ def triage_thread(
             "type": "json_schema",
             "json_schema": {"name": "triage_result", "schema": _TRIAGE_JSON_SCHEMA, "strict": True},
         }
-    resp = call_with_retry(
-        lambda: create_chat_completion(
-            client,
-            model=model_for(Task.CLASSIFY),
-            messages=[
-                render_system_message(PROMPT_TRIAGE.stable_prefix, volatile, capabilities=caps),
-                {"role": "user", "content": f"[UNTRUSTED mail]\n{incoming_summary}"},
-            ],
-            **kwargs,
-        ),
-        capabilities=caps,
-    )
-    result = _parse_triage_response(resp.choices[0].message.content)
-    return _apply_importance_adjustment(result, importance_profile, sender, now=now)
+    messages = [
+        render_system_message(PROMPT_TRIAGE.stable_prefix, volatile, capabilities=caps),
+        {"role": "user", "content": f"[UNTRUSTED mail]\n{incoming_summary}"},
+    ]
+
+    def _classify(model: str) -> TriageResult:
+        resp = call_with_retry(
+            lambda: create_chat_completion(
+                client, model=model, messages=messages, **kwargs,
+            ),
+            capabilities=caps,
+        )
+        return _parse_triage_response(resp.choices[0].message.content)
+
+    base_result = _classify(model_for(Task.CLASSIFY))
+    assessment = _assess_sender(importance_profile, sender, now=now)
+    candidate = _apply_assessment(base_result, assessment)
+
+    if _should_escalate(base_result, assessment, candidate):
+        # Cascade triage (build prompt 33, task 7): the cheap model's own
+        # call wasn't good enough evidence on its own — low confidence, a
+        # HIGH-tier sender worth a careful pass, or the deterministic
+        # profile disagreeing with what the cheap model said — so get a
+        # second opinion from the stronger Task.REASON model, then apply
+        # the SAME deterministic profile adjustment to THAT result. The
+        # profile is the principal's own recorded state (module docstring's
+        # v3 section) and stays authoritative regardless of which model
+        # produced the base classification.
+        escalated_base = _classify(model_for(Task.REASON))
+        candidate = _apply_assessment(escalated_base, assessment)
+        candidate.escalated = True
+    return candidate
 
 
 def _past_reactions(
@@ -264,28 +309,36 @@ def _past_reactions(
     )
 
 
-def _apply_importance_adjustment(
-    result: TriageResult,
-    importance_profile: Any,
-    sender: str | None,
-    *,
-    now: datetime | None = None,
-) -> TriageResult:
-    """Apply the deterministic per-sender tier adjustment (module docstring,
-    v3) on top of a model classification. Returns ``result`` unchanged when
-    there's no profile/sender, when the tier is NORMAL, or when the
-    directional rule for this tier doesn't apply to the current priority
-    (e.g. a LOW-tier sender's NOISE stays NOISE — there's nothing lower to
-    demote to)."""
+def _assess_sender(
+    importance_profile: Any, sender: str | None, *, now: datetime | None = None,
+) -> Any | None:
+    """The sender's :class:`~orchestrator.importance.TierAssessment`, or
+    ``None`` when there's no profile/sender or the assessment failed — a
+    broken profile must never break triage. Split out of the old
+    ``_apply_importance_adjustment`` (build prompt 33, task 7) so cascade
+    triage's escalation check (:func:`_should_escalate`, which needs the
+    sender's TIER) and :func:`_apply_assessment` (which needs the full
+    assessment) share one call to ``assess`` instead of two."""
     if importance_profile is None or not sender:
-        return result
-
+        return None
     try:
-        assessment = importance_profile.assess(sender, now=now)
+        return importance_profile.assess(sender, now=now)
     except Exception:  # noqa: BLE001 — a broken profile must never break triage
         logger.warning(
             "importance profile assess failed for sender=%s", sender, exc_info=True
         )
+        return None
+
+
+def _apply_assessment(result: TriageResult, assessment: Any | None) -> TriageResult:
+    """Apply the deterministic per-sender tier adjustment (module docstring,
+    v3) on top of a model classification, given an already-resolved
+    assessment (see :func:`_assess_sender`). Returns ``result`` unchanged
+    when there's no assessment, when the tier is NORMAL, or when the
+    directional rule for this tier doesn't apply to the current priority
+    (e.g. a LOW-tier sender's NOISE stays NOISE — there's nothing lower to
+    demote to)."""
+    if assessment is None:
         return result
 
     if assessment.tier == ImportanceTier.LOW and assessment.probation:
@@ -322,7 +375,29 @@ def _apply_importance_adjustment(
         reason=reason,
         base_priority=result.priority,
         adjusted=True,
+        confidence=result.confidence,
     )
+
+
+def _should_escalate(
+    base_result: TriageResult, assessment: Any | None, candidate: TriageResult,
+) -> bool:
+    """Cascade triage (build prompt 33, task 7): escalate the cheap
+    CLASSIFY-model call to a second pass on the stronger Task.REASON model
+    when any of three independent signals hold — low model-reported
+    confidence, a HIGH-tier sender (worth the cost of a careful look), or
+    the deterministic importance adjustment disagreeing with what the
+    cheap model said (``candidate.adjusted``). A gateway without structured
+    output never reports ``confidence`` at all — that one trigger simply
+    never fires there; the other two are unconditional."""
+    if (
+        base_result.confidence is not None
+        and base_result.confidence < CASCADE_CONFIDENCE_THRESHOLD
+    ):
+        return True
+    if assessment is not None and assessment.tier == ImportanceTier.HIGH:
+        return True
+    return candidate.adjusted
 
 
 def _parse_triage_response(text: str) -> TriageResult:
@@ -353,9 +428,15 @@ def _parse_triage_response(text: str) -> TriageResult:
 
 
 def _parse_triage_json(text: str) -> TriageResult | None:
-    """The structured-output shape: ``{"priority": ..., "reason": ...}``.
-    ``None`` on anything that isn't exactly that shape — the caller falls
-    back to the text parse rather than guessing."""
+    """The structured-output shape: ``{"priority": ..., "reason": ...,
+    "confidence": ...}``. ``None`` on anything that isn't at least the
+    required ``priority``/``reason`` shape — the caller falls back to the
+    text parse rather than guessing. ``confidence`` (build prompt 33, task
+    7) is optional here even though the schema declares it required —
+    older cached responses or a gateway that ignores ``strict`` shouldn't
+    turn an otherwise-valid classification into a parse failure; a
+    missing/malformed value just leaves cascade triage unable to use the
+    confidence trigger for this one call."""
     try:
         obj = json.loads((text or "").strip())
     except ValueError:
@@ -369,4 +450,8 @@ def _parse_triage_json(text: str) -> TriageResult | None:
         priority = Priority(raw_priority.strip().lower())
     except ValueError:
         return None
-    return TriageResult(priority=priority, reason=reason.strip())
+    confidence: float | None = None
+    raw_confidence = obj.get("confidence")
+    if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool):
+        confidence = max(0.0, min(1.0, float(raw_confidence)))
+    return TriageResult(priority=priority, reason=reason.strip(), confidence=confidence)

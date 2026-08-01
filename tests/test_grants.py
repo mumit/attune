@@ -651,6 +651,7 @@ from attune.orchestrator.grants import (  # noqa: E402
     GRADUATION_CARD_EXCLUDED_ACTIONS,
     GRADUATION_CARD_MAX_RUNG,
     JsonGraduationState,
+    SqliteGraduationState,
     demotion_thread_id,
     graduation_thread_id,
     resolve_autonomy_card,
@@ -709,6 +710,65 @@ def test_graduation_state_missing_card_is_none(tmp_path):
 
 def test_graduation_state_cooldown_round_trips(tmp_path):
     state = JsonGraduationState(str(tmp_path / "graduation_state.json"))
+    key = "graduation:draft_reply:mail:act_notify"
+    assert state.in_cooldown(key, now=NOW) is False
+
+    state.record_rejection(key, at=NOW)
+    assert state.in_cooldown(key, now=NOW) is True
+    assert state.in_cooldown(key, now=NOW + timedelta(days=29)) is True
+    assert state.in_cooldown(key, now=NOW + timedelta(days=31)) is False
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 4: SQLite backend parity. The same method surface
+# (record_card/get_card/remove_card/in_cooldown/record_rejection), run
+# against both JsonGraduationState and SqliteGraduationState.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["json", "sqlite"])
+def graduation_backend(request, tmp_path):
+    if request.param == "sqlite":
+        return SqliteGraduationState(str(tmp_path / "graduation_state.db"))
+    return JsonGraduationState(str(tmp_path / "graduation_state.json"))
+
+
+def test_backend_graduation_state_card_round_trips(graduation_backend):
+    state = graduation_backend
+    scope = GrantScope(priorities=frozenset({"routine"}))
+    state.record_card(
+        "demotion:draft_reply:mail:propose", kind="demotion",
+        action=Action.DRAFT_REPLY, domain=Domain.MAIL, to_rung=Rung.PROPOSE,
+        scope=scope,
+    )
+    card = state.get_card("demotion:draft_reply:mail:propose")
+    assert card == {
+        "kind": "demotion", "action": Action.DRAFT_REPLY, "domain": Domain.MAIL,
+        "to_rung": Rung.PROPOSE, "scope": scope,
+    }
+    state.remove_card("demotion:draft_reply:mail:propose")
+    assert state.get_card("demotion:draft_reply:mail:propose") is None
+
+
+def test_backend_graduation_state_card_without_scope_round_trips(graduation_backend):
+    state = graduation_backend
+    state.record_card(
+        "graduation:draft_reply:mail:act_notify", kind="graduation",
+        action=Action.DRAFT_REPLY, domain=Domain.MAIL, to_rung=Rung.ACT_NOTIFY,
+    )
+    card = state.get_card("graduation:draft_reply:mail:act_notify")
+    assert card == {
+        "kind": "graduation", "action": Action.DRAFT_REPLY, "domain": Domain.MAIL,
+        "to_rung": Rung.ACT_NOTIFY, "scope": None,
+    }
+
+
+def test_backend_graduation_state_missing_card_is_none(graduation_backend):
+    assert graduation_backend.get_card("graduation:draft_reply:mail:act_notify") is None
+
+
+def test_backend_graduation_state_cooldown_round_trips(graduation_backend):
+    state = graduation_backend
     key = "graduation:draft_reply:mail:act_notify"
     assert state.in_cooldown(key, now=NOW) is False
 

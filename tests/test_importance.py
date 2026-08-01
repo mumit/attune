@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from attune.memory.signals import ActionSignal
 from attune.orchestrator.importance import (
     DECAY_DAYS,
@@ -16,6 +18,7 @@ from attune.orchestrator.importance import (
     MAX_SIGNALS,
     ImportanceTier,
     JsonImportanceProfile,
+    SqliteImportanceProfile,
     TierAssessment,
 )
 
@@ -765,3 +768,86 @@ def test_record_manual_engagement_profile_failure_skips_thread_not_pass():
 
     assert recorded == 1  # the second thread still got recorded
     assert profile.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 4: SQLite backend parity. The same ImportanceProfile
+# Protocol contract, run against both JsonImportanceProfile and
+# SqliteImportanceProfile.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["json", "sqlite"])
+def importance_backend(request, tmp_path):
+    if request.param == "sqlite":
+        return SqliteImportanceProfile(str(tmp_path / "importance.db"))
+    return JsonImportanceProfile(str(tmp_path / "importance.json"))
+
+
+def test_backend_unknown_sender_is_normal(importance_backend):
+    assessment = importance_backend.assess("nobody@example.com", now=T0)
+    assert assessment == TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
+
+
+def test_backend_sender_key_is_normalized(importance_backend):
+    profile = importance_backend
+    profile.record_signal("  Sender@Example.com ", ActionSignal.APPROVED, ts=T0)
+    assert profile.senders() == ["sender@example.com"]
+    assert profile.assess("SENDER@example.com", now=T0).tier != ImportanceTier.LOW
+
+
+def test_backend_pin_always_wins(importance_backend):
+    profile = importance_backend
+    for _ in range(LOW_RUN_THRESHOLD):
+        profile.record_signal("a@x.com", ActionSignal.REJECTED, ts=T0)
+    profile.pin("a@x.com", ImportanceTier.HIGH)
+    assessment = profile.assess("a@x.com", now=T0)
+    assert assessment.tier == ImportanceTier.HIGH
+    assert assessment.pinned is True
+
+
+def test_backend_unpin_removes_override(importance_backend):
+    profile = importance_backend
+    profile.pin("a@x.com", ImportanceTier.HIGH)
+    assert profile.unpin("a@x.com") is True
+    assert profile.unpin("a@x.com") is False
+    assert profile.assess("a@x.com", now=T0).pinned is False
+
+
+def test_backend_low_run_demotes(importance_backend):
+    profile = importance_backend
+    for i in range(LOW_RUN_THRESHOLD):
+        profile.record_signal("a@x.com", ActionSignal.IGNORED, ts=T0 + timedelta(hours=i))
+    assert profile.assess("a@x.com", now=T0 + timedelta(hours=LOW_RUN_THRESHOLD)).tier == ImportanceTier.LOW
+
+
+def test_backend_high_approval_ratio_promotes(importance_backend):
+    profile = importance_backend
+    for i in range(HIGH_MIN_SIGNALS):
+        profile.record_signal("a@x.com", ActionSignal.APPROVED, ts=T0 + timedelta(hours=i))
+    assert profile.assess("a@x.com", now=T0 + timedelta(hours=HIGH_MIN_SIGNALS)).tier == ImportanceTier.HIGH
+
+
+def test_backend_decayed_signals_are_ignored(importance_backend):
+    profile = importance_backend
+    for i in range(LOW_RUN_THRESHOLD):
+        profile.record_signal("a@x.com", ActionSignal.IGNORED, ts=T0)
+    stale_now = T0 + timedelta(days=DECAY_DAYS + 1)
+    assessment = profile.assess("a@x.com", now=stale_now)
+    assert assessment.tier == ImportanceTier.NORMAL
+    assert assessment.reason == "no recorded signals"
+
+
+def test_backend_signals_bounded_to_max_signals(importance_backend):
+    profile = importance_backend
+    for i in range(MAX_SIGNALS + 5):
+        profile.record_signal("a@x.com", ActionSignal.APPROVED, ts=T0 + timedelta(hours=i))
+    signals = profile.recent_signals("a@x.com", now=T0 + timedelta(hours=MAX_SIGNALS + 5))
+    assert len(signals) == MAX_SIGNALS
+
+
+def test_backend_senders_lists_pinned_and_signaled(importance_backend):
+    profile = importance_backend
+    profile.record_signal("a@x.com", ActionSignal.APPROVED, ts=T0)
+    profile.pin("b@x.com", ImportanceTier.LOW)
+    assert profile.senders() == ["a@x.com", "b@x.com"]

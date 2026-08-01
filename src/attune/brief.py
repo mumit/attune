@@ -96,6 +96,7 @@ import json
 import os
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -127,6 +128,14 @@ from .orchestrator.triage import Priority
 
 MAX_PREP_EVENTS = 8
 QUIET_MIN_AGE_DAYS = 3
+
+# Build prompt 33, task 1: bounded worker pool for the brief's independent
+# Google/memory reads — the initial list_threads/list_events pair, and
+# _meeting_prep's up-to-MAX_PREP_EVENTS × (memory search + list_threads).
+# Bounded (not unbounded fan-out) because Google rate-limits; every
+# collaborator here (connector, MemoryStore) is already injected, so a fake
+# stays a fake under concurrency too.
+BRIEF_IO_POOL_SIZE = 8
 
 # Phase 3 stage 3 (G11) — "since yesterday" snapshot staleness: older than
 # this and the prior snapshot is ignored outright (documented, not an
@@ -386,13 +395,25 @@ def _save_snapshot(
     now: datetime,
 ) -> None:
     """Write today's snapshot for tomorrow's brief to diff against. Never
-    raises — a snapshot write failure must never break the brief."""
+    raises — a snapshot write failure must never break the brief.
+
+    Build prompt 33, task 5: each unread entry now also carries
+    ``from_addr``/``snippet`` (not just id + subject) — the exact extension
+    ``docs/decisions.md``'s prompt-32 entry named as the missing piece for
+    an incremental brief: enough to reconstruct an "unchanged since
+    yesterday" :class:`EmailThread` from the snapshot alone, no fetch
+    needed. See :func:`_incremental_unread_threads`."""
     if snapshot_store is None:
         return
     try:
         snapshot_store.save(BriefSnapshot(
             unread=[
-                {"id": t.thread_id, "text": _bounded_snapshot_text(t.subject)}
+                {
+                    "id": t.thread_id,
+                    "text": _bounded_snapshot_text(t.subject),
+                    "from_addr": _bounded_snapshot_text(t.from_addr),
+                    "snippet": _bounded_snapshot_text(t.snippet),
+                }
                 for t in threads
             ],
             events=[
@@ -404,6 +425,74 @@ def _save_snapshot(
         ))
     except Exception:  # noqa: BLE001 — a snapshot write must never break the brief
         pass
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 5 — the incremental brief.
+# ---------------------------------------------------------------------------
+
+
+def _reconstruct_unread_thread(thread_id: str, snapshot_entry: dict[str, str]) -> EmailThread:
+    """An ``EmailThread`` built straight from a prior snapshot's stored
+    fields, for a thread that's still unread today exactly as it was
+    yesterday — no fetch. ``body`` is deliberately empty: nothing in
+    ``assemble_brief``'s unread-mail rendering or ordering reads it (only
+    ``from_addr``/``subject``/``snippet``/``thread_id``), and the snapshot
+    never stored it in the first place (bounded state, module docstring)."""
+    return EmailThread(
+        thread_id=thread_id,
+        subject=snapshot_entry.get("text", ""),
+        snippet=snapshot_entry.get("snippet", ""),
+        from_addr=snapshot_entry.get("from_addr", ""),
+        body="",
+    )
+
+
+def _incremental_unread_threads(
+    connector: WorkspaceConnector,
+    query: str,
+    prior: BriefSnapshot,
+    *,
+    max_results: int = 25,
+) -> list[EmailThread]:
+    """The incremental-brief read (build prompt 33, task 5): a cheap
+    IDs-only listing (``connector.list_thread_ids``), diffed against
+    yesterday's snapshot, so only genuinely NEW unread thread ids get a
+    full fetch — unchanged ids are reconstructed straight from the
+    snapshot's own stored fields (:func:`_reconstruct_unread_thread`), no
+    fetch at all. This is the exact design ``docs/decisions.md``'s prompt-32
+    entry deferred to this build prompt, made real.
+
+    Degrades to today's exact full ``list_threads`` call — identical
+    results, just not the optimization — when the connector has no
+    ``list_thread_ids`` (an older backend or a minimal test fake) or the
+    cheap listing itself fails; the incremental path must never be a NEW
+    way to break the brief."""
+    list_ids = getattr(connector, "list_thread_ids", None)
+    if list_ids is None:
+        return connector.list_threads(query, max_results=max_results)
+    try:
+        current_ids = list_ids(query, max_results=max_results)
+    except Exception:  # noqa: BLE001 — the incremental path must never break the brief
+        return connector.list_threads(query, max_results=max_results)
+
+    prior_by_id = {u["id"]: u for u in prior.unread}
+    new_ids = [i for i in current_ids if i not in prior_by_id]
+
+    by_id: dict[str, EmailThread] = {
+        i: _reconstruct_unread_thread(i, prior_by_id[i])
+        for i in current_ids if i in prior_by_id
+    }
+    if new_ids:
+        pool_size = min(BRIEF_IO_POOL_SIZE, len(new_ids))
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
+            futures = {i: pool.submit(connector.get_thread, i) for i in new_ids}
+            for i, future in futures.items():
+                try:
+                    by_id[i] = future.result()
+                except Exception:  # noqa: BLE001 — one bad fetch must not drop the rest
+                    continue
+    return [by_id[i] for i in current_ids if i in by_id]
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +901,53 @@ def build_spine(
     return [_render_spine_entry(group, pending=pending) for group in ranked]
 
 
+class BriefCache(Protocol):
+    def get(self, key: str, *, now: datetime) -> "Brief | None": ...
+
+    def set(self, key: str, brief: Brief, *, now: datetime) -> None: ...
+
+
+# Build prompt 33, task 5: how long a memoized brief is served before the
+# next "give me the brief" request re-assembles from scratch. Short enough
+# that a stale card/pending-tally/attention-item never lingers more than a
+# few minutes; long enough that the common case this exists for — a
+# principal asking twice in quick succession, or a Slack + Chat request
+# landing moments apart — is served, not recomputed.
+BRIEF_CACHE_TTL_SECONDS = 300
+
+
+class InMemoryBriefCache:
+    """Process-local, in-memory TTL memoization for the assembled
+    :class:`Brief` (build prompt 33, task 5) — "a second 'give me the
+    brief' within minutes is served, not recomputed." Deliberately NOT
+    persisted anywhere: a restart simply means the next request assembles
+    fresh, the same posture ``InboundRateLimiter`` (dispatcher.py) already
+    takes for a process-local courtesy cache that isn't part of the trust
+    root.
+
+    Keyed by caller-supplied ``key`` (:func:`assemble_brief`'s
+    ``cache_key``, e.g. ``user_id`` for a single-principal deployment) so
+    hosted's multi-tenant callers can share one cache instance without one
+    tenant's brief ever being served to another's request.
+    """
+
+    def __init__(self, *, ttl_seconds: float = BRIEF_CACHE_TTL_SECONDS):
+        self._ttl = timedelta(seconds=ttl_seconds)
+        self._entries: dict[str, tuple[Brief, datetime]] = {}
+
+    def get(self, key: str, *, now: datetime) -> "Brief | None":
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        brief, cached_at = entry
+        if now - cached_at >= self._ttl:
+            return None
+        return brief
+
+    def set(self, key: str, brief: Brief, *, now: datetime) -> None:
+        self._entries[key] = (brief, now)
+
+
 def assemble_brief(
     connector: WorkspaceConnector,
     client: Any,
@@ -830,9 +966,21 @@ def assemble_brief(
     approval_channel_name: str | None = None,
     memory_min_score: float | None = None,
     capabilities: ModelCapabilities | None = None,
+    cache: "BriefCache | None" = None,
+    cache_key: str | None = None,
 ) -> Brief:
     """Read unread mail + today's events (+ prep and quiet threads) and
     produce a short summary.
+
+    ``cache``/``cache_key`` (build prompt 33, task 5, optional): when both
+    are given, a cached :class:`Brief` less than :data:`BRIEF_CACHE_TTL_SECONDS`
+    old for ``cache_key`` is returned immediately — no fetches, no model
+    call — and a freshly assembled brief is cached before returning.
+    Absent either (the CLI's plain preview path, and any caller that
+    doesn't pass a cache), behavior is exactly today's: always recomputed.
+    ``cache_key`` should identify the requesting principal (``user_id`` is
+    the natural choice) so a multi-tenant caller never serves one
+    principal's cached brief to another's request.
 
     ``client`` uses the OpenAI-compatible Chat Completions surface; ``connector`` is any
     WorkspaceConnector; ``store`` (optional) is a MemoryStore searched for
@@ -871,6 +1019,15 @@ def assemble_brief(
     the module docstring), no section, no write.
     """
     now = now or datetime.now(timezone.utc)
+
+    # Build prompt 33, task 5: a fresh memoized brief is served as-is, no
+    # fetches, no model call — see BriefCache's docstring for why this is
+    # safe to skip everything below entirely.
+    if cache is not None and cache_key is not None:
+        cached = cache.get(cache_key, now=now)
+        if cached is not None:
+            return cached
+
     zone = ZoneInfo(tz)
 
     # "Today" in the user's timezone, converted to UTC for the API window.
@@ -878,12 +1035,46 @@ def assemble_brief(
     day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
 
-    threads = connector.list_threads(unread_query, max_results=25)
-    threads = _order_by_importance(threads, importance_profile)
-    events = connector.list_events(
-        time_min=day_start.astimezone(timezone.utc),
-        time_max=day_end.astimezone(timezone.utc),
-    )
+    # Build prompt 33, task 5: load the prior snapshot BEFORE fetching, so
+    # a fresh one can steer the unread-mail read onto the cheap incremental
+    # path (_incremental_unread_threads) instead of always doing a full
+    # list_threads. Absent (no store, first run, or stale — see
+    # _load_fresh_snapshot), behavior is exactly today's full fetch.
+    prior_snapshot = _load_fresh_snapshot(snapshot_store, now=now)
+
+    # Build prompt 33, task 1: the initial unread-mail listing, today's
+    # event listing, and (when there's a user_email to match against) the
+    # quiet-thread "in:sent" listing are three genuinely independent Google
+    # reads — dispatched into one bounded pool rather than three sequential
+    # round trips. _meeting_prep needs `events` first, so it stays a
+    # separate step below (it runs its own bounded pool internally).
+    with ThreadPoolExecutor(max_workers=BRIEF_IO_POOL_SIZE) as pool:
+        threads_future = (
+            pool.submit(
+                _incremental_unread_threads, connector, unread_query, prior_snapshot,
+            )
+            if prior_snapshot is not None
+            else pool.submit(connector.list_threads, unread_query, max_results=25)
+        )
+        events_future = pool.submit(
+            connector.list_events,
+            time_min=day_start.astimezone(timezone.utc),
+            time_max=day_end.astimezone(timezone.utc),
+        )
+        waiting_on_future = (
+            pool.submit(
+                find_quiet_threads, connector, user_email=user_email, now=now,
+                min_age_days=quiet_min_age_days,
+            )
+            if user_email else None
+        )
+        threads = _order_by_importance(threads_future.result(), importance_profile)
+        events = events_future.result()
+        waiting_on = (
+            _order_waiting_on(waiting_on_future.result(), importance_profile, now=now)
+            if waiting_on_future is not None else []
+        )
+
     attention_items = _recent_attention_items(attention_store, now=now)
 
     spine = build_spine(
@@ -895,15 +1086,9 @@ def assemble_brief(
     meetings = _meeting_prep(
         connector, store, events, user_id=user_id, min_score=memory_min_score
     )
-    waiting_on: list[EmailThread] = []
-    if user_email:
-        waiting_on = find_quiet_threads(
-            connector, user_email=user_email, now=now,
-            min_age_days=quiet_min_age_days,
-        )
-        waiting_on = _order_waiting_on(waiting_on, importance_profile, now=now)
 
-    prior_snapshot = _load_fresh_snapshot(snapshot_store, now=now)
+    # prior_snapshot was already loaded above (build prompt 33, task 5), to
+    # steer the unread-mail fetch strategy before it ran.
     since_yesterday = (
         _since_yesterday_lines(prior_snapshot, threads, events, waiting_on)
         if prior_snapshot is not None else []
@@ -974,7 +1159,7 @@ def assemble_brief(
         capabilities=caps,
     )
     summary = resp.choices[0].message.content
-    return Brief(
+    result = Brief(
         generated_at=now,
         unread_count=len(threads),
         event_count=len(events),
@@ -987,6 +1172,45 @@ def assemble_brief(
         since_yesterday=since_yesterday,
         pending_tally=pending_tally,
     )
+    if cache is not None and cache_key is not None:
+        cache.set(cache_key, result, now=now)
+    return result
+
+
+def _prep_one_meeting(
+    connector: WorkspaceConnector,
+    store: Any,
+    e: CalendarEvent,
+    *,
+    user_id: str,
+    min_score: float | None = None,
+) -> MeetingPrep:
+    """One event's memory search + related-thread lookup (build prompt 33,
+    task 1) — the per-event unit of work :func:`_meeting_prep` runs inside
+    its bounded pool. Never raises: both reads below already caught their
+    own failures before this was split out, so nothing here needs a new
+    safety net to stay safe under concurrency."""
+    notes: list[str] = []
+    if store is not None:
+        query = " ".join([e.summary, *e.attendees[:3]]).strip()
+        try:
+            mems = store.search(
+                query, user_id=user_id, limit=2, min_score=min_score
+            )
+        except Exception:  # noqa: BLE001 — prep is garnish, never fatal
+            mems = []
+        notes.extend(
+            frame_memory_text(m.text, getattr(m, "metadata", None)) for m in mems
+        )
+    query_parts = [f'"{e.summary}"'] + [f"from:{a}" for a in e.attendees[:2]]
+    try:
+        related = connector.list_threads(" OR ".join(query_parts), max_results=1)
+    except Exception:  # noqa: BLE001
+        related = []
+    if related:
+        t = related[0]
+        notes.append(f"last thread: {t.subject} — {t.snippet}")
+    return MeetingPrep(event=e, notes=notes)
 
 
 def _meeting_prep(
@@ -999,28 +1223,25 @@ def _meeting_prep(
 ) -> list[MeetingPrep]:
     """A line or two of context per meeting: remembered facts (memory) plus
     the most recent related thread (one capped metadata query per event —
-    no extra model calls; the one summarize call reads these as data)."""
-    meetings: list[MeetingPrep] = []
-    for e in events[:MAX_PREP_EVENTS]:
-        notes: list[str] = []
-        if store is not None:
-            query = " ".join([e.summary, *e.attendees[:3]]).strip()
-            try:
-                mems = store.search(
-                    query, user_id=user_id, limit=2, min_score=min_score
-                )
-            except Exception:  # noqa: BLE001 — prep is garnish, never fatal
-                mems = []
-            notes.extend(
-                frame_memory_text(m.text, getattr(m, "metadata", None)) for m in mems
+    no extra model calls; the one summarize call reads these as data).
+
+    Build prompt 33, task 1: each event's memory search + related-thread
+    lookup is independent of every other event's, so the up-to
+    :data:`MAX_PREP_EVENTS` calls run inside a bounded worker pool rather
+    than serially — this is the "8 × (memory search + list_threads)" read
+    the build prompt names directly. Results are returned in the SAME
+    order as ``events`` (not completion order), matching the pre-existing
+    return-order contract."""
+    capped = events[:MAX_PREP_EVENTS]
+    if not capped:
+        return []
+    pool_size = min(BRIEF_IO_POOL_SIZE, len(capped))
+    with ThreadPoolExecutor(max_workers=pool_size) as pool:
+        futures = [
+            pool.submit(
+                _prep_one_meeting, connector, store, e,
+                user_id=user_id, min_score=min_score,
             )
-        query_parts = [f'"{e.summary}"'] + [f"from:{a}" for a in e.attendees[:2]]
-        try:
-            related = connector.list_threads(" OR ".join(query_parts), max_results=1)
-        except Exception:  # noqa: BLE001
-            related = []
-        if related:
-            t = related[0]
-            notes.append(f"last thread: {t.subject} — {t.snippet}")
-        meetings.append(MeetingPrep(event=e, notes=notes))
-    return meetings
+            for e in capped
+        ]
+        return [f.result() for f in futures]

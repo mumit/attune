@@ -712,6 +712,83 @@ def test_transient_fetch_failure_retries_and_succeeds():
     assert "thread_fetch_failed" not in events
 
 
+def test_concurrent_batch_one_failure_enqueues_exactly_it_cursor_advances_once():
+    """Build prompt 33, task 1's own acceptance criterion: a batch processed
+    by the bounded worker pool where exactly one item permanently fails
+    still (a) enqueues exactly that one gmail_tid to the retry queue, (b)
+    advances the Gmail history cursor exactly once (the pre-existing
+    contract: ``process_notification`` commits the new baseline before any
+    per-item work starts, independent of concurrency), and (c) every OTHER
+    item in the same batch still succeeds and is returned in ``submitted``
+    — a concurrently-failing item must not take down its siblings."""
+
+    class _Queue:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def enqueue(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    class _CountingWatchState(_FakeWatchState):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.put_calls = 0
+
+        def put(self, email, *, history_id, expiration):
+            self.put_calls += 1
+            super().put(email, history_id=history_id, expiration=expiration)
+
+    class _PartiallyFailingConnector:
+        """Every thread fetches fine except "bad", which always raises —
+        a permanent (not transient/flaky) per-item failure."""
+
+        def get_thread(self, thread_id):
+            if thread_id == "bad":
+                raise ConnectionError("permanent failure")
+            return _FakeThread(thread_id, subject=f"subject-{thread_id}")
+
+        def list_threads(self, *a, **kw):
+            return []
+
+        def list_events(self, *a, **kw):
+            return []
+
+        def create_draft(self, *a, **kw):
+            ...
+
+    good_ids = [f"t{i}" for i in range(10)]
+    batch_ids = good_ids[:5] + ["bad"] + good_ids[5:]
+
+    queue = _Queue()
+    watch_state = _CountingWatchState(history_id="100")
+    result = handle_gmail_notification(
+        _fake_app_ctx(graph=_FakeGraph()),
+        {"emailAddress": "me@example.com", "historyId": "999"},
+        gmail_service=_FakeGmail(batch_ids),
+        watch_state=watch_state,
+        connector=_PartiallyFailingConnector(),
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        retry_queue=queue,
+    )
+
+    # Cursor advances exactly once for the whole notification, regardless
+    # of how many items in the batch (or how many failed) ran concurrently.
+    assert watch_state.put_calls == 1
+    assert watch_state.get("me@example.com")["history_id"] == "999"
+
+    # Exactly the one permanently-failing item reached the retry queue —
+    # not zero (silently lost), not more than one (a sibling wrongly
+    # dragged in), not duplicated (enqueued twice by a race).
+    assert queue.calls == [
+        (("gmail_thread", "bad", {"history_id": "999"}), {"error": "ConnectionError"})
+    ]
+
+    # Every other item in the batch still succeeded despite running
+    # alongside a failing sibling in the same bounded pool.
+    assert len(result) == len(good_ids)
+
+
 def test_gmail_state_carries_source_snapshot():
     graph = _FakeGraph()
     from datetime import datetime as _dt, timezone as _tz
@@ -2464,10 +2541,10 @@ class _CalendarWriteCapableConnector(_FakeCalendarConnector):
     def supports_calendar_writes(self):
         return self._supports
 
-    def decline_invite(self, event_id):
+    def decline_invite(self, event_id, *, current=None):
         self.decline_calls.append(event_id)
 
-    def reschedule_event(self, event_id, *, new_start, new_end):
+    def reschedule_event(self, event_id, *, new_start, new_end, current=None):
         self.reschedule_calls.append(
             {"event_id": event_id, "new_start": new_start, "new_end": new_end}
         )
@@ -2715,7 +2792,7 @@ def test_decline_proposals_capped_and_ranked_conflict_above_tier():
         def supports_calendar_writes(self):
             return True
 
-        def decline_invite(self, event_id):
+        def decline_invite(self, event_id, *, current=None):
             pass
 
     connector = _MultiConnector({"e1": e1, "e2": e2, "e3": e3, "e4": e4})
@@ -2901,7 +2978,7 @@ def test_reschedule_and_hold_share_one_combined_cap():
         def supports_calendar_writes(self):
             return True
 
-        def reschedule_event(self, event_id, *, new_start, new_end):
+        def reschedule_event(self, event_id, *, new_start, new_end, current=None):
             pass
 
     calendar_service = _FakeCalendarEventsService(pages=[
@@ -3897,10 +3974,10 @@ class _ExitScenarioConnector:
     def supports_calendar_writes(self):
         return True
 
-    def decline_invite(self, event_id):
+    def decline_invite(self, event_id, *, current=None):
         self.decline_calls.append(event_id)
 
-    def reschedule_event(self, event_id, *, new_start, new_end):
+    def reschedule_event(self, event_id, *, new_start, new_end, current=None):
         self.reschedule_calls.append((event_id, new_start, new_end))
 
 

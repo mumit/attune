@@ -2,6 +2,192 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-08-01 — Perform: concurrency, batching, incremental brief, sleep-time precompute, cascade triage (Phase P7, build prompt 33)
+
+Closes `docs/plan-2026-h2.md` P7. Measured, not estimated: the brief was
+~64 sequential Google round trips (10–25s), rebuilt from scratch on every
+on-demand request; one 25-thread Gmail notification cost ~25 Gmail calls,
+~50 model calls, ~50 memory searches, ~125 whole-file JSON/JSONL reads, and
+25 channel posts, all serial (60–90s). Across `src/attune`: zero
+`asyncio.gather`, zero `ThreadPoolExecutor`, zero Google `BatchHttpRequest`,
+zero `fields=` masks, zero ETag/`If-None-Match`.
+
+- **Bounded thread pools for every genuinely independent read, not async.**
+  `brief.assemble_brief` dispatches its initial `list_threads`/`list_events`/
+  quiet-thread `in:sent` listing into one `ThreadPoolExecutor(max_workers=
+  BRIEF_IO_POOL_SIZE=8)`; `_meeting_prep`'s up-to-8 (memory search +
+  related-thread lookup) pairs run in their own bounded pool, in
+  `events` order (not completion order); `dispatcher.handle_gmail_notification`
+  dispatches its whole per-thread fetch+triage+draft pipeline
+  (`_process_one_gmail_thread`) into a `NOTIFICATION_POOL_SIZE=8` pool.
+  Every collaborator each worker touches (`pending`, `importance`, the
+  audit log, the ledger, the retry queue) already guards its own
+  read-modify-write with `fslock.locked`/`threading.RLock` —
+  `fslock.py`'s own docstring notes `flock` excludes by the underlying
+  file, not the file descriptor, so it already serializes threads within
+  one process, not only processes — so no new locking was needed. The
+  codebase stays synchronous top-to-bottom; every fake connector/store
+  used in tests is unchanged.
+- **Determinism under concurrency is structural, not incidental.** Every
+  pool site collects futures in a plain list (submission order) and calls
+  `.result()` in THAT order, never `as_completed` — so `submitted`,
+  `label_offerable`, and every meeting-prep/brief-fetch result comes back
+  in the same order the serial code produced, regardless of which worker
+  finished first.
+- **The cursor-advance-then-retry-queue contract is unchanged under
+  concurrency, because it never depended on serial execution in the first
+  place.** `ingestion.gmail_history.process_notification` commits the new
+  history-id baseline (`state.put`) before `handle_gmail_notification`'s
+  per-thread loop — now a pool — ever starts, so "cursor already advanced"
+  is true by construction. Each worker (`_process_one_gmail_thread`)
+  catches its own fetch/submit failure, audits it, and enqueues to
+  `retry_queue` internally — never raising across the pool boundary except
+  the one pre-existing case (`retry_queue is None`), documented as a
+  behavior change: sibling items already dispatched to the pool may finish
+  rather than never starting, since work submits up front; every real
+  deployment wires a retry_queue, so this is a defensive-only path.
+- **Google `BatchHttpRequest` for `list_threads` hydration, `fields=`
+  masks everywhere, a new `list_thread_ids` for cheap ID-only listing, all
+  with graceful degradation.** `DirectOAuthConnector.list_threads` now does
+  one `fields="threads/id"`-masked `threads.list` then hydrates via
+  `service.new_batch_http_request()` (chunked at 50); when batching is
+  unavailable (an older client, or the attempt raises) it falls back to a
+  bounded `ThreadPoolExecutor` per-thread loop, not the original serial
+  one — a test proves the fallback returns IDENTICAL results to the batch
+  path. `list_thread_ids` (bare `list[str]`, cheap `fields=` mask, zero
+  hydration) is the new connector method the incremental brief (below)
+  needs; it has a naive `list_threads`-based default on the base
+  `WorkspaceConnector` ABC so `McpWorkspaceConnector` (already O(1) round
+  trips server-side) needs no override.
+- **Stop double-fetching calendar events.** `decline_invite`/
+  `reschedule_event` gained an optional `current: CalendarEvent | None`
+  parameter; when the caller (`draft_approve.make_calendar_action_apply_fn`,
+  which already re-fetches for the freshness check) passes its own
+  freshly-fetched event, the connector skips its internal `events.get()`
+  and reuses it. The freshness-check read itself is untouched — it's
+  documented at that call site as deliberately the one that must stay
+  late. Omitting `current` (every pre-existing caller) is byte-identical.
+- **A hardened retry helper (`attune.retry.retry_call`) replaces the bare
+  3-shot loop**, for both `dispatcher._fetch_with_retry` and the Google
+  calls inside `google_oauth.py` itself: jittered exponential backoff
+  capped at a max delay, and `Retry-After` honoured when the raised
+  exception exposes one (Google's `HttpError` shape) — same attempt count
+  as before (`retries + 1`), just no longer a hot spin against a
+  rate-limited API.
+- **Five hot-path JSON stores gained SQLite-backed siblings behind the
+  SAME Protocol interfaces** (`pending.SqlitePendingApprovals`,
+  `importance.SqliteImportanceProfile`, `attention.SqliteAttentionStore`,
+  `followup.SqliteNudgeState`, `grants.SqliteGraduationState`), selected
+  via `Settings.local_store_backend` (`ATTUNE_LOCAL_STORE_BACKEND`,
+  default `json` — this change does not flip the default). This confirms
+  the Protocol was always the stable seam: `hosted/intelligence.py`'s
+  `PostgresImportanceProfile`/`PostgresAttentionStore` needed zero changes.
+  `SqlitePendingApprovals.claim` uses `BEGIN IMMEDIATE` for the same
+  atomic check-then-update the JSON version got from `fslock`. The JSON
+  stores remain fully available — a storage swap behind a seam, not a
+  removal — documented via the new setting rather than a separate
+  migration script, since both backends start from whatever state exists
+  (or none) at their own path.
+- **The incremental brief — task 5, deferred whole in the prompt-32 entry
+  above, built as specified there.** `BriefSnapshot.unread` entries now
+  carry `from_addr`/`snippet` alongside the id/subject they already held;
+  `brief._incremental_unread_threads` calls the new `list_thread_ids` for
+  a cheap listing, diffs against the prior snapshot, reconstructs
+  unchanged threads straight from the snapshot (zero fetch), and only
+  fetches genuinely NEW ids (bounded pool). Degrades to today's full
+  `list_threads` call when the connector lacks `list_thread_ids` or the
+  cheap listing itself fails. The rejected shortcut named in that earlier
+  entry — narrowing the Gmail query to "since last brief" — stays
+  rejected; nothing about the query itself changed.
+- **A short-TTL, process-local memoization cache for the assembled
+  brief** (`brief.InMemoryBriefCache`, 300s default), keyed by the
+  requesting principal. Wired into the ON-DEMAND brief paths only
+  (Slack/Chat "give me the brief," via `runtime._assemble_runtime_brief`'s
+  new `brief_cache` parameter) — deliberately NOT into `Runtime.post_brief`,
+  because a cache hit returns before the snapshot load/save logic ever
+  runs, and the once-daily post is the one path that must always write a
+  fresh "since yesterday" baseline. This is the mirror image of
+  `snapshot_store`'s existing asymmetry, not a new one.
+- **Sleep-time precompute rides the existing durable scheduler, at a new
+  `brief_precompute_time` (default `06:00`, one hour before the default
+  `07:30` brief), gated on there being an actual brief destination and a
+  snapshot store to write into.** `Runtime.precompute_tomorrow_brief`
+  assembles the brief and writes a fresh `BriefSnapshot` — exactly
+  `post_brief`'s own snapshot-writing call, minus the channel posts — so
+  the morning's real post (or an early on-demand ask) reads a baseline at
+  most a few hours old and its own incremental-fetch path only fetches
+  what's new since. This is where sleep-time compute's ~5x reduction
+  actually pays off: the precompute doesn't skip the model call outright
+  (that would risk serving a stale "today" narrative on a night with zero
+  changes) — it removes the ~64-round-trip cold-start cost the morning
+  request would otherwise pay, which the benchmark below measures
+  directly. Best-effort: a failure here is logged and swallowed, the same
+  posture `run_consolidation` already holds for background nightly work.
+- **Cascade triage: Task.CLASSIFY (cheap) escalates to Task.REASON
+  (stronger) on low confidence, a HIGH-tier sender, or a deterministic-
+  importance disagreement.** `_TRIAGE_JSON_SCHEMA` gained a required
+  `confidence` field (only populated on the structured-output path — the
+  plain `PRIORITY:`/`REASON:` text fallback has no confidence line, so
+  that one trigger simply never fires there, the other two still do).
+  `_should_escalate` checks, in order: `confidence < 0.6`, sender tier ==
+  HIGH, or the deterministic tier adjustment would move the model's
+  priority (`candidate.adjusted`) — any one triggers a second `Task.REASON`
+  call over the SAME messages, and the deterministic adjustment is
+  re-applied to that escalated result (the profile stays authoritative
+  regardless of which model produced the base classification).
+  `TriageResult.escalated` threads through `dispatcher.submit_gmail_thread`'s
+  graph state as `triage_escalated`, into `LedgerRow.triage_escalated`
+  (its own SQLite column, its own metrics field) — deliberately NOT the
+  same name as the pre-existing `MetricsSlice.escalation_rate` (autonomy-
+  rung fallback to a human interrupt), which measures something unrelated;
+  conflating the two would silently merge two different metrics.
+- **Prompt caching's economics were already decided in build prompt 28**
+  (`prompts.py`'s own docstring cites this log): `cache_control: {"type":
+  "ephemeral"}` on the stable prefix only, gated behind
+  `ATTUNE_MODEL_SUPPORTS_PROMPT_CACHE`, byte-identical request shape when
+  off. `LedgerRow.cache_hit`/`MetricsSlice.cache_hit_rate` already
+  aggregate `llm.read_usage()`'s extraction of the provider's
+  `cached_tokens` count on the draft path — task 8 here is verification,
+  not new plumbing, confirmed by the existing `test_model_layer.py`
+  coverage of both the cache-control request shape and the hit-rate
+  aggregation.
+- **No semantic caching on the generation path, full stop.** A false
+  cache hit on a draft that gets sent is a correctness incident, not a
+  latency win — exact-match (the ledger's `proposal_id` dedup) and prefix
+  caching (above) are the only caching this build prompt adds anywhere
+  near a generated artifact a human might approve unedited.
+- **Benchmark** (`scripts/benchmark_p7.py`), against a fake connector with
+  injected per-call latency (0.12s/Google call, 0.35s/model call, matching
+  the measured 10–25s/60–90s ranges at the original call counts) —
+  "before" is a hand-written serial reproduction of the pre-this-prompt
+  access pattern over the SAME fake, not an estimate:
+
+  | Metric | Before | After | Target | Result |
+  |---|---|---|---|---|
+  | Brief wall clock | 5.09s | 0.65s | p50 < 3s | **PASS** |
+  | Brief Google calls | 36 | 11 | cut > 50% | **PASS** (69% cut) |
+  | 25-thread notification batch | 21.87s | 3.50s | < 15s | **PASS** (6.3x) |
+
+  The benchmark's flat per-call latency model doesn't separately isolate
+  the incremental-fetch (task 5) win on top of an already-batched
+  `list_threads` — a warm (post-precompute) run shows the same call count
+  as a cold one in this harness, since both model a "Google call" as one
+  latency unit regardless of payload. That specific behavior (zero
+  `get_thread` calls for threads unchanged since the snapshot) is verified
+  directly by `tests/test_brief.py::test_incremental_brief_skips_fetch_for_unchanged_threads`
+  instead.
+- **Verification.** New tests: `test_dispatcher.py`'s
+  `test_concurrent_batch_one_failure_enqueues_exactly_it_cursor_advances_once`
+  (the acceptance criterion, verbatim); `test_connectors.py`'s batch/
+  fallback-identical-results and double-fetch-elimination coverage;
+  `test_pending.py`/`test_importance.py`/`test_attention.py`/
+  `test_followup.py`/`test_grants.py`'s parametrized JSON-vs-SQLite backend
+  suites; `test_brief.py`'s incremental-fetch and memoization-cache tests;
+  `test_triage.py`'s cascade-escalation tests; `test_ledger.py`'s
+  `triage_escalation_rate` tests; `test_runtime.py`'s sleep-time-precompute
+  and on-demand-cache tests. Full suite: 2339 passed, 57 skipped
+  (pre-existing, live-service tests), zero regressions.
+
 ## 2026-07-31 — The eval harness: pairwise-only judging, a 75% agreement gate, injection-only simulated users (Phase P2, build prompt 27)
 
 Attune had 1,900+ tests and no evals: `test_memory_quality.py` made

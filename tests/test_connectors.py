@@ -276,6 +276,277 @@ def test_direct_oauth_label_id_is_cached_per_instance():
     assert len(gmail.modify_calls) == 2
 
 
+# --- list_threads: killing the N+1 (build prompt 33, task 2) --------------
+
+
+class FakeGmailThreadService:
+    """Fake for users().threads().list()/.get() -- NO batch support (no
+    ``new_batch_http_request``), so ``list_threads`` must take the bounded
+    thread-pool fallback path. ``thread_details`` is ``{id: raw threads.get()
+    response}``; list() returns ids in that dict's insertion order."""
+
+    def __init__(self, thread_details: dict):
+        self.thread_details = dict(thread_details)
+        self.get_calls: list[str] = []
+        self.list_calls: list[dict] = []
+
+    def users(self):
+        return self
+
+    def threads(self):
+        return self
+
+    def list(self, *, userId, q, maxResults, fields=None):  # noqa: N803
+        self.list_calls.append(
+            {"userId": userId, "q": q, "maxResults": maxResults, "fields": fields}
+        )
+        return _Exec({"threads": [{"id": tid} for tid in self.thread_details]})
+
+    def get(self, *, userId, id, format, metadataHeaders=None, fields=None):  # noqa: A002,N803
+        self.get_calls.append(id)
+        return _Exec(dict(self.thread_details[id]))
+
+
+class _FakeBatchRequest:
+    """Minimal ``googleapiclient.http.BatchHttpRequest`` stand-in: records
+    added requests and, on ``execute()``, synchronously runs each one's own
+    ``execute()`` and feeds the result (or exception) to the batch callback
+    -- close enough to real batch semantics to exercise the hydration code
+    without a network."""
+
+    def __init__(self, service, callback):
+        self._service = service
+        self._callback = callback
+        self._requests: list[tuple] = []
+
+    def add(self, request, *, request_id):
+        self._requests.append((request_id, request))
+
+    def execute(self):
+        self._service.batch_execute_calls += 1
+        for request_id, request in self._requests:
+            try:
+                response = request.execute()
+            except Exception as exc:  # noqa: BLE001 - batches tolerate per-item failure
+                self._callback(request_id, None, exc)
+                continue
+            self._callback(request_id, response, None)
+
+
+class FakeBatchGmailThreadService(FakeGmailThreadService):
+    """Same as :class:`FakeGmailThreadService` but also exposes
+    ``new_batch_http_request(...)``, so ``list_threads`` takes the
+    ``BatchHttpRequest`` path instead of the bounded fallback."""
+
+    def __init__(self, thread_details: dict):
+        super().__init__(thread_details)
+        self.batch_execute_calls = 0
+
+    def new_batch_http_request(self, *, callback):
+        return _FakeBatchRequest(self, callback)
+
+
+def _thread_detail(thread_id: str, *, subject: str, from_addr: str, snippet: str) -> dict:
+    return {
+        "id": thread_id,
+        "messages": [{
+            "id": f"m-{thread_id}",
+            "snippet": snippet,
+            "internalDate": "1700000000000",
+            "labelIds": ["UNREAD"],
+            "payload": {"headers": [
+                {"name": "From", "value": from_addr},
+                {"name": "Subject", "value": subject},
+            ]},
+        }],
+    }
+
+
+_SAMPLE_THREADS = {
+    "t1": _thread_detail("t1", subject="Hi", from_addr="a@x.com", snippet="hello"),
+    "t2": _thread_detail("t2", subject="Re: Hi", from_addr="b@x.com", snippet="hey"),
+    "t3": _thread_detail("t3", subject="FYI", from_addr="c@x.com", snippet="fyi"),
+}
+
+
+def test_direct_oauth_list_threads_uses_batch_hydration_when_available():
+    gmail = FakeBatchGmailThreadService(_SAMPLE_THREADS)
+    conn = DirectOAuthConnector(gmail_service=gmail)
+
+    threads = conn.list_threads("is:unread", max_results=10)
+
+    assert [t.thread_id for t in threads] == ["t1", "t2", "t3"]
+    assert [t.subject for t in threads] == ["Hi", "Re: Hi", "FYI"]
+    assert gmail.batch_execute_calls == 1  # one HTTP round trip, not N
+    assert gmail.list_calls[0]["fields"] == "threads/id"
+
+
+def test_direct_oauth_list_threads_falls_back_without_batch_support():
+    """No ``new_batch_http_request`` on the service -> the bounded
+    thread-pool fallback -- and the acceptance criterion: identical results
+    to the batch path for the same data."""
+    gmail = FakeGmailThreadService(_SAMPLE_THREADS)
+    conn = DirectOAuthConnector(gmail_service=gmail)
+
+    threads = conn.list_threads("is:unread", max_results=10)
+
+    assert [t.thread_id for t in threads] == ["t1", "t2", "t3"]
+    assert [t.subject for t in threads] == ["Hi", "Re: Hi", "FYI"]
+    assert [t.from_addr for t in threads] == ["a@x.com", "b@x.com", "c@x.com"]
+    assert sorted(gmail.get_calls) == ["t1", "t2", "t3"]  # per-thread, but it happened
+
+
+def test_direct_oauth_list_threads_batch_and_fallback_produce_identical_results():
+    batch_conn = DirectOAuthConnector(gmail_service=FakeBatchGmailThreadService(_SAMPLE_THREADS))
+    fallback_conn = DirectOAuthConnector(gmail_service=FakeGmailThreadService(_SAMPLE_THREADS))
+
+    batch_threads = batch_conn.list_threads("is:unread", max_results=10)
+    fallback_threads = fallback_conn.list_threads("is:unread", max_results=10)
+
+    assert [(t.thread_id, t.subject, t.from_addr, t.snippet) for t in batch_threads] == [
+        (t.thread_id, t.subject, t.from_addr, t.snippet) for t in fallback_threads
+    ]
+
+
+def test_direct_oauth_list_threads_batch_tolerates_one_failing_item():
+    """A batch response can partially fail -- one bad thread must not sink
+    the page, matching the pre-existing per-thread loop's tolerance."""
+    service = FakeBatchGmailThreadService({
+        "t1": _SAMPLE_THREADS["t1"],
+        "t2": _SAMPLE_THREADS["t2"],
+    })
+
+    # t3 is listed but has no detail -> its .get().execute() raises KeyError,
+    # which the batch callback must record as a per-item failure, not blow
+    # up the whole call.
+    original_list = service.list
+
+    def list_with_extra(*, userId, q, maxResults, fields=None):  # noqa: N803
+        exec_ = original_list(userId=userId, q=q, maxResults=maxResults, fields=fields)
+        result = dict(exec_.execute())
+        result["threads"] = result["threads"] + [{"id": "t3"}]
+        return _Exec(result)
+
+    service.list = list_with_extra
+    conn = DirectOAuthConnector(gmail_service=service)
+
+    threads = conn.list_threads("is:unread", max_results=10)
+
+    assert [t.thread_id for t in threads] == ["t1", "t2"]  # t3 skipped, not raised
+
+
+def test_direct_oauth_list_thread_ids_never_hydrates():
+    gmail = FakeGmailThreadService(_SAMPLE_THREADS)
+    conn = DirectOAuthConnector(gmail_service=gmail)
+
+    ids = conn.list_thread_ids("is:unread", max_results=10)
+
+    assert ids == ["t1", "t2", "t3"]
+    assert gmail.get_calls == []  # no per-thread hydration at all
+
+
+def test_mcp_list_thread_ids_uses_the_base_default():
+    """MCP's list_threads is already one round trip server-side, so the
+    base-class default (derive ids from list_threads) is correct as-is --
+    no override needed."""
+    conn = McpWorkspaceConnector(FakeMcp())
+    assert conn.list_thread_ids("is:unread") == ["t1"]
+
+
+# --- decline_invite/reschedule_event: stop double-fetching (build prompt 33,
+# task 3) --------------------------------------------------------------------
+
+
+def test_direct_oauth_decline_invite_reuses_already_fetched_event():
+    cal = FakeCalendarWriteService({
+        "e1": {
+            "id": "e1",
+            "attendees": [
+                {"email": "me@x.com", "self": True, "responseStatus": "needsAction"},
+                {"email": "other@x.com", "responseStatus": "accepted"},
+            ],
+        }
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+
+    current = conn.get_event("e1")
+    assert cal.get_calls == ["e1"]  # the ONE fresh read (the freshness check's)
+
+    conn.decline_invite("e1", current=current)
+
+    assert cal.get_calls == ["e1"]  # no second fetch
+    assert len(cal.patch_calls) == 1
+    patched = cal.patch_calls[0]["body"]["attendees"]
+    mine = next(a for a in patched if a["email"] == "me@x.com")
+    theirs = next(a for a in patched if a["email"] == "other@x.com")
+    assert mine["responseStatus"] == "declined"
+    assert theirs["responseStatus"] == "accepted"  # untouched
+
+
+def test_direct_oauth_decline_invite_without_current_preserves_internal_fetch():
+    """Backward compatibility: omitting ``current`` keeps today's exact
+    behavior -- an internal fresh fetch."""
+    cal = FakeCalendarWriteService({
+        "e1": {
+            "id": "e1",
+            "attendees": [{"email": "me@x.com", "self": True, "responseStatus": "needsAction"}],
+        }
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+
+    conn.decline_invite("e1")
+
+    assert cal.get_calls == ["e1"]
+    assert len(cal.patch_calls) == 1
+
+
+def test_direct_oauth_reschedule_event_reuses_already_fetched_event():
+    from datetime import datetime
+
+    cal = FakeCalendarWriteService({
+        "e1": {"id": "e1", "organizer": {"email": "me@x.com", "self": True}}
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+
+    current = conn.get_event("e1")
+    assert cal.get_calls == ["e1"]
+
+    conn.reschedule_event(
+        "e1", new_start=datetime(2026, 7, 20, 15, 0), new_end=datetime(2026, 7, 20, 15, 30),
+        current=current,
+    )
+
+    assert cal.get_calls == ["e1"]  # no second fetch
+    assert len(cal.patch_calls) == 1
+
+
+def test_direct_oauth_reschedule_event_current_still_refuses_non_organizer():
+    """The organizer check still runs -- it just reads it from ``current``
+    instead of re-fetching. Not a relaxation of the freshness discipline."""
+    from datetime import datetime
+
+    cal = FakeCalendarWriteService({
+        "e1": {"id": "e1", "organizer": {"email": "boss@x.com", "self": False}}
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+    current = conn.get_event("e1")
+
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.reschedule_event(
+            "e1", new_start=datetime(2026, 7, 20, 15, 0), new_end=datetime(2026, 7, 20, 15, 30),
+            current=current,
+        )
+    assert cal.patch_calls == []
+
+
 def test_get_event_returns_calendar_event():
     fake = FakeMcp()
     conn = McpWorkspaceConnector(fake)
@@ -302,7 +573,7 @@ class FakeCalendarWriteService:
     def events(self):
         return self
 
-    def get(self, *, calendarId, eventId):  # noqa: N803 - matches Google's API
+    def get(self, *, calendarId, eventId, fields=None):  # noqa: N803 - matches Google's API
         self.get_calls.append(eventId)
         return _Exec(dict(self.events_by_id[eventId]))
 

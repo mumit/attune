@@ -1338,7 +1338,8 @@ def test_build_scheduler_assembles_expected_jobs():
     # ships as the default routine (build prompt 32) rather than a
     # hardcoded job — see routine:morning_brief.
     assert names == [
-        "routine:morning_brief", "sweep_pending", "sweep_pending_expiry",
+        "routine:morning_brief", "sleep_time_brief_precompute",
+        "sweep_pending", "sweep_pending_expiry",
         "source_retries", "consolidate", "autonomy_digest",
     ]
 
@@ -1347,7 +1348,8 @@ def test_build_scheduler_assembles_expected_jobs():
     push.settings = _settings(ATTUNE_INGESTION_MODE="push")
     names = [j.name for j in push.build_scheduler().jobs]
     assert names == [
-        "routine:morning_brief", "renew_watches", "sweep_pending", "sweep_pending_expiry",
+        "routine:morning_brief", "sleep_time_brief_precompute", "renew_watches",
+        "sweep_pending", "sweep_pending_expiry",
         "source_retries", "consolidate", "autonomy_digest",
     ]
 
@@ -1358,10 +1360,12 @@ def test_build_scheduler_assembles_expected_jobs():
     names = [j.name for j in nudging.build_scheduler().jobs]
     assert "follow_up_nudges" in names
 
-    # No channel configured -> no routine jobs (nowhere to post them).
+    # No channel configured -> no routine jobs (nowhere to post them), and
+    # no precompute either — nothing would ever read the snapshot it writes.
     quiet = _runtime()
     names = [j.name for j in quiet.build_scheduler().jobs]
     assert "routine:morning_brief" not in names
+    assert "sleep_time_brief_precompute" not in names
     assert "follow_up_nudges" not in names  # user_id "me" can't detect quiet
 
     # No registry -> no sweep job.
@@ -2138,7 +2142,7 @@ def test_resolve_resume_dispatches_by_state_action_never_by_thread_id(tmp_path):
                 "response_status": "needsAction",
             })()
 
-        def decline_invite(self, event_id):
+        def decline_invite(self, event_id, *, current=None):
             self.declined.append(event_id)
 
     connector = _Connector()
@@ -2496,6 +2500,54 @@ def test_post_brief_threads_pending_and_snapshot_store():
     assert isinstance(snapshot_store.saved[0], BriefSnapshot)
 
 
+def test_precompute_tomorrow_brief_writes_snapshot_without_posting():
+    """Build prompt 33, task 6: sleep-time precompute writes a fresh
+    BriefSnapshot (feeding the morning's incremental fetch) but posts to
+    NO channel — that stays post_brief's job alone."""
+    from attune.brief import BriefSnapshot
+
+    class _RecordingSnapshotStore:
+        def __init__(self):
+            self.saved = []
+
+        def load(self):
+            return None
+
+        def save(self, snapshot):
+            self.saved.append(snapshot)
+
+    snapshot_store = _RecordingSnapshotStore()
+    slack = _FakeSlackChannel()
+    runtime = _runtime(
+        slack=slack, slack_say=lambda **kw: None, brief_snapshot=snapshot_store,
+    )
+
+    result = runtime.precompute_tomorrow_brief()
+
+    assert len(snapshot_store.saved) == 1
+    assert isinstance(snapshot_store.saved[0], BriefSnapshot)
+    assert result is not None
+    assert slack.briefs == []  # never posted anywhere
+
+
+def test_precompute_tomorrow_brief_failure_is_swallowed():
+    """Best-effort background work (mirrors run_consolidation's posture):
+    a failure must never propagate and disturb the scheduler."""
+
+    class _RaisingConnector:
+        def list_threads(self, *a, **kw):
+            raise ConnectionError("boom")
+
+        def list_events(self, *a, **kw):
+            raise ConnectionError("boom")
+
+    runtime = _runtime(connector=_RaisingConnector())
+
+    result = runtime.precompute_tomorrow_brief()
+
+    assert result is None
+
+
 def test_chat_brief_request_never_touches_the_snapshot_store():
     class _RecordingSnapshotStore:
         def __init__(self):
@@ -2521,6 +2573,34 @@ def test_chat_brief_request_never_touches_the_snapshot_store():
 
     assert gchat.texts  # the on-demand brief still worked
     assert snapshot_store.saved == []
+
+
+def test_second_on_demand_brief_request_is_served_from_cache(tmp_path):
+    """Build prompt 33, task 5: a second "give me the brief" within the
+    cache TTL is served, not recomputed — asserted end-to-end through
+    Runtime.process_chat_event, using the real InMemoryBriefCache
+    build_runtime wires in by default."""
+    gchat = _FakeGChatChannel()
+    connector = _FakeConnector(threads={"t1": _FakeThread()}, events=[])
+    client = _FakeClient(reply="Two unread, one meeting.")
+    runtime = _runtime(gchat=gchat, connector=connector, app=_app_ctx(client=client))
+    runtime.settings = _settings(ATTUNE_CHAT_SPACE="spaces/ABC")
+
+    runtime.process_chat_event(_chat_event("give me the morning brief"))
+    runtime.process_chat_event(_chat_event("give me the morning brief"))
+
+    assert len(gchat.texts) == 2  # both requests still got a reply
+    # Each request makes one intent-classification call (plan_interaction);
+    # only the FIRST also makes a brief-summarize call — the second's brief
+    # came from cache, so there's no fourth model call.
+    assert len(client.calls) == 3
+
+
+def test_build_runtime_wires_a_default_brief_cache_when_none_given():
+    from attune.brief import InMemoryBriefCache
+
+    runtime = _runtime()
+    assert isinstance(runtime.brief_cache, InMemoryBriefCache)
 
 
 def test_build_runtime_slack_client_none_without_source_channels():

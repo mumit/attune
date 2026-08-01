@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -334,6 +335,198 @@ class JsonPendingApprovals:
         # not).
         os.chmod(temp, 0o600)
         os.replace(temp, self._path)
+
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    lg_tid TEXT PRIMARY KEY,
+    source_ref TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    posted_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sender TEXT,
+    subject TEXT,
+    priority TEXT,
+    action TEXT,
+    resolved_by TEXT,
+    resolved_at TEXT
+)
+"""
+
+
+class SqlitePendingApprovals:
+    """Build prompt 33, task 4: the same :class:`PendingApprovals` Protocol
+    as :class:`JsonPendingApprovals`, backed by SQLite instead of a whole-
+    file read/write under an advisory lock — a 25-thread notification batch
+    touches this store once per thread (``get_pending_for_source`` +
+    ``register``), which was ~50 whole-file JSON round trips.
+
+    :meth:`claim` is the one method that needs real cross-process atomicity
+    (two overlapping runtime processes racing the same ``lg_tid``, finding
+    F2) — done here with ``BEGIN IMMEDIATE`` around the check-then-update,
+    SQLite's own write-lock primitive, replacing the JSON version's
+    ``fslock``-plus-``threading.RLock`` pair.
+    """
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(_SQLITE_SCHEMA)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
+        return conn
+
+    def get_pending_for_source(self, source_ref: str) -> PendingApproval | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_approvals WHERE status = ? AND source_ref = ? "
+                "ORDER BY rowid LIMIT 1",
+                (STATUS_PENDING, source_ref),
+            ).fetchone()
+        return self._entry_from_row(row) if row is not None else None
+
+    def register(
+        self,
+        *,
+        lg_tid: str,
+        source_ref: str,
+        domain: str,
+        posted_at: datetime,
+        sender: str | None = None,
+        subject: str | None = None,
+        priority: str | None = None,
+        action: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pending_approvals
+                    (lg_tid, source_ref, domain, posted_at, status, sender,
+                     subject, priority, action, resolved_by, resolved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    lg_tid, source_ref, domain,
+                    posted_at.astimezone(timezone.utc).isoformat(),
+                    STATUS_PENDING, sender, subject, priority, action,
+                ),
+            )
+
+    def resolve(self, lg_tid: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pending_approvals SET status = ? WHERE lg_tid = ?",
+                (STATUS_RESOLVED, lg_tid),
+            )
+
+    def claim(
+        self,
+        lg_tid: str,
+        *,
+        actor: str | None = None,
+        now: datetime | None = None,
+    ) -> bool | None:
+        now = now or datetime.now(timezone.utc)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM pending_approvals WHERE lg_tid = ?", (lg_tid,),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return None
+            if row[0] not in (STATUS_PENDING, STATUS_IGNORED):
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute(
+                "UPDATE pending_approvals SET status = ?, resolved_by = ?, "
+                "resolved_at = ? WHERE lg_tid = ?",
+                (STATUS_RESOLVED, actor, now.isoformat(), lg_tid),
+            )
+            conn.execute("COMMIT")
+            return True
+        finally:
+            conn.close()
+
+    def mark_ignored(self, lg_tid: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pending_approvals SET status = ? WHERE lg_tid = ?",
+                (STATUS_IGNORED, lg_tid),
+            )
+
+    def mark_expired(self, lg_tid: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE pending_approvals SET status = ? WHERE lg_tid = ?",
+                (STATUS_EXPIRED, lg_tid),
+            )
+
+    def pending(self) -> list[PendingApproval]:
+        return self.entries(statuses=(STATUS_PENDING,))
+
+    def get_entry(self, lg_tid: str) -> "PendingApproval | None":
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_approvals WHERE lg_tid = ?", (lg_tid,),
+            ).fetchone()
+        return self._entry_from_row(row) if row is not None else None
+
+    def entries(
+        self, *, statuses: "tuple[str, ...] | None" = None
+    ) -> "list[PendingApproval]":
+        query = "SELECT * FROM pending_approvals"
+        params: tuple[Any, ...] = ()
+        if statuses is not None:
+            placeholders = ", ".join("?" for _ in statuses)
+            query += f" WHERE status IN ({placeholders})"
+            params = tuple(statuses)
+        query += " ORDER BY rowid"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._entry_from_row(row) for row in rows]
+
+    @staticmethod
+    def _entry_from_row(row: Any) -> PendingApproval:
+        return PendingApproval(
+            lg_tid=row["lg_tid"],
+            source_ref=row["source_ref"],
+            domain=row["domain"],
+            posted_at=datetime.fromisoformat(row["posted_at"]),
+            status=row["status"],
+            sender=row["sender"],
+            subject=row["subject"],
+            priority=row["priority"],
+            action=row["action"],
+        )
+
+
+def open_pending_approvals(settings: Any) -> "PendingApprovals":
+    """The one entry point every caller (``runtime.build_runtime``,
+    ``app.build_app``) uses to reach the pending-approvals registry (build
+    prompt 33, task 4) — JSON or SQLite, chosen by
+    ``settings.local_store_backend``, so switching backends is
+    configuration, never a code change at a call site. Migrating an
+    existing deployment: point ``local_store_backend`` at ``sqlite`` and
+    the store starts empty (registered cards are transient, ~7 days at
+    most — see :data:`DEFAULT_EXPIRY` — so no one-time data migration
+    script is needed; any card pending at cutover simply gets re-created on
+    its next notification)."""
+    from ..config import LocalStoreBackend
+
+    if settings.local_store_backend == LocalStoreBackend.SQLITE:
+        return SqlitePendingApprovals(settings.pending_db_path)
+    return JsonPendingApprovals(settings.pending_state_path)
 
 
 def sweep_ignored(

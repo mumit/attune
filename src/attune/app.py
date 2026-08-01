@@ -250,11 +250,9 @@ def build_app(
 
     resolved_importance_profile = importance_profile
     if resolved_importance_profile is None:
-        from .orchestrator.importance import JsonImportanceProfile
+        from .orchestrator.importance import open_importance_profile
 
-        resolved_importance_profile = JsonImportanceProfile(
-            settings.importance_profile_path
-        )
+        resolved_importance_profile = open_importance_profile(settings)
 
     resolved_playbook = playbook
     if resolved_playbook is None:

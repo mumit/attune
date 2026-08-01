@@ -140,6 +140,17 @@ class CalendarEvent:
     # this defaults to "", which never matches "needsAction", so no invite
     # is ever mistakenly proposed for decline.
     response_status: str = ""
+    # Raw ``{email, responseStatus, self, ...}`` entries for EVERY attendee,
+    # verbatim from the backend (build prompt 33, task 3) — DirectOAuthConnector
+    # populates this from a fresh fetch; MCP and every other caller leave it
+    # empty (the safe back-compat default). Exists SOLELY so
+    # ``decline_invite``'s ``current`` parameter can thread an already-fetched
+    # event through and skip a second ``events.get`` purely to reconstruct the
+    # full attendees array a Calendar ``events.patch`` must resend in full
+    # (Calendar's patch replaces the whole array rather than merging into it).
+    # Never read for display or any other purpose; ``attendees``/
+    # ``response_status`` above remain the fields every other caller should use.
+    raw_attendees: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -223,6 +234,24 @@ class WorkspaceConnector(ABC):
         ``list_threads``). Used to turn a changed-event-id from Calendar
         ingestion into the details needed for scheduling logic (attendees,
         time), without ingestion itself depending on this interface."""
+
+    def list_thread_ids(
+        self, query: str = "is:unread", *, max_results: int = 20
+    ) -> list[str]:
+        """Cheap ID-only listing (build prompt 33, task 5's incremental-brief
+        need — see ``docs/decisions.md``'s build-prompt-32 entry, "Task 5
+        (incremental brief) is explicitly deferred," for the full design:
+        diff a cheap ID-only listing against the prior ``BriefSnapshot`` and
+        only fully fetch genuinely NEW thread ids).
+
+        Default implementation: derive ids from :meth:`list_threads` — still
+        correct, just not cheaper. This is the right default for
+        ``McpWorkspaceConnector``, whose ``list_threads`` is already one
+        round trip server-side (no per-thread hydration to skip).
+        ``DirectOAuthConnector`` overrides this with a genuinely cheaper,
+        fields-masked ``threads.list`` call that never hydrates a single
+        thread."""
+        return [t.thread_id for t in self.list_threads(query, max_results=max_results)]
 
     # --- write (safe default: draft, don't send) ---
 
@@ -392,10 +421,24 @@ class WorkspaceConnector(ABC):
         must all hold for either write path to ever be reached."""
         return False
 
-    def decline_invite(self, event_id: str) -> None:
+    def decline_invite(
+        self, event_id: str, *, current: CalendarEvent | None = None
+    ) -> None:
         """Decline the calendar invite at ``event_id`` on the PRINCIPAL's
         own behalf (Phase 3 stage 2) — patches only their own attendee
         responseStatus, never anyone else's.
+
+        ``current`` (build prompt 33, task 3) is an optional, already-fetched
+        ``CalendarEvent`` — when the caller's OWN apply-time freshness check
+        just fetched this exact event (``draft_approve.py``'s
+        ``make_calendar_action_apply_fn``, which fetches fresh right before
+        calling this), passing it through here lets an implementation with a
+        populated ``raw_attendees`` skip a second, redundant fetch. This is
+        NOT a relaxation of the freshness discipline: ``current`` must come
+        from the caller's own late, same-call fetch, never from a cached
+        checkpoint or proposal-time snapshot — the one authoritative fresh
+        read simply gets reused instead of performed twice. Omitting it
+        preserves exactly today's behavior (an internal fresh fetch).
 
         Default implementation refuses: calendar writes are opt-in per
         connector, gated by an OAuth scope and an explicit deployment flag,
@@ -458,12 +501,24 @@ class WorkspaceConnector(ABC):
         )
 
     def reschedule_event(
-        self, event_id: str, *, new_start: datetime, new_end: datetime
+        self,
+        event_id: str,
+        *,
+        new_start: datetime,
+        new_end: datetime,
+        current: CalendarEvent | None = None,
     ) -> None:
         """Move the event at ``event_id`` to a new start/end (Phase 3 stage
         2) — implementations MUST refuse when the principal is not this
         event's organizer, verified from a FRESH fetch, never from cached
         workflow state.
+
+        ``current`` (build prompt 33, task 3): same posture as
+        :meth:`decline_invite`'s ``current`` — an implementation may read
+        ``current.organizer_is_self`` instead of re-fetching, PROVIDED
+        ``current`` came from the caller's own late, same-call freshness
+        fetch (never a cached checkpoint). Omitting it preserves exactly
+        today's behavior (an internal fresh fetch).
 
         Default implementation refuses the same way :meth:`decline_invite`
         does: calendar writes are opt-in per connector and MCP never

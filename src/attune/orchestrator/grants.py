@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -910,6 +911,128 @@ class JsonGraduationState:
         # orchestrator/pending.py's JsonPendingApprovals._save.
         os.chmod(temp, 0o600)
         os.replace(temp, self._path)
+
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS graduation_cards (
+    thread_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    action TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    to_rung INTEGER NOT NULL,
+    scope TEXT
+);
+CREATE TABLE IF NOT EXISTS graduation_rejections (
+    key TEXT PRIMARY KEY,
+    rejected_at TEXT NOT NULL
+)
+"""
+
+
+class SqliteGraduationState:
+    """Build prompt 33, task 4: the same method surface as
+    :class:`JsonGraduationState` (``record_card``/``get_card``/
+    ``remove_card``/``in_cooldown``/``record_rejection``), backed by
+    SQLite — one row per card snapshot and one per rejection cooldown,
+    rather than a whole-file rewrite of both concerns together."""
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_SQLITE_SCHEMA)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
+        return conn
+
+    def record_card(
+        self, thread_id: str, *, kind: str, action: Action, domain: Domain,
+        to_rung: Rung, scope: GrantScope | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO graduation_cards
+                    (thread_id, kind, action, domain, to_rung, scope)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    kind = excluded.kind, action = excluded.action,
+                    domain = excluded.domain, to_rung = excluded.to_rung,
+                    scope = excluded.scope
+                """,
+                (
+                    thread_id, kind, action.value, domain.value, int(to_rung),
+                    json.dumps(_scope_to_json(scope)),
+                ),
+            )
+
+    def get_card(self, thread_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM graduation_cards WHERE thread_id = ?", (thread_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "kind": row["kind"],
+            "action": Action(row["action"]),
+            "domain": Domain(row["domain"]),
+            "to_rung": Rung(int(row["to_rung"])),
+            "scope": _scope_from_json(json.loads(row["scope"]) if row["scope"] else None),
+        }
+
+    def remove_card(self, thread_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM graduation_cards WHERE thread_id = ?", (thread_id,),
+            )
+
+    def in_cooldown(
+        self, key: str, *, now: datetime,
+        cooldown_days: int = GRADUATION_REJECTION_COOLDOWN_DAYS,
+    ) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT rejected_at FROM graduation_rejections WHERE key = ?", (key,),
+            ).fetchone()
+        if row is None:
+            return False
+        rejected_at = datetime.fromisoformat(row["rejected_at"])
+        return now - rejected_at < timedelta(days=cooldown_days)
+
+    def record_rejection(self, key: str, *, at: datetime) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO graduation_rejections (key, rejected_at) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET rejected_at = excluded.rejected_at
+                """,
+                (key, at.astimezone(timezone.utc).isoformat()),
+            )
+
+
+def open_graduation_state(settings: Any) -> "JsonGraduationState | SqliteGraduationState":
+    """The one entry point every caller (``runtime.build_runtime``) uses to
+    reach graduation/demotion card bookkeeping (build prompt 33, task 4) —
+    JSON or SQLite, chosen by ``settings.local_store_backend``. Migrating an
+    existing deployment: the SQLite store starts empty; a card snapshot is
+    transient (removed once its approval resolves) and a rejection cooldown
+    is at most :data:`GRADUATION_REJECTION_COOLDOWN_DAYS` (30) old, so a
+    cutover simply resumes without a one-time import (see
+    ``docs/decisions.md``)."""
+    from ..config import LocalStoreBackend
+
+    if settings.local_store_backend == LocalStoreBackend.SQLITE:
+        return SqliteGraduationState(settings.graduation_db_path)
+    return JsonGraduationState(settings.graduation_state_path)
 
 
 def resolve_autonomy_card(

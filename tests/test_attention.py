@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from attune.orchestrator.attention import (
     MAX_ITEMS,
     RETENTION_DAYS,
     AttentionItem,
     JsonAttentionStore,
+    SqliteAttentionStore,
 )
 from attune.orchestrator.triage import Priority
 
@@ -128,3 +131,79 @@ def test_concurrent_processes_serialize_via_fslock(tmp_path):
 
     senders = {it.sender_ref for it in JsonAttentionStore(path).recent()}
     assert senders == {"from-a", "from-b"}
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 4: SQLite backend parity. The same AttentionStore
+# Protocol contract, run against both JsonAttentionStore and
+# SqliteAttentionStore.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["json", "sqlite"])
+def attention_backend(request, tmp_path):
+    if request.param == "sqlite":
+        return SqliteAttentionStore(str(tmp_path / "attention.db"))
+    return JsonAttentionStore(str(tmp_path / "attention.json"))
+
+
+def test_backend_add_and_recent_round_trips(attention_backend):
+    store = attention_backend
+    store.add(_item(ts=T0, sender_ref="alice"), now=T0)
+    store.add(_item(ts=T0 + timedelta(minutes=1), sender_ref="bob"), now=T0)
+
+    recent = store.recent()
+    assert [it.sender_ref for it in recent] == ["bob", "alice"]  # newest first
+    assert recent[0].priority == Priority.ROUTINE
+    assert recent[0].mentions_principal is False
+
+
+def test_backend_recent_since_filters_older_items(attention_backend):
+    store = attention_backend
+    store.add(_item(ts=T0, sender_ref="old"), now=T0)
+    store.add(_item(ts=T0 + timedelta(hours=2), sender_ref="new"), now=T0)
+
+    recent = store.recent(since=T0 + timedelta(hours=1))
+    assert [it.sender_ref for it in recent] == ["new"]
+
+
+def test_backend_recent_limit_caps_results(attention_backend):
+    store = attention_backend
+    for i in range(5):
+        store.add(_item(ts=T0 + timedelta(minutes=i), sender_ref=f"u{i}"), now=T0)
+
+    recent = store.recent(limit=2)
+    assert len(recent) == 2
+    assert recent[0].sender_ref == "u4"
+    assert recent[1].sender_ref == "u3"
+
+
+def test_backend_retention_window_drops_items_older_than_7_days(attention_backend):
+    store = attention_backend
+    old_ts = T0 - timedelta(days=RETENTION_DAYS + 1)
+    store.add(_item(ts=old_ts, sender_ref="stale"), now=T0)
+    store.add(_item(ts=T0, sender_ref="fresh"), now=T0)
+
+    recent = store.recent()
+    assert [it.sender_ref for it in recent] == ["fresh"]
+
+
+def test_backend_item_cap_keeps_most_recent(attention_backend):
+    store = attention_backend
+    base = T0
+    for i in range(MAX_ITEMS + 10):
+        store.add(_item(ts=base + timedelta(minutes=i), sender_ref=f"u{i}"), now=T0)
+
+    recent = store.recent(limit=None)
+    assert len(recent) == MAX_ITEMS
+    senders = {it.sender_ref for it in recent}
+    assert "u0" not in senders
+    assert f"u{MAX_ITEMS + 9}" in senders
+
+
+def test_backend_urgent_priority_round_trips(attention_backend):
+    store = attention_backend
+    store.add(_item(priority=Priority.URGENT, mentions=True), now=T0)
+    item = store.recent()[0]
+    assert item.priority == Priority.URGENT
+    assert item.mentions_principal is True

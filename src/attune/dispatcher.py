@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -106,6 +107,7 @@ from .llm import (
     resolve_capabilities,
 )
 from .prompts import PROMPT_CONVERSE, PROMPT_LIVE_SOURCE, PROMPT_TRIAGE, render_system_message
+from .retry import retry_call
 from .memory.signals import frame_memory_text
 from .orchestrator.attention import AttentionItem
 from .orchestrator.autonomy import Action, Domain, Rung
@@ -190,6 +192,17 @@ _INBOUND_RATE_LIMITER = InboundRateLimiter()
 _default_triage = triage_thread
 
 
+# Build prompt 33, task 1: bounded worker pool for one Gmail notification's
+# per-thread fetch+triage+draft pipeline — the ~64-round-trip, 60-90s-serial
+# batch the build prompt measures. Bounded (not unbounded fan-out) because
+# Google rate-limits; every collaborator each worker touches (pending,
+# importance, the audit log, the ledger, the retry queue) already guards its
+# own critical section with `fslock.locked`/`threading.RLock` (see
+# `fslock.py`'s own docstring: `flock` excludes by the underlying file, so it
+# already serializes threads within one process, not just across processes),
+# so no additional locking was added here.
+NOTIFICATION_POOL_SIZE = 8
+
 FETCH_RETRIES = 2
 # Hold OR reschedule offers per calendar notification — a conflict-heavy day
 # still gets every notification, but never a wall of cards (mirrors the
@@ -239,15 +252,134 @@ def _accepts_keyword(fn: Callable[..., Any], name: str) -> bool:
 
 
 def _fetch_with_retry(fetch: Callable[[], Any], retries: int = FETCH_RETRIES) -> Any:
-    """Immediate bounded retries for source fetches — transient API blips
-    must not silently lose a thread/event (review finding #5)."""
-    last_exc: Exception | None = None
-    for _ in range(retries + 1):
-        try:
-            return fetch()
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-    raise last_exc  # type: ignore[misc]
+    """Bounded retries for source fetches — transient API blips must not
+    silently lose a thread/event (review finding #5). Build prompt 33's own
+    "Constraints" section: delegates to ``retry.retry_call`` for jittered
+    exponential backoff and ``Retry-After`` awareness, rather than the bare
+    immediate-reattempt loop this replaced — same attempt count
+    (``retries + 1``), just no longer a hot spin against a rate-limited API."""
+    return retry_call(fetch, retries=retries)
+
+
+def _process_one_gmail_thread(
+    app_ctx: AppContext,
+    gmail_tid: str,
+    changes: Any,
+    *,
+    pending: Any,
+    audit_log: AuditLog | None,
+    user_id: str,
+    post_approval: Callable[..., None],
+    thread_id_prefix: str,
+    triage_fn: Callable[[Any, str], TriageResult],
+    notify: Callable[[str], None] | None,
+    retry_queue: Any,
+    connector: WorkspaceConnector,
+    mail_labels_enabled: bool,
+    mail_send_enabled: bool,
+    ledger: Any,
+    eligible_item_count: int,
+) -> "tuple[str | None, tuple[Any, TriageResult] | None]":
+    """One Gmail thread's full skip-check + fetch + triage/draft pipeline —
+    the unit of work ``handle_gmail_notification`` dispatches into its
+    bounded worker pool (build prompt 33, task 1).
+
+    Every collaborator touched here (``pending``, the audit log, the
+    ledger, the retry queue) already guards its own read-modify-write with
+    ``fslock.locked``/``threading.RLock`` — see ``fslock.py``'s own
+    docstring: ``flock`` excludes by the underlying file, not the file
+    descriptor, so it already serializes concurrent THREADS in one process,
+    not only concurrent processes. No new locking was needed to make this
+    function safe to run from multiple pool workers at once.
+
+    Returns ``(lg_tid, label_offer)`` instead of mutating the caller's
+    ``submitted``/``label_offerable`` lists directly, so
+    ``handle_gmail_notification`` can apply every worker's result in the
+    batch's ORIGINAL order rather than whichever order the pool happens to
+    finish in — the determinism the build prompt requires. Never raises
+    except in the one case today's serial loop also raised: a
+    ``submit_gmail_thread`` failure with no ``retry_queue`` supplied at
+    all — the cursor already advanced (``process_notification``'s own
+    baseline-commit happens before this pool is even created), so that
+    remains "this run cannot account for the failure and must surface it,"
+    exactly as before; the one behavior difference under concurrency is
+    that sibling threads already dispatched to the pool may still finish
+    rather than never having started, since work is submitted up front
+    rather than iterated lazily. Every deployment wires a real
+    ``retry_queue`` (see ``runtime.py``), so this is a defensive-only path.
+    """
+    if pending is not None:
+        existing = pending.get_pending_for_source(gmail_tid)
+        if existing is not None:
+            if audit_log is not None:
+                audit_log.record(
+                    thread_id=existing.lg_tid,
+                    workflow="draft_approve",
+                    events=[{
+                        "event": "superseded_notification",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "gmail_thread_id": gmail_tid,
+                        "history_id": changes.new_history_id,
+                    }],
+                    domain="mail",
+                    user_id=user_id,
+                )
+            return None, None
+
+    try:
+        thread = _fetch_with_retry(lambda: connector.get_thread(gmail_tid))
+    except Exception as exc:  # noqa: BLE001 — audited, never silent (finding #5)
+        logger.warning(
+            "gmail thread %s fetch failed after retries (%s)",
+            gmail_tid, type(exc).__name__,
+        )
+        if audit_log is not None:
+            audit_log.record(
+                thread_id=f"gmail:{gmail_tid}:{changes.new_history_id}",
+                workflow="ops",
+                events=[{
+                    "event": "thread_fetch_failed",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "gmail_thread_id": gmail_tid,
+                    "error": type(exc).__name__,
+                }],
+                domain="ops",
+                user_id=user_id,
+            )
+        if retry_queue is not None:
+            retry_queue.enqueue(
+                "gmail_thread",
+                gmail_tid,
+                {"history_id": changes.new_history_id},
+                error=type(exc).__name__,
+            )
+        return None, None
+
+    label_offerable: list[tuple[Any, TriageResult]] = []
+    try:
+        lg_tid = submit_gmail_thread(
+            app_ctx, thread, gmail_tid=gmail_tid,
+            history_id=changes.new_history_id,
+            post_approval=post_approval, user_id=user_id,
+            thread_id_prefix=thread_id_prefix, audit_log=audit_log,
+            triage_fn=triage_fn, pending=pending, notify=notify,
+            connector=connector, mail_labels_enabled=mail_labels_enabled,
+            mail_send_enabled=mail_send_enabled,
+            label_offerable=label_offerable,
+            ledger=ledger, eligible_item_count=eligible_item_count,
+            batch_id=changes.new_history_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — cursor already advanced
+        if retry_queue is None:
+            raise
+        retry_queue.enqueue(
+            "gmail_thread", gmail_tid,
+            {"history_id": changes.new_history_id},
+            error=type(exc).__name__,
+        )
+        return None, None
+    offer = label_offerable[0] if label_offerable else None
+    return lg_tid, offer
 
 
 def _auto_rung(result: dict[str, Any]) -> int | None:
@@ -444,77 +576,34 @@ def handle_gmail_notification(
     # candidate before MAX_LABEL_PROPOSALS_PER_RUN binds — same two-phase
     # shape as the calendar conflict offers below.
     label_offerable: list[tuple[Any, TriageResult]] = []
-    for gmail_tid in batch_thread_ids:
-        if pending is not None:
-            existing = pending.get_pending_for_source(gmail_tid)
-            if existing is not None:
-                if audit_log is not None:
-                    audit_log.record(
-                        thread_id=existing.lg_tid,
-                        workflow="draft_approve",
-                        events=[{
-                            "event": "superseded_notification",
-                            "ts": datetime.now(timezone.utc).isoformat(),
-                            "gmail_thread_id": gmail_tid,
-                            "history_id": changes.new_history_id,
-                        }],
-                        domain="mail",
-                        user_id=user_id,
-                    )
-                continue
 
-        try:
-            thread = _fetch_with_retry(lambda: connector.get_thread(gmail_tid))
-        except Exception as exc:  # noqa: BLE001 — audited, never silent (finding #5)
-            logger.warning(
-                "gmail thread %s fetch failed after retries (%s)",
-                gmail_tid, type(exc).__name__,
-            )
-            if audit_log is not None:
-                audit_log.record(
-                    thread_id=f"gmail:{gmail_tid}:{changes.new_history_id}",
-                    workflow="ops",
-                    events=[{
-                        "event": "thread_fetch_failed",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "gmail_thread_id": gmail_tid,
-                        "error": type(exc).__name__,
-                    }],
-                    domain="ops",
-                    user_id=user_id,
+    if batch_thread_ids:
+        pool_size = min(NOTIFICATION_POOL_SIZE, len(batch_thread_ids))
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
+            futures = [
+                pool.submit(
+                    _process_one_gmail_thread, app_ctx, gmail_tid, changes,
+                    pending=pending, audit_log=audit_log, user_id=user_id,
+                    post_approval=post_approval,
+                    thread_id_prefix=thread_id_prefix, triage_fn=triage_fn,
+                    notify=notify, retry_queue=retry_queue,
+                    connector=connector,
+                    mail_labels_enabled=mail_labels_enabled,
+                    mail_send_enabled=mail_send_enabled, ledger=ledger,
+                    eligible_item_count=len(batch_thread_ids),
                 )
-            if retry_queue is not None:
-                retry_queue.enqueue(
-                    "gmail_thread",
-                    gmail_tid,
-                    {"history_id": changes.new_history_id},
-                    error=type(exc).__name__,
-                )
-            continue
-        try:
-            lg_tid = submit_gmail_thread(
-                app_ctx, thread, gmail_tid=gmail_tid,
-                history_id=changes.new_history_id,
-                post_approval=post_approval, user_id=user_id,
-                thread_id_prefix=thread_id_prefix, audit_log=audit_log,
-                triage_fn=triage_fn, pending=pending, notify=notify,
-                connector=connector, mail_labels_enabled=mail_labels_enabled,
-                mail_send_enabled=mail_send_enabled,
-                label_offerable=label_offerable,
-                ledger=ledger, eligible_item_count=len(batch_thread_ids),
-                batch_id=changes.new_history_id,
-            )
-        except Exception as exc:  # noqa: BLE001 — cursor already advanced
-            if retry_queue is None:
-                raise
-            retry_queue.enqueue(
-                "gmail_thread", gmail_tid,
-                {"history_id": changes.new_history_id},
-                error=type(exc).__name__,
-            )
-            continue
-        if lg_tid is not None:
-            submitted.append(lg_tid)
+                for gmail_tid in batch_thread_ids
+            ]
+            # Original batch order, NOT completion order: determinism (the
+            # build prompt's own constraint — "sort results before
+            # returning them") means `submitted`/`label_offerable` must not
+            # depend on which worker happened to finish first.
+            for future in futures:
+                lg_tid, offer = future.result()
+                if lg_tid is not None:
+                    submitted.append(lg_tid)
+                if offer is not None:
+                    label_offerable.append(offer)
 
     if label_offerable:
         ranked = _rank_label_offers_by_noise_confidence(
@@ -677,6 +766,11 @@ def submit_gmail_thread(
         "priority": triage.priority.value,
         "priority_adjusted": triage.adjusted,
         "base_priority": triage.base_priority.value if triage.base_priority else None,
+        # Build prompt 33, task 7 (cascade triage): whether this thread's
+        # classification was escalated to the strong model — passes through
+        # to the graph's final state unchanged (like base_priority above)
+        # for ledger.record_proposal to read back as LedgerRow.triage_escalated.
+        "triage_escalated": triage.escalated,
         "source_snapshot": (
             thread.last_message_at.isoformat()
             if getattr(thread, "last_message_at", None) is not None else None

@@ -169,6 +169,14 @@ class LedgerRow:
     base_priority: str | None = None
     sender_importance_tier: str | None = None
     profile_reason: str | None = None
+    # Cascade triage (build prompt 33, task 7): whether this proposal's
+    # classification was escalated from the cheap CLASSIFY model to the
+    # stronger Task.REASON model — see orchestrator/triage.py's
+    # _should_escalate. Deliberately a DIFFERENT field from
+    # ``MetricsSlice.escalation_rate`` below, which measures an unrelated
+    # thing (autonomy-rung fallback to human interrupt); conflating the two
+    # under one name would silently merge two different metrics.
+    triage_escalated: bool | None = None
 
     # The coverage denominator. See the module docstring: recorded once per
     # BATCH (every row sharing a batch_id carries the batch's own total),
@@ -389,7 +397,8 @@ CREATE TABLE IF NOT EXISTS decision_ledger (
     undone_at TEXT,
     input_tokens INTEGER,
     output_tokens INTEGER,
-    cache_hit INTEGER
+    cache_hit INTEGER,
+    triage_escalated INTEGER
 )
 """
 
@@ -402,7 +411,7 @@ _COLUMNS = (
     "decision", "decided_at", "actor_ref", "time_to_decision_seconds",
     "edit_char_distance", "edit_distance_normalized", "edit_semantic_similarity",
     "edit_sections_changed", "applied_ok", "apply_skip_reason", "undone", "undone_at",
-    "input_tokens", "output_tokens", "cache_hit",
+    "input_tokens", "output_tokens", "cache_hit", "triage_escalated",
 )
 
 
@@ -469,6 +478,8 @@ class SqliteDecisionLedger:
             for column, sqltype in (
                 ("input_tokens", "INTEGER"), ("output_tokens", "INTEGER"),
                 ("cache_hit", "INTEGER"),
+                # Build prompt 33, task 7: cascade triage's escalation flag.
+                ("triage_escalated", "INTEGER"),
             ):
                 try:
                     conn.execute(
@@ -510,6 +521,7 @@ class SqliteDecisionLedger:
             _as_int_or_none(row.applied_ok), row.apply_skip_reason,
             int(row.undone), _iso(row.undone_at),
             row.input_tokens, row.output_tokens, _as_int_or_none(row.cache_hit),
+            _as_int_or_none(row.triage_escalated),
         )
         placeholders = ", ".join("?" for _ in _COLUMNS)
         with self._connect() as conn:
@@ -695,6 +707,7 @@ def _row_from_sqlite(record: Sequence[Any]) -> LedgerRow:
         input_tokens=values["input_tokens"],
         output_tokens=values["output_tokens"],
         cache_hit=_as_bool_or_none(values["cache_hit"]),
+        triage_escalated=_as_bool_or_none(values["triage_escalated"]),
     )
 
 
@@ -819,6 +832,7 @@ def _row_from_propose_result(
         base_priority=result.get("base_priority"),
         sender_importance_tier=scope_context.get("tier"),
         profile_reason=gate_event.get("profile_reason"),
+        triage_escalated=result.get("triage_escalated"),
         eligible_item_count=eligible_item_count,
         batch_id=batch_id,
         input_tokens=drafted_event.get("input_tokens"),
@@ -882,6 +896,11 @@ class MetricsSlice:
     coverage: float | None
     undo_rate: float | None
     escalation_rate: float | None
+    # Build prompt 33, task 7: the cascade-triage escalation rate — fraction
+    # of proposals whose classification was escalated to the strong model.
+    # None when no row in the slice ever recorded a triage decision (a
+    # calendar proposal, or a batch that predates this field).
+    triage_escalation_rate: float | None
     # Build prompt 28: token spend and cache-hit rate, over rows that
     # recorded usage (the draft-approve graph's default draft_fn) -- None
     # when no row in the slice ever recorded usage, so the table renders
@@ -958,6 +977,12 @@ def compute_metrics_slice(rows: Sequence[LedgerRow], *, label: str = "all") -> M
     )
     escalation_rate = escalations / grant_eligible if grant_eligible else None
 
+    triage_reported = [r for r in rows if r.triage_escalated is not None]
+    triage_escalation_rate = (
+        sum(1 for r in triage_reported if r.triage_escalated) / len(triage_reported)
+        if triage_reported else None
+    )
+
     metered = [r for r in rows if r.input_tokens is not None or r.output_tokens is not None]
     total_input = sum(r.input_tokens or 0 for r in metered) if metered else None
     total_output = sum(r.output_tokens or 0 for r in metered) if metered else None
@@ -977,6 +1002,7 @@ def compute_metrics_slice(rows: Sequence[LedgerRow], *, label: str = "all") -> M
         coverage=coverage,
         undo_rate=undo_rate,
         escalation_rate=escalation_rate,
+        triage_escalation_rate=triage_escalation_rate,
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         cache_hit_rate=cache_hit_rate,
@@ -1017,6 +1043,7 @@ def render_metrics_table(
     header = (
         f"{'slice':<20} {'proposals':>9} {'decided':>7} {'edit_burden':>11} "
         f"{'clean%':>7} {'p50_ttd_s':>10} {'coverage':>8} {'undo%':>7} {'escal%':>7} "
+        f"{'triage_esc%':>11} "
         f"{'in_tok':>8} {'out_tok':>8} {'cache%':>7}"
     )
     lines.append(header)
@@ -1028,6 +1055,7 @@ def render_metrics_table(
             f"{_fmt(m.p50_time_to_decision_seconds):>10} "
             f"{_fmt_pct(m.coverage):>8} {_fmt_pct(m.undo_rate):>7} "
             f"{_fmt_pct(m.escalation_rate):>7} "
+            f"{_fmt_pct(m.triage_escalation_rate):>11} "
             f"{_fmt_int(m.total_input_tokens):>8} {_fmt_int(m.total_output_tokens):>8} "
             f"{_fmt_pct(m.cache_hit_rate):>7}"
         )

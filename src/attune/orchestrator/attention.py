@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -202,3 +203,124 @@ class JsonAttentionStore:
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
+
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS attention_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    channel_ref TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    sender_ref TEXT NOT NULL,
+    sender_display TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    mentions_principal INTEGER NOT NULL,
+    thread_ref TEXT
+)
+"""
+
+
+class SqliteAttentionStore:
+    """Build prompt 33, task 4: the same :class:`AttentionStore` Protocol as
+    :class:`JsonAttentionStore`, backed by SQLite — one row per item instead
+    of rewriting the whole bounded array on every ``add``. Applies the exact
+    same retention-window-then-item-cap bounding as :meth:`JsonAttentionStore._bounded`."""
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(_SQLITE_SCHEMA)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
+        return conn
+
+    def add(self, item: AttentionItem, *, now: datetime | None = None) -> None:
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=RETENTION_DAYS)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO attention_items
+                    (source, channel_ref, channel_name, sender_ref,
+                     sender_display, summary, ts, priority,
+                     mentions_principal, thread_ref)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.source, item.channel_ref, item.channel_name,
+                    item.sender_ref, item.sender_display, item.summary,
+                    item.ts.astimezone(timezone.utc).isoformat(),
+                    item.priority.value, int(item.mentions_principal),
+                    item.thread_ref,
+                ),
+            )
+            # Retention window, then the item cap (module docstring) —
+            # applied in that order so the cap keeps the MOST RECENT
+            # MAX_ITEMS among only the non-expired rows.
+            conn.execute(
+                "DELETE FROM attention_items WHERE ts < ?", (cutoff.isoformat(),),
+            )
+            conn.execute(
+                """
+                DELETE FROM attention_items WHERE id NOT IN (
+                    SELECT id FROM attention_items ORDER BY ts DESC LIMIT ?
+                )
+                """,
+                (MAX_ITEMS,),
+            )
+
+    def recent(
+        self, *, since: datetime | None = None, limit: int | None = None
+    ) -> list[AttentionItem]:
+        query = "SELECT * FROM attention_items"
+        params: list[Any] = []
+        if since is not None:
+            query += " WHERE ts >= ?"
+            params.append(since.astimezone(timezone.utc).isoformat())
+        query += " ORDER BY ts DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._item_from_row(row) for row in rows]
+
+    @staticmethod
+    def _item_from_row(row: Any) -> AttentionItem:
+        return AttentionItem(
+            source=row["source"],
+            channel_ref=row["channel_ref"],
+            channel_name=row["channel_name"],
+            sender_ref=row["sender_ref"],
+            sender_display=row["sender_display"],
+            summary=row["summary"],
+            ts=datetime.fromisoformat(row["ts"]),
+            priority=Priority(row["priority"]),
+            mentions_principal=bool(row["mentions_principal"]),
+            thread_ref=row["thread_ref"],
+        )
+
+
+def open_attention_store(settings: Any) -> "AttentionStore":
+    """The one entry point every caller (``runtime.build_runtime``) uses to
+    reach the attention store (build prompt 33, task 4) — JSON or SQLite,
+    chosen by ``settings.local_store_backend``. Migrating an existing
+    deployment: the SQLite store starts empty; items already age out within
+    :data:`RETENTION_DAYS` (7) regardless, so no one-time import is
+    provided (see ``docs/decisions.md``)."""
+    from ..config import LocalStoreBackend
+
+    if settings.local_store_backend == LocalStoreBackend.SQLITE:
+        return SqliteAttentionStore(settings.attention_db_path)
+    return JsonAttentionStore(settings.attention_path)

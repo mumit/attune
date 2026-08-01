@@ -960,7 +960,11 @@ def make_calendar_action_apply_fn(
                     f"event {event_ref} is no longer needsAction "
                     f"(now {current.response_status!r})"
                 )
-            connector.decline_invite(event_ref)
+            # Build prompt 33, task 3: thread the fetch above through so the
+            # connector skips its own internal events.get -- this IS the one
+            # authoritative fresh read the freshness check above needed
+            # anyway, just reused rather than performed twice.
+            connector.decline_invite(event_ref, current=current)
             return event_ref
 
         if action == Action.RESCHEDULE.value:
@@ -974,6 +978,7 @@ def make_calendar_action_apply_fn(
                 event_ref,
                 new_start=datetime.fromisoformat(start_raw),
                 new_end=datetime.fromisoformat(end_raw),
+                current=current,
             )
             return event_ref
 

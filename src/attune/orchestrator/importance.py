@@ -74,6 +74,7 @@ import copy
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -345,6 +346,173 @@ class JsonImportanceProfile:
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
+
+
+_SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS importance_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_importance_signals_sender
+    ON importance_signals(sender);
+CREATE TABLE IF NOT EXISTS importance_pins (
+    sender TEXT PRIMARY KEY,
+    tier TEXT NOT NULL
+)
+"""
+
+
+class SqliteImportanceProfile:
+    """Build prompt 33, task 4: the same :class:`ImportanceProfile` Protocol
+    as :class:`JsonImportanceProfile`, backed by SQLite — one row per
+    recorded signal rather than a whole-file rewrite per ``record_signal``/
+    ``assess`` call (the brief calls ``assess`` 40+ times per run for ~20
+    distinct senders; see ``docs/plan-2026-h2.md`` P0's memoization note,
+    which this supersedes for the SQLite backend since a real DB read is
+    already fast enough not to need the JSON version's mtime-checked
+    in-memory cache).
+
+    Deliberately reuses :func:`assess_from_signals` verbatim for the tier
+    rules (decay, pin-wins, LOW/HIGH) — the rule engine is one piece of code
+    regardless of storage backend, the same discipline the hosted
+    ``PostgresImportanceProfile`` already follows.
+    """
+
+    def __init__(self, path: str):
+        self._path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        parent = os.path.dirname(self._path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_SQLITE_SCHEMA)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
+        return conn
+
+    def record_signal(
+        self, sender: str, signal: ActionSignal, *, ts: datetime | None = None
+    ) -> None:
+        key = _normalize_sender(sender)
+        stamp = (ts or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO importance_signals (sender, signal, ts) VALUES (?, ?, ?)",
+                (key, signal.value, stamp.isoformat()),
+            )
+            # Bounded storage (rule 3): keep only the most recently inserted
+            # MAX_SIGNALS rows for this sender.
+            conn.execute(
+                """
+                DELETE FROM importance_signals
+                WHERE sender = ? AND id NOT IN (
+                    SELECT id FROM importance_signals
+                    WHERE sender = ? ORDER BY id DESC LIMIT ?
+                )
+                """,
+                (key, key, MAX_SIGNALS),
+            )
+
+    def pin(self, sender: str, tier: ImportanceTier) -> None:
+        key = _normalize_sender(sender)
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO importance_pins (sender, tier) VALUES (?, ?) "
+                "ON CONFLICT(sender) DO UPDATE SET tier = excluded.tier",
+                (key, tier.value),
+            )
+
+    def unpin(self, sender: str) -> bool:
+        key = _normalize_sender(sender)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM importance_pins WHERE sender = ?", (key,)
+            )
+            return cur.rowcount > 0
+
+    def assess(self, sender: str, *, now: datetime | None = None) -> TierAssessment:
+        key = _normalize_sender(sender)
+        now = now or datetime.now(timezone.utc)
+        with self._connect() as conn:
+            pin_row = conn.execute(
+                "SELECT tier FROM importance_pins WHERE sender = ?", (key,)
+            ).fetchone()
+            if pin_row is not None:
+                tier = ImportanceTier(pin_row["tier"])
+                return TierAssessment(
+                    tier, f"pinned {tier.value} by the principal", True
+                )
+            rows = conn.execute(
+                "SELECT signal, ts FROM importance_signals WHERE sender = ? "
+                "ORDER BY id ASC",
+                (key,),
+            ).fetchall()
+        effective = self._effective_signals(rows, now)
+        if not effective:
+            return TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
+        return assess_from_signals(effective, now=now)
+
+    def senders(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sender FROM importance_signals "
+                "UNION SELECT sender FROM importance_pins"
+            ).fetchall()
+        return sorted({row["sender"] for row in rows})
+
+    def recent_signals(
+        self, sender: str, *, now: datetime | None = None
+    ) -> list[tuple[ActionSignal, datetime]]:
+        key = _normalize_sender(sender)
+        now = now or datetime.now(timezone.utc)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT signal, ts FROM importance_signals WHERE sender = ? "
+                "ORDER BY id ASC",
+                (key,),
+            ).fetchall()
+        return self._effective_signals(rows, now)
+
+    @staticmethod
+    def _effective_signals(
+        rows: list[Any], now: datetime
+    ) -> list[tuple[ActionSignal, datetime]]:
+        cutoff = now - timedelta(days=DECAY_DAYS)
+        effective: list[tuple[ActionSignal, datetime]] = []
+        for row in rows:
+            try:
+                ts = datetime.fromisoformat(row["ts"])
+                sig = ActionSignal(row["signal"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            if ts < cutoff:
+                continue
+            effective.append((sig, ts))
+        effective.sort(key=lambda pair: pair[1])
+        return effective
+
+
+def open_importance_profile(settings: Any) -> "ImportanceProfile":
+    """The one entry point every caller (``app.build_app``,
+    ``cli/importance_cmd.py``) uses to reach the importance profile (build
+    prompt 33, task 4) — JSON or SQLite, chosen by
+    ``settings.local_store_backend``. Migrating an existing deployment:
+    the SQLite store starts empty; there is no automatic one-time import
+    of a prior JSON file's signal history (recorded signals decay after
+    :data:`DECAY_DAYS` anyway, so a cutover simply resumes with a shorter
+    lookback until fresh signals accumulate — see ``docs/decisions.md``)."""
+    from ..config import LocalStoreBackend
+
+    if settings.local_store_backend == LocalStoreBackend.SQLITE:
+        return SqliteImportanceProfile(settings.importance_db_path)
+    return JsonImportanceProfile(settings.importance_profile_path)
 
 
 def assess_from_signals(

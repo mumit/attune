@@ -5,11 +5,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from attune.app import AppContext
 from attune.config import Settings
 from attune.connectors.base import EmailThread, Provenance
 from attune.orchestrator import (
     JsonNudgeState,
+    SqliteNudgeState,
     find_nudge_candidates,
     run_follow_up_nudges,
 )
@@ -131,6 +134,34 @@ def test_cooldown_survives_restart(tmp_path):
     JsonNudgeState(path).record_nudge("t1", at=NOW)
     # fresh instance = fresh process
     assert JsonNudgeState(path).last_nudged("t1") == NOW
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 4: SQLite backend parity. The same NudgeState
+# Protocol contract, run against both JsonNudgeState and SqliteNudgeState.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["json", "sqlite"])
+def nudge_backend(request, tmp_path):
+    if request.param == "sqlite":
+        return SqliteNudgeState(str(tmp_path / "nudges.db"))
+    return JsonNudgeState(str(tmp_path / "nudges.json"))
+
+
+def test_backend_last_nudged_absent_is_none(nudge_backend):
+    assert nudge_backend.last_nudged("unknown") is None
+
+
+def test_backend_record_and_read_round_trips(nudge_backend):
+    nudge_backend.record_nudge("t1", at=NOW)
+    assert nudge_backend.last_nudged("t1") == NOW
+
+
+def test_backend_record_nudge_overwrites_prior_timestamp(nudge_backend):
+    nudge_backend.record_nudge("t1", at=NOW - timedelta(days=10))
+    nudge_backend.record_nudge("t1", at=NOW)
+    assert nudge_backend.last_nudged("t1") == NOW
 
 
 def test_nudge_state_file_is_chmodded_owner_only(tmp_path):

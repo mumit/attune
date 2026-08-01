@@ -7,10 +7,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from attune.memory.base import MemoryStore
 from attune.orchestrator import JsonPendingApprovals, sweep_ignored
 from attune.orchestrator.draft_approve import resume_workflow
-from attune.orchestrator.pending import STATUS_EXPIRED, STATUS_IGNORED, sweep_expired
+from attune.orchestrator.pending import (
+    STATUS_EXPIRED,
+    STATUS_IGNORED,
+    SqlitePendingApprovals,
+    sweep_expired,
+)
 
 
 class FakeStore(MemoryStore):
@@ -455,3 +462,99 @@ def test_sweep_expired_default_ttl_is_seven_days(tmp_path):
     assert sweep_expired(reg, now=T0 + timedelta(days=6, hours=23)) == 0
     # Just over 7 days: expired.
     assert sweep_expired(reg, now=T0 + timedelta(days=7, hours=1)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 33, task 4: SQLite backend parity. The same PendingApprovals
+# Protocol contract, run against both JsonPendingApprovals and
+# SqlitePendingApprovals — proving the storage swap is invisible to callers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["json", "sqlite"])
+def pending_backend(request, tmp_path):
+    if request.param == "sqlite":
+        return SqlitePendingApprovals(str(tmp_path / "pending.db"))
+    return JsonPendingApprovals(str(tmp_path / "pending.json"))
+
+
+def test_backend_register_and_lookup_by_source(pending_backend):
+    reg = pending_backend
+    reg.register(
+        lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0,
+        sender="a@example.com", subject="hi", priority="normal", action="draft_reply",
+    )
+    entry = reg.get_pending_for_source("t1")
+    assert entry is not None
+    assert entry.lg_tid == "gmail:t1:100"
+    assert entry.sender == "a@example.com"
+    assert entry.subject == "hi"
+    assert entry.priority == "normal"
+    assert entry.action == "draft_reply"
+    assert entry.posted_at == T0
+
+
+def test_backend_get_pending_for_source_misses_return_none(pending_backend):
+    assert pending_backend.get_pending_for_source("nope") is None
+
+
+def test_backend_resolve_removes_from_pending(pending_backend):
+    reg = pending_backend
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0)
+    reg.resolve("t1")
+    assert reg.pending() == []
+    assert reg.get_entry("t1").status == "resolved"
+
+
+def test_backend_resolve_unknown_id_is_noop(pending_backend):
+    pending_backend.resolve("unknown")  # must not raise
+
+
+def test_backend_claim_is_single_use_and_records_actor(pending_backend):
+    reg = pending_backend
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0)
+    assert reg.claim("t1", actor="user-a", now=T0) is True
+    assert reg.claim("t1", actor="user-b", now=T0) is False
+    entry = reg.get_entry("t1")
+    assert entry.status == "resolved"
+
+
+def test_backend_claim_unknown_workflow_is_unmanaged(pending_backend):
+    assert pending_backend.claim("unknown") is None
+
+
+def test_backend_claim_allows_reclaiming_an_ignored_card(pending_backend):
+    reg = pending_backend
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0)
+    mark_ignored = getattr(reg, "mark_ignored")
+    mark_ignored("t1")
+    assert reg.claim("t1", actor="user-a", now=T0) is True
+
+
+def test_backend_mark_expired_updates_status(pending_backend):
+    reg = pending_backend
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0)
+    reg.mark_expired("t1")
+    entry = reg.get_entry("t1")
+    assert entry.status == STATUS_EXPIRED
+
+
+def test_backend_entries_filters_by_status(pending_backend):
+    reg = pending_backend
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0)
+    reg.register(lg_tid="t2", source_ref="s2", domain="mail", posted_at=T0)
+    reg.resolve("t2")
+    pending_only = reg.entries(statuses=("pending",))
+    assert [e.lg_tid for e in pending_only] == ["t1"]
+    everything = reg.entries()
+    assert {e.lg_tid for e in everything} == {"t1", "t2"}
+
+
+def test_backend_register_overwrites_a_prior_entry_for_the_same_lg_tid(pending_backend):
+    reg = pending_backend
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0, sender="a@x.com")
+    reg.resolve("t1")
+    reg.register(lg_tid="t1", source_ref="s1", domain="mail", posted_at=T0, sender="b@x.com")
+    entry = reg.get_entry("t1")
+    assert entry.status == "pending"  # register resets status
+    assert entry.sender == "b@x.com"

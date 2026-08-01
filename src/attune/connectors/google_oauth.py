@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import base64
 import email.mime.text
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
+from ..retry import retry_call
 from .base import (
     CalendarEvent,
     CalendarWriteNotPermitted,
@@ -63,6 +65,40 @@ SCOPE_CALENDAR_WRITE = "https://www.googleapis.com/auth/calendar.events"
 SCOPES_CALENDAR_WRITE = SCOPES_READONLY + (SCOPE_CALENDAR_WRITE,)
 
 _USER = "me"
+
+# Build prompt 33, task 2: kill the N+1 in list_threads.
+#
+# Google batch endpoints cap sub-requests per HTTP batch (historically 50,
+# occasionally lower depending on the API) -- chunk defensively even though
+# every caller in this codebase today passes max_results<=25.
+BATCH_CHUNK_SIZE = 50
+# Bounded fallback concurrency (build prompt 33, task 1's own instruction:
+# "list_threads' own per-thread hydration" needs a bounded worker pool) when
+# BatchHttpRequest is unavailable -- Google will rate-limit unbounded fan-out
+# (the build prompt's own constraint), so this is a constant, not unbounded.
+HYDRATION_POOL_SIZE = 8
+
+# The exact Gmail headers _thread_from_metadata/_thread_from_full actually
+# read (From, Subject, Reply-To -- see _header/_reply_target below):
+# restricting metadataHeaders to just these means the metadata format
+# doesn't transfer every header on every message.
+_METADATA_HEADERS = ["From", "Subject", "Reply-To"]
+# fields= partial-response masks (build prompt 33, task 2): request only the
+# JSON keys _thread_from_metadata/_event_from_google/_self_response_status
+# actually read. threads.get(format="metadata") still needs the full
+# messages(payload/headers) shape for the headers above, plus snippet/
+# internalDate/labelIds -- masking headers themselves happens via
+# metadataHeaders, not fields.
+_THREAD_LIST_FIELDS = "threads/id"
+_THREAD_METADATA_FIELDS = (
+    "id,messages(id,snippet,internalDate,labelIds,payload/headers)"
+)
+# get_thread (format="full") needs the full payload to decode the body --
+# no header restriction here (format=full ignores metadataHeaders anyway),
+# but still trims the top-level response to what's actually read.
+_THREAD_FULL_FIELDS = "id,messages(id,snippet,internalDate,labelIds,payload)"
+_EVENT_LIST_FIELDS = "items(id,summary,start,end,attendees,organizer)"
+_EVENT_GET_FIELDS = "id,summary,start,end,attendees,organizer"
 
 
 class DirectOAuthConnector(WorkspaceConnector):
@@ -134,31 +170,115 @@ class DirectOAuthConnector(WorkspaceConnector):
     def list_threads(
         self, query: str = "is:unread", *, max_results: int = 20
     ) -> list[EmailThread]:
-        res = (
-            self._gmail()
-            .users()
+        ids = self._list_thread_id_page(query, max_results=max_results)
+        if not ids:
+            return []
+        details = self._hydrate_threads(ids)
+        return [
+            _thread_from_metadata(details[tid], owner_email=self._owner_email)
+            for tid in ids
+            if tid in details
+        ]
+
+    def list_thread_ids(
+        self, query: str = "is:unread", *, max_results: int = 20
+    ) -> list[str]:
+        """Cheap ID-only listing (build prompt 33, task 5's incremental-brief
+        need — see ``connectors.base.WorkspaceConnector.list_thread_ids``):
+        one ``threads.list`` call, fields-masked to just the id, and NO
+        per-thread hydration at all."""
+        return self._list_thread_id_page(query, max_results=max_results)
+
+    def _list_thread_id_page(self, query: str, *, max_results: int) -> list[str]:
+        gmail = self._gmail()
+        res = retry_call(
+            lambda: gmail.users()
             .threads()
-            .list(userId=_USER, q=query, maxResults=max_results)
+            .list(
+                userId=_USER, q=query, maxResults=max_results,
+                fields=_THREAD_LIST_FIELDS,
+            )
             .execute()
         )
-        threads = []
-        for item in res.get("threads", []):
-            detail = (
-                self._gmail()
-                .users()
+        return [item["id"] for item in res.get("threads", [])]
+
+    def _hydrate_threads(self, ids: list[str]) -> dict[str, Any]:
+        """Fetch full metadata for every id in ``ids``, keyed by id.
+        Prefers ``BatchHttpRequest`` (one or a few HTTP round trips instead
+        of one per thread); degrades to a bounded thread pool when batching
+        is unavailable (a service object without ``new_batch_http_request``,
+        or the batch attempt itself raising) — never a crash, and never an
+        unbounded serial loop. A single thread's fetch failing (batch
+        per-item error, or a fallback future raising) is skipped rather
+        than failing the whole page, matching the pre-existing per-thread
+        loop's tolerance (a bad thread simply never appears in the result)."""
+        gmail = self._gmail()
+        new_batch = getattr(gmail, "new_batch_http_request", None)
+        if new_batch is not None:
+            try:
+                return self._hydrate_threads_batch(gmail, ids, new_batch)
+            except Exception:  # noqa: BLE001 - fall back rather than fail the page
+                pass
+        return self._hydrate_threads_fallback(gmail, ids)
+
+    def _hydrate_threads_batch(
+        self, gmail: Any, ids: list[str], new_batch_factory: Any
+    ) -> dict[str, Any]:
+        results: dict[str, Any] = {}
+
+        def _callback(request_id: str, response: Any, exception: Any) -> None:
+            if exception is not None:
+                return
+            results[request_id] = response
+
+        for chunk in _chunked(ids, BATCH_CHUNK_SIZE):
+            batch = new_batch_factory(callback=_callback)
+            for tid in chunk:
+                batch.add(
+                    gmail.users().threads().get(
+                        userId=_USER, id=tid, format="metadata",
+                        metadataHeaders=_METADATA_HEADERS,
+                        fields=_THREAD_METADATA_FIELDS,
+                    ),
+                    request_id=tid,
+                )
+            retry_call(lambda b=batch: b.execute())
+        return results
+
+    def _hydrate_threads_fallback(self, gmail: Any, ids: list[str]) -> dict[str, Any]:
+        def _fetch_one(tid: str) -> "tuple[str, Any]":
+            detail = retry_call(
+                lambda: gmail.users()
                 .threads()
-                .get(userId=_USER, id=item["id"], format="metadata")
+                .get(
+                    userId=_USER, id=tid, format="metadata",
+                    metadataHeaders=_METADATA_HEADERS,
+                    fields=_THREAD_METADATA_FIELDS,
+                )
                 .execute()
             )
-            threads.append(_thread_from_metadata(detail, owner_email=self._owner_email))
-        return threads
+            return tid, detail
+
+        results: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=min(HYDRATION_POOL_SIZE, len(ids))) as pool:
+            futures = [pool.submit(_fetch_one, tid) for tid in ids]
+            for future in futures:
+                try:
+                    tid, detail = future.result()
+                except Exception:  # noqa: BLE001 - one bad thread must not sink the page
+                    continue
+                results[tid] = detail
+        return results
 
     def get_thread(self, thread_id: str) -> EmailThread:
-        detail = (
-            self._gmail()
-            .users()
+        gmail = self._gmail()
+        detail = retry_call(
+            lambda: gmail.users()
             .threads()
-            .get(userId=_USER, id=thread_id, format="full")
+            .get(
+                userId=_USER, id=thread_id, format="full",
+                fields=_THREAD_FULL_FIELDS,
+            )
             .execute()
         )
         return _thread_from_full(detail, owner_email=self._owner_email)
@@ -296,15 +416,16 @@ class DirectOAuthConnector(WorkspaceConnector):
     def list_events(
         self, *, time_min: datetime, time_max: datetime
     ) -> list[CalendarEvent]:
-        res = (
-            self._calendar()
-            .events()
+        calendar = self._calendar()
+        res = retry_call(
+            lambda: calendar.events()
             .list(
                 calendarId="primary",
                 timeMin=_to_rfc3339(time_min),
                 timeMax=_to_rfc3339(time_max),
                 singleEvents=True,
                 orderBy="startTime",
+                fields=_EVENT_LIST_FIELDS,
             )
             .execute()
         )
@@ -353,10 +474,10 @@ class DirectOAuthConnector(WorkspaceConnector):
         return result
 
     def get_event(self, event_id: str) -> CalendarEvent:
-        detail = (
-            self._calendar()
-            .events()
-            .get(calendarId="primary", eventId=event_id)
+        calendar = self._calendar()
+        detail = retry_call(
+            lambda: calendar.events()
+            .get(calendarId="primary", eventId=event_id, fields=_EVENT_GET_FIELDS)
             .execute()
         )
         return _event_from_google(detail, self._internal_domains)
@@ -394,17 +515,27 @@ class DirectOAuthConnector(WorkspaceConnector):
         was set (the second, deployment-level gate)."""
         return True
 
-    def decline_invite(self, event_id: str) -> None:
+    def decline_invite(
+        self, event_id: str, *, current: CalendarEvent | None = None
+    ) -> None:
         """Patch the PRINCIPAL's own attendee responseStatus to "declined"
         (Phase 3 stage 2, Deliverable A) — never touches any other
         attendee's entry. See :meth:`_respond_to_invite` for the shared
         fetch/patch mechanics every RSVP response (this, :meth:`accept_
         invite`, :meth:`tentative_invite`) uses.
 
+        ``current`` (build prompt 33, task 3): when supplied with a
+        populated ``raw_attendees`` (i.e. it came from THIS connector's own
+        :meth:`get_event`), skips the internal ``events.get`` and reuses
+        ``current.raw_attendees`` to build the patch body — see
+        :meth:`WorkspaceConnector.decline_invite`'s docstring for why this is
+        safe (the caller's own late, same-call freshness fetch, not cached
+        state).
+
         Refuses unless ``calendar_writes_enabled`` was explicitly set
         alongside the calendar write scope (the same double-gate discipline
         as ``label_thread``/``labels_enabled``)."""
-        self._respond_to_invite(event_id, "declined")
+        self._respond_to_invite(event_id, "declined", current=current)
 
     def accept_invite(self, event_id: str) -> None:
         """Patch the PRINCIPAL's own attendee responseStatus to "accepted"
@@ -425,14 +556,26 @@ class DirectOAuthConnector(WorkspaceConnector):
         :meth:`_respond_to_invite`. Same double-gate discipline."""
         self._respond_to_invite(event_id, "needsAction")
 
-    def _respond_to_invite(self, event_id: str, response_status: str) -> None:
+    def _respond_to_invite(
+        self,
+        event_id: str,
+        response_status: str,
+        *,
+        current: CalendarEvent | None = None,
+    ) -> None:
         """Shared RSVP mechanics for :meth:`decline_invite`/
         :meth:`accept_invite`/:meth:`tentative_invite` (build prompt 30,
         task 6.2) via ``events.patch`` — never touches any other
         attendee's entry. Calendar's PATCH replaces the whole
-        ``attendees`` array rather than merging into it, so this fetches
-        the current array, flips only the principal's own entry, and sends
-        the full array back."""
+        ``attendees`` array rather than merging into it, so this needs the
+        FULL raw attendees array, flips only the principal's own entry, and
+        sends the full array back.
+
+        ``current`` (build prompt 33, task 3): when given with a non-empty
+        ``raw_attendees``, that array is reused instead of performing a
+        second ``events.get`` -- ``accept_invite``/``tentative_invite``/
+        ``reset_invite_response`` never pass it, so they keep today's exact
+        behavior (an internal fresh fetch)."""
         if not self._calendar_writes_enabled:
             raise CalendarWriteNotPermitted(
                 "DirectOAuthConnector calendar writes disabled: requires "
@@ -440,15 +583,19 @@ class DirectOAuthConnector(WorkspaceConnector):
                 "ATTUNE_CALENDAR_WRITES_ENABLED=1. Read-only is the "
                 "default; nothing is declined or rescheduled silently."
             )
-        event = (
-            self._calendar()
-            .events()
-            .get(calendarId="primary", eventId=event_id)
-            .execute()
-        )
+        if current is not None and current.raw_attendees:
+            raw_attendees = current.raw_attendees
+        else:
+            calendar = self._calendar()
+            event = retry_call(
+                lambda: calendar.events()
+                .get(calendarId="primary", eventId=event_id, fields="attendees")
+                .execute()
+            )
+            raw_attendees = event.get("attendees", [])
         updated_attendees = []
         found_self = False
-        for attendee in event.get("attendees", []):
+        for attendee in raw_attendees:
             entry = dict(attendee)
             if self._is_self_attendee(entry):
                 entry["responseStatus"] = response_status
@@ -459,21 +606,38 @@ class DirectOAuthConnector(WorkspaceConnector):
                 f"cannot respond to {event_id}: the principal is not "
                 "listed as an attendee on this event"
             )
-        self._calendar().events().patch(
-            calendarId="primary",
-            eventId=event_id,
-            body={"attendees": updated_attendees},
-        ).execute()
+        calendar = self._calendar()
+        retry_call(
+            lambda: calendar.events()
+            .patch(
+                calendarId="primary",
+                eventId=event_id,
+                body={"attendees": updated_attendees},
+            )
+            .execute()
+        )
 
     def reschedule_event(
-        self, event_id: str, *, new_start: datetime, new_end: datetime
+        self,
+        event_id: str,
+        *,
+        new_start: datetime,
+        new_end: datetime,
+        current: CalendarEvent | None = None,
     ) -> None:
         """Move ``event_id`` to a new start/end via ``events.patch`` (Phase
         3 stage 2, Deliverable A). Refuses (``CalendarWriteNotPermitted``)
-        unless the principal is this event's ORGANIZER, verified from a
-        FRESH ``events.get`` fetch performed right here — never from
-        cached workflow state, which is exactly what would let a stale
-        checkpoint move someone else's meeting."""
+        unless the principal is this event's ORGANIZER.
+
+        ``current`` (build prompt 33, task 3): when supplied, reads
+        ``current.organizer_is_self`` instead of performing a second
+        ``events.get`` -- this is STILL "verified from a fresh fetch": the
+        organizer check now runs against whichever fetch is fresher (the
+        caller's own late, same-call ``get_event``, per
+        ``WorkspaceConnector.reschedule_event``'s docstring), never from a
+        cached checkpoint or proposal-time snapshot. Omitting ``current``
+        preserves exactly today's behavior -- an internal fresh fetch,
+        performed right here."""
         if not self._calendar_writes_enabled:
             raise CalendarWriteNotPermitted(
                 "DirectOAuthConnector calendar writes disabled: requires "
@@ -481,26 +645,35 @@ class DirectOAuthConnector(WorkspaceConnector):
                 "ATTUNE_CALENDAR_WRITES_ENABLED=1. Read-only is the "
                 "default; nothing is declined or rescheduled silently."
             )
-        event = (
-            self._calendar()
-            .events()
-            .get(calendarId="primary", eventId=event_id)
-            .execute()
-        )
-        organizer = event.get("organizer", {}) or {}
-        if not self._is_self_attendee(organizer):
+        if current is not None:
+            organizer_is_self = current.organizer_is_self
+        else:
+            calendar = self._calendar()
+            event = retry_call(
+                lambda: calendar.events()
+                .get(calendarId="primary", eventId=event_id, fields="organizer")
+                .execute()
+            )
+            organizer = event.get("organizer", {}) or {}
+            organizer_is_self = self._is_self_attendee(organizer)
+        if not organizer_is_self:
             raise CalendarWriteNotPermitted(
                 f"cannot reschedule {event_id}: the principal is not this "
                 "event's organizer"
             )
-        self._calendar().events().patch(
-            calendarId="primary",
-            eventId=event_id,
-            body={
-                "start": {"dateTime": new_start.isoformat()},
-                "end": {"dateTime": new_end.isoformat()},
-            },
-        ).execute()
+        calendar = self._calendar()
+        retry_call(
+            lambda: calendar.events()
+            .patch(
+                calendarId="primary",
+                eventId=event_id,
+                body={
+                    "start": {"dateTime": new_start.isoformat()},
+                    "end": {"dateTime": new_end.isoformat()},
+                },
+            )
+            .execute()
+        )
 
     def _is_self_attendee(self, entry: dict[str, Any]) -> bool:
         """Whether ``entry`` (an attendee or organizer sub-object from a
@@ -547,6 +720,10 @@ class DirectOAuthConnector(WorkspaceConnector):
 # ---------------------------------------------------------------------------
 # Module-level helpers (pure, testable without a service)
 # ---------------------------------------------------------------------------
+
+
+def _chunked(items: list[str], size: int) -> "list[list[str]]":
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def _header(message: dict[str, Any], name: str) -> str:
@@ -667,7 +844,8 @@ def _event_from_google(
 ) -> CalendarEvent:
     start = _parse_event_dt(data.get("start", {}))
     end = _parse_event_dt(data.get("end", {}))
-    attendees = [a["email"] for a in data.get("attendees", []) if "email" in a]
+    raw_attendees = data.get("attendees", [])
+    attendees = [a["email"] for a in raw_attendees if "email" in a]
     organizer = data.get("organizer") or {}
     return CalendarEvent(
         event_id=data.get("id", ""),
@@ -678,7 +856,12 @@ def _event_from_google(
         external_attendees=has_external_attendees(attendees, internal_domains),
         organizer=organizer.get("email", ""),
         organizer_is_self=bool(organizer.get("self")),
-        response_status=_self_response_status(data.get("attendees", [])),
+        response_status=_self_response_status(raw_attendees),
+        # Build prompt 33, task 3: verbatim raw entries so decline_invite's
+        # `current` can skip a second events.get purely to rebuild the full
+        # attendees array a PATCH must resend in full — see base.py's
+        # CalendarEvent.raw_attendees docstring.
+        raw_attendees=[dict(a) for a in raw_attendees],
     )
 
 

@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .app import AppContext, build_app
-from .brief import JsonBriefSnapshot, assemble_brief
+from .brief import InMemoryBriefCache, JsonBriefSnapshot, assemble_brief
 from .orchestrator.attention_budget import SqliteDailyAttentionBudgetStore
 from .orchestrator.routines import open_routine_store
 from .config import IngestionMode, Settings
@@ -91,6 +91,10 @@ from .orchestrator import (
     JsonPermissionMatrixStore,
     demotion_thread_id,
     graduation_thread_id,
+    open_attention_store,
+    open_graduation_state,
+    open_nudge_state,
+    open_pending_approvals,
     make_accept_invite_apply_fn,
     make_add_label_apply_fn,
     make_calendar_action_apply_fn,
@@ -173,6 +177,7 @@ def _approval_channel_label(settings: Settings) -> str | None:
 def _assemble_runtime_brief(
     connector: Any, app: AppContext, settings: Settings, *,
     attention_store: Any = None, pending: Any = None, snapshot_store: Any = None,
+    brief_cache: Any = None,
 ):
     """The one place brief-assembly arguments are derived from settings, used
     by every surface that produces a brief (scheduled post, Slack DM, Chat
@@ -192,7 +197,16 @@ def _assemble_runtime_brief(
     and the tally, since both are read-only. ``snapshot_store``, by
     contrast, is passed by ONLY ``Runtime.post_brief`` (see its own
     docstring and ``brief.py``'s module docstring): an on-demand Slack/Chat
-    brief request must not overwrite the "since yesterday" baseline."""
+    brief request must not overwrite the "since yesterday" baseline.
+
+    ``brief_cache`` (build prompt 33, task 5) is the mirror image of
+    ``snapshot_store``'s asymmetry: passed by the ON-DEMAND callers
+    (Slack/Chat "give me the brief") and deliberately NOT by
+    ``Runtime.post_brief``. A cache hit returns before the snapshot
+    load/save logic ever runs — if the once-daily scheduled post could
+    itself be served from an on-demand request's cached copy, "since
+    yesterday" might silently skip writing today's baseline. Keyed by
+    ``settings.user_id``."""
     user = settings.user_id
     return assemble_brief(
         connector,
@@ -207,6 +221,8 @@ def _assemble_runtime_brief(
         snapshot_store=snapshot_store,
         approval_channel_name=_approval_channel_label(settings),
         memory_min_score=settings.memory_min_score,
+        cache=brief_cache,
+        cache_key=user,
     )
 
 
@@ -300,6 +316,10 @@ class Runtime:
     # production. One counter across every proactive feature, replacing
     # the per-feature MAX_*_PER_RUN arrival-order caps.
     attention_budget_store: Any = None
+    # Build prompt 33, task 5: process-local, short-TTL memoization of the
+    # assembled Brief (brief.InMemoryBriefCache in production) — a second
+    # "give me the brief" within the TTL is served, not recomputed.
+    brief_cache: Any = None
 
     # --- event processing (testable) ---------------------------------------
 
@@ -338,6 +358,7 @@ class Runtime:
             return _assemble_runtime_brief(
                 self.connector, self.app, self.settings,
                 attention_store=self.attention_store, pending=self.pending,
+                brief_cache=self.brief_cache,
             ).summary
 
         handle_chat_message(
@@ -662,6 +683,39 @@ class Runtime:
         if "google_chat" in self.settings.brief_channels and self.gchat is not None and self.settings.chat_default_space:
             self.gchat.post_brief(self.settings.chat_default_space, brief)
         return brief
+
+    def precompute_tomorrow_brief(self) -> Any:
+        """Sleep-time precompute (build prompt 33, task 6): assemble the
+        brief overnight, well before ``brief_time``, and write a fresh
+        :class:`~brief.BriefSnapshot` — so the morning's real
+        :meth:`post_brief` (or an early on-demand "give me the brief")
+        reads a baseline at most a few hours old instead of nothing. Its
+        own incremental-fetch path (build prompt 33, task 5,
+        ``brief._incremental_unread_threads``) then only fetches genuinely
+        NEW mail since THIS run — "the morning post validates freshness
+        and patches deltas rather than building from nothing," the exact
+        posture sleep-time compute research measures a ~5x reduction from,
+        applied to the most predictable workload a personal assistant has.
+
+        Deliberately does NOT post to any channel — this is precompute,
+        not delivery; :meth:`post_brief` still owns the actual send, and
+        (per its own docstring) is the only caller that reads/writes the
+        snapshot on the DAILY-post-time cadence people actually notice.
+        Best-effort: a failure here is logged and swallowed, the same
+        posture :meth:`run_consolidation` already takes for background
+        nightly work — it must never propagate and disturb the scheduler,
+        and a skipped precompute simply means tomorrow's real brief runs
+        cold, exactly like today's behavior before this method existed.
+        """
+        try:
+            return _assemble_runtime_brief(
+                self.connector, self.app, self.settings,
+                attention_store=self.attention_store, pending=self.pending,
+                snapshot_store=self.brief_snapshot,
+            )
+        except Exception:  # noqa: BLE001 — background precompute, never fatal
+            logger.warning("sleep-time brief precompute failed", exc_info=True)
+            return None
 
     def renew_all_watches(self) -> dict[str, str]:
         """Run every configured watch/subscription renewal, isolating and
@@ -1125,6 +1179,19 @@ class Runtime:
                         lambda r=routine: self.run_scheduled_routine(r),
                     )
                 )
+        if has_brief_destination and self.brief_snapshot is not None:
+            # Build prompt 33, task 6: sleep-time precompute — only worth
+            # running when something will actually receive the brief this
+            # refreshed snapshot speeds up, and only meaningful when there's
+            # a snapshot store to write into at all (the incremental-fetch
+            # path this feeds is a no-op without one).
+            scheduler.add(
+                Job(
+                    "sleep_time_brief_precompute",
+                    daily_at(self.settings.brief_precompute_time, tz),
+                    self.precompute_tomorrow_brief,
+                )
+            )
         if self.settings.ingestion_mode == IngestionMode.PUSH:
             scheduler.add(
                 Job("renew_watches", every(hours=24), self.renew_all_watches)
@@ -1788,6 +1855,7 @@ def build_runtime(
     graduation_state: Any = None,
     routine_store: Any = None,
     attention_budget_store: Any = None,
+    brief_cache: Any = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -1864,9 +1932,9 @@ def build_runtime(
         reschedule_compensate_fn=make_reschedule_compensate_fn(resolved_connector),
     )
 
-    resolved_pending = pending or JsonPendingApprovals(settings.pending_state_path)
+    resolved_pending = pending or open_pending_approvals(settings)
     _memory_ui: dict = {}
-    resolved_nudge_state = nudge_state or JsonNudgeState(settings.nudge_state_path)
+    resolved_nudge_state = nudge_state or open_nudge_state(settings)
     resolved_retry_queue = retry_queue or SqliteRetryQueue(
         settings.retry_queue_db_path
     )
@@ -1875,9 +1943,7 @@ def build_runtime(
         max_turns=settings.converse_window_turns,
         ttl_minutes=settings.converse_ttl_minutes,
     )
-    resolved_graduation_state = graduation_state or JsonGraduationState(
-        settings.graduation_state_path
-    )
+    resolved_graduation_state = graduation_state or open_graduation_state(settings)
     resolved_routine_store = routine_store or open_routine_store(
         settings.routine_state_path, brief_time=settings.brief_time
     )
@@ -1957,6 +2023,7 @@ def build_runtime(
                     resolved_connector, resolved_app, settings,
                     attention_store=resolved_attention_store,
                     pending=resolved_pending,
+                    brief_cache=resolved_brief_cache,
                 ).summary,
                 conversation=resolved_conversation,
                 memory_ui=_memory_ui,
@@ -2058,12 +2125,11 @@ def build_runtime(
     resolved_connector_poll_state = connector_poll_state or JsonWorkspacePollState(
         settings.connector_poll_state_path
     )
-    resolved_attention_store = attention_store or JsonAttentionStore(
-        settings.attention_path
-    )
+    resolved_attention_store = attention_store or open_attention_store(settings)
     resolved_brief_snapshot = brief_snapshot or JsonBriefSnapshot(
         settings.brief_snapshot_path
     )
+    resolved_brief_cache = brief_cache or InMemoryBriefCache()
     resolved_source_poll_state = source_poll_state or JsonChatPollState(
         settings.source_poll_state_path
     )
@@ -2106,4 +2172,5 @@ def build_runtime(
         graduation_state=resolved_graduation_state,
         routine_store=resolved_routine_store,
         attention_budget_store=resolved_attention_budget_store,
+        brief_cache=resolved_brief_cache,
     )

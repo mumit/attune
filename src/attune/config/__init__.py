@@ -40,6 +40,21 @@ class IngestionMode(str, Enum):
     PUSH = "google_pubsub"
 
 
+class LocalStoreBackend(str, Enum):
+    """Build prompt 33, task 4 (docs/plan-2026-h2.md P7): which storage
+    engine backs the five hot-path stores (pending approvals, importance,
+    attention, nudge cooldowns, graduation bookkeeping) — a whole-file-JSON-
+    plus-advisory-lock read/write per touch, versus one SQLite database
+    (already a dependency for the checkpointer, retry queue, ledger,
+    scheduler, and attention budget). Default stays JSON: this is a storage
+    swap behind a stable Protocol seam, not a forced migration — see
+    ``docs/decisions.md`` and each store module's ``open_*`` factory for the
+    one-time migration path from an existing JSON file."""
+
+    JSON = "json"
+    SQLITE = "sqlite"
+
+
 CHANNEL_NAMES = frozenset({"slack", "google_chat"})
 
 
@@ -193,6 +208,12 @@ class Settings:
     converse_ttl_minutes: int = 120
     timezone: str = "UTC"
     brief_time: str = "07:30"
+    # Build prompt 33, task 6: sleep-time precompute — assemble the brief
+    # overnight, well before brief_time, so the morning's real post only
+    # needs to fetch what changed since (see runtime.Runtime.
+    # precompute_tomorrow_brief and brief.py's incremental-fetch path).
+    # Default one hour before the default brief_time.
+    brief_precompute_time: str = "06:00"
     consolidate_time: str = "02:00"
     poll_seconds: int = 120
     nudge_time: str = "14:00"
@@ -226,6 +247,17 @@ class Settings:
     # 30-day rejection cooldowns. See orchestrator/grants.py's
     # JsonGraduationState.
     graduation_state_path: str = "./graduation_state.json"
+
+    # Build prompt 33, task 4: the local-store backend selector plus one
+    # SQLite db path per hot-path store, parallel to each store's existing
+    # `*_path` JSON field above — used only when `local_store_backend` is
+    # SQLITE. See `LocalStoreBackend`'s docstring.
+    local_store_backend: LocalStoreBackend = LocalStoreBackend.JSON
+    pending_db_path: str = "./pending_approvals.db"
+    importance_db_path: str = "./importance_profile.db"
+    attention_db_path: str = "./attention.db"
+    nudge_db_path: str = "./nudge_state.db"
+    graduation_db_path: str = "./graduation_state.db"
 
     # Security finding F9 (Info, docs/current-state.md's 2026-07-18
     # review): two local, bounded, deterministic ceilings — no model calls,
@@ -396,6 +428,7 @@ class Settings:
             converse_ttl_minutes=int(e.get("ATTUNE_CONVERSE_TTL_MINUTES", "120")),
             timezone=e.get("ATTUNE_TIMEZONE", "UTC"),
             brief_time=e.get("ATTUNE_BRIEF_TIME", "07:30"),
+            brief_precompute_time=e.get("ATTUNE_BRIEF_PRECOMPUTE_TIME", "06:00"),
             consolidate_time=e.get("ATTUNE_CONSOLIDATE_TIME", "02:00"),
             poll_seconds=max(int(e.get("ATTUNE_POLL_SECONDS", "120")), 30),
             nudge_time=e.get("ATTUNE_NUDGE_TIME", "14:00"),
@@ -418,6 +451,14 @@ class Settings:
             graduation_state_path=_path(
                 "ATTUNE_GRADUATION_STATE_PATH", "graduation_state.json"
             ),
+            local_store_backend=LocalStoreBackend(
+                e.get("ATTUNE_LOCAL_STORE_BACKEND", "json")
+            ),
+            pending_db_path=_path("ATTUNE_PENDING_DB_PATH", "pending_approvals.db"),
+            importance_db_path=_path("ATTUNE_IMPORTANCE_DB_PATH", "importance_profile.db"),
+            attention_db_path=_path("ATTUNE_ATTENTION_DB_PATH", "attention.db"),
+            nudge_db_path=_path("ATTUNE_NUDGE_DB_PATH", "nudge_state.db"),
+            graduation_db_path=_path("ATTUNE_GRADUATION_DB_PATH", "graduation_state.db"),
             inbound_rate_limit=int(e.get("ATTUNE_INBOUND_RATE_LIMIT", "20")),
             triage_batch_limit=int(e.get("ATTUNE_TRIAGE_BATCH_LIMIT", "25")),
             model_supports_tools=_is_true(e.get("ATTUNE_MODEL_SUPPORTS_TOOLS")),
