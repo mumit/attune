@@ -300,6 +300,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_undo.add_argument("effect_id", help="the effect/thread id named in the post-apply confirmation")
     p_undo.set_defaults(func=_cmd_undo)
 
+    p_mcp_server = sub.add_parser(
+        "mcp-server", help="resolve proposals an MCP calling agent submitted via attune.propose"
+    )
+    mcp_server_sub = p_mcp_server.add_subparsers(dest="mcp_server_command")
+    p_mcp_proposals = mcp_server_sub.add_parser(
+        "proposals", help="the normal human approval path for attune.propose tasks"
+    )
+    mcp_proposals_sub = p_mcp_proposals.add_subparsers(dest="mcp_proposals_command")
+    mp_list = mcp_proposals_sub.add_parser("list", help="proposals awaiting a decision")
+    mp_list.set_defaults(func=_cmd_mcp_proposals_list)
+    mp_approve = mcp_proposals_sub.add_parser("approve", help="approve one pending proposal")
+    mp_approve.add_argument("task_id", help="the task id returned by attune.propose")
+    mp_approve.set_defaults(func=_cmd_mcp_proposals_approve)
+    mp_reject = mcp_proposals_sub.add_parser("reject", help="reject one pending proposal")
+    mp_reject.add_argument("task_id", help="the task id returned by attune.propose")
+    mp_reject.set_defaults(func=_cmd_mcp_proposals_reject)
+    p_mcp_proposals.set_defaults(func=_cmd_mcp_proposals_help, parser=p_mcp_proposals)
+    p_mcp_server.set_defaults(func=_cmd_mcp_proposals_help, parser=p_mcp_proposals)
+
     p_slack = sub.add_parser(
         "slack", help="Slack app helpers (manifest generation)"
     )
@@ -575,6 +594,29 @@ def _cmd_undo(args: Any) -> int:
     from .undo_cmd import run_undo
 
     return run_undo(args.effect_id)
+
+
+def _cmd_mcp_proposals_list(args: Any) -> int:
+    from .mcp_cmd import run_mcp_proposals_list
+
+    return run_mcp_proposals_list()
+
+
+def _cmd_mcp_proposals_approve(args: Any) -> int:
+    from .mcp_cmd import run_mcp_proposals_approve
+
+    return run_mcp_proposals_approve(args.task_id)
+
+
+def _cmd_mcp_proposals_reject(args: Any) -> int:
+    from .mcp_cmd import run_mcp_proposals_reject
+
+    return run_mcp_proposals_reject(args.task_id)
+
+
+def _cmd_mcp_proposals_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
 
 
 def _cmd_slack_manifest(args: Any) -> int:

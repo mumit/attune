@@ -163,6 +163,10 @@ class Settings:
     # brief ships as one default routine, seeded here on first touch (see
     # orchestrator.routines.open_routine_store).
     routine_state_path: str = "./routines.json"
+    # Build prompt 34, task 3: durable store for MCP-originated
+    # `attune.propose` tasks awaiting a human decision through
+    # `attune mcp-server proposals approve/reject` (see cli/mcp_cmd.py).
+    mcp_server_proposals_path: str = "./mcp_proposals.json"
     # Build prompt 32, task 2: the global daily cap on unsolicited proactive
     # messages across every feature combined — replaces the per-feature
     # MAX_*_PER_RUN arrival-order caps. See docs/decisions.md for the
@@ -409,6 +413,9 @@ class Settings:
             importance_profile_path=_path("ATTUNE_IMPORTANCE_PATH", "importance_profile.json"),
             nudge_state_path=_path("ATTUNE_NUDGE_STATE_PATH", "nudge_state.json"),
             routine_state_path=_path("ATTUNE_ROUTINE_STATE_PATH", "routines.json"),
+            mcp_server_proposals_path=_path(
+                "ATTUNE_MCP_SERVER_PROPOSALS_STATE_PATH", "mcp_proposals.json"
+            ),
             daily_attention_budget=int(e.get("ATTUNE_DAILY_ATTENTION_BUDGET", "5")),
             attention_budget_db_path=_path(
                 "ATTUNE_ATTENTION_BUDGET_DB_PATH", "attention_budget.db"

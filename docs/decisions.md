@@ -4800,3 +4800,242 @@ silently forgot it — no catch-up, nothing reported it.
   label-proposal cap governed by the shared budget instead of
   `MAX_LABEL_PROPOSALS_PER_RUN`, with suppressed candidates' ledger rows
   asserted directly. Full suite: 2241 passed, 57 skipped, zero regressions.
+
+## 2026-08-01 — The 2026-07-28 MCP spec migration: stateless core, per-request `_meta` (Phase P8, build prompt 34)
+
+Closes `docs/plan-2026-h2.md` P8's first task. The MCP maintainers describe
+the 2026-07-28 specification as the largest change since authorization was
+added: the core goes stateless (the `initialize`/`initialized` handshake and
+the `Mcp-Session-Id` header are eliminated), Roots/Sampling/Logging are
+deprecated (functional through ~May 2027 under a new 12-month lifecycle
+policy), and a Tasks extension is added for async long-running operations.
+
+- **`connectors/mcp_client.py` sends no handshake and no session field.**
+  `StreamableHttpMcpCaller._call`/`_list_tools` no longer call
+  `session.initialize()`; client identity travels as per-request
+  `_meta["attune/client"]` (`_client_meta()`) on every `tools/call`/
+  `tools/list` instead. The real SDK path best-effort passes `meta=` to
+  `session.call_tool` and falls back to a plain call on a `TypeError` (an
+  SDK version that predates `meta=` support), so this doesn't hard-fail on
+  every real call just because of one dependency's release cadence.
+- **A pluggable `transport` seam makes the migration's own request-building
+  and envelope-parsing logic testable without the optional `mcp` package
+  or a live network call.** `_build_request`/`_parse_tool_result`/
+  `_parse_list_tools_result` are pure functions a fixture `transport`
+  callable exercises directly; `tests/test_mcp_client.py` proves both that
+  no handshake/session field is ever sent and that the parser tolerates a
+  legacy stateful server's response (extra `_session_id`/`protocolVersion`
+  bookkeeping alongside the result) identically to a genuinely stateless
+  one — the deprecation-window compatibility claim is therefore a tested
+  property, not an assertion.
+- **Roots, Sampling, and Logging needed no removal.** Attune's client never
+  used any of the three; the deprecation is noted in
+  `docs/mcp-contract.md` only so a future contribution doesn't add a new
+  dependency on them during the window they're still nominally functional.
+- **Tasks is adopted on the server side, not the client side, in this same
+  build prompt.** Attune is not itself an MCP client of anyone's Tasks
+  extension today; the extension's shape (async operation, durable handle,
+  `input_required` state, polling) is what `attune.propose`'s own approval
+  gate is now expressed in — see the next entry.
+- **`docs/mcp-contract.md` bumped to document version 2.0**, distinguishing
+  the *tool contract* version (Gmail/Calendar's six required tools,
+  unchanged at 1.1) from the *transport/client protocol* version (now
+  2.0), with an explicit client/server compatibility matrix. `CLAUDE.md`
+  requires that changes to required tools or envelopes version this
+  document; a transport migration of this size gets the same treatment
+  even though the tool contract itself didn't move.
+
+## 2026-08-01 — Attune as an MCP server: a credential-free process, read-only tools first, propose gated behind Tasks (Phase P8, build prompt 34)
+
+Closes `docs/plan-2026-h2.md` P8's second and third tasks. Attune consumes
+MCP and exposes nothing; Slack, Calendly, Cal.com, Granola, Glean, and
+Google Workspace all now expose MCP servers so other agents can call them.
+For a one-principal product, being the memory-and-importance layer other
+agents query is a stronger position than competing as another front door.
+
+- **A separate process, holding no workspace, model, or memory credential.**
+  `mcp_server/server.py`'s `AttuneMcpServer` depends only on
+  `mcp_server/reader.py`'s `RuntimeReadPort` protocol, an
+  `mcp_server/auth.py` `AgentAllowlist` (public agent ids and token
+  hashes, never a secret), a pluggable token verifier, an
+  `mcp_server/proposals.py` proposal store, and an audit log — the same
+  boundary shape the stateless republisher and the hosted brokers
+  (`hosted/dispatch_broker*.py`) already hold, applied to a new surface.
+  `CLAUDE.md`'s "no public listener" rule binds the credential-holding
+  runtime, not this process; this process is deliberately the one that
+  CAN take a public listener, because it holds nothing worth stealing on
+  its own. `tests/test_mcp_server.py` proves this two ways: structurally
+  (the constructor's parameter names contain no credential-shaped token —
+  `settings`, `connector`, `api_key`, `oauth`, `google`, `slack`, `model`,
+  `mem0`, `qdrant`) and functionally (the whole server runs end to end
+  from in-memory fakes and a tmp-path-backed proposal store, nothing else).
+- **Read-only tools shipped separately from `attune.propose`, per the build
+  prompt's own constraint.** `mcp_server/reader.py` defines the six read
+  tools (`attune.brief`, `attune.what_matters`, `attune.importance`,
+  `attune.memory.search`, `attune.pending`, `attune.playbook.show`) as
+  bounded, documented response shapes (capped list length and text size,
+  matching `hosted/google_provider.py`'s existing data-minimization
+  discipline) built from view dataclasses, never Attune's internal
+  `Brief`/`Bullet`/`MemoryRecord` types directly. Every read tool takes no
+  principal/tenant argument at all — there is exactly one principal per
+  Attune instance (`docs/design.md`), so there is no selection surface for
+  a calling agent's arguments to attack.
+- **`attune.propose` produces a task, never an effect.** `mcp_server/
+  gateway.py`'s `McpCapabilityGateway` mirrors `hosted/capability_gateway.py`'s
+  shape (immutable registry, strict envelope parsing, frozen bounded
+  arguments) without importing it — that module is the hosted,
+  multi-tenant, Postgres-bound admission gate; this one serves a single
+  self-hosted instance and has no tenant/connector/Postgres dependency,
+  matching the existing layering (hosted depends on core self-hosted
+  primitives, never the reverse). A curated, deliberately small registry
+  (`mail.draft_reply`, `mail.add_label` today) maps a dotted MCP-facing
+  name to an `orchestrator.capabilities` `Action`/`Domain`/`RiskTier`.
+  Admission produces, at most, an `AdmittedProposal`; `mcp_server/server.py`
+  persists it as an `mcp_server/tasks.py` `Task` in `INPUT_REQUIRED` state
+  (`mcp_server/proposals.py`'s `JsonMcpProposalStore`) and returns it —
+  no connector, no draft-approve graph, no effect runs at proposal time.
+  `tests/test_mcp_server.py::test_no_effect_occurs_until_a_human_resolves_the_proposal`
+  polls immediately and repeatedly and asserts the state never moves on
+  its own.
+- **Task vocabulary is A2A-compatible on purpose.** `mcp_server/tasks.py`'s
+  `TaskState` names `input_required`/`auth_required` exactly as A2A's
+  eight-state task lifecycle does (`docs/landscape-2026.md` §10) — MCP +
+  A2A has crystallized as the two-layer reference model, and an MCP host
+  that also speaks A2A shouldn't need a second vocabulary to reason about
+  Attune's approval gate.
+- **The normal approval path is a new CLI, not the existing draft-approve
+  one.** `orchestrator/pending.py`'s `PendingApprovals` is keyed by a live
+  LangGraph workflow thread id and expects a compiled graph behind every
+  entry; an MCP-originated proposal has neither. `attune mcp-server
+  proposals list/approve/reject` (`cli/mcp_cmd.py`) resolves an
+  `McpProposal` directly. **Scope boundary, stated plainly**: resolving a
+  proposal today only records the human's decision (`COMPLETED`/
+  `REJECTED`) — it does not yet drive a real connector effect through
+  `orchestrator.capabilities`' `apply` functions. Wiring an approved MCP
+  proposal into the same dispatch path a card's approval already uses is
+  the natural next step and is deliberately deferred rather than rushed
+  into this same change, matching this build prompt's own instruction to
+  ship the read surface and the gated propose surface separately and
+  first.
+- **Authorization is OAuth 2.1 with Resource Indicators (RFC 8707),
+  fail-closed at every step.** `mcp_server/auth.py`'s
+  `authorize_request` verifies the bearer token (a pluggable
+  `TokenVerifier`, mirroring `hosted/task_envelope.py`'s `_verify_claims`
+  pattern), then requires the token's `aud` claim to equal this
+  deployment's own resource identifier exactly — refusing a token minted
+  for a different MCP resource even if it verifies cleanly, which is the
+  standard's answer to token-passthrough — then requires the `sub` (agent
+  id) AND the token's own hash to match an allowlist entry. A calling
+  agent is not the principal: it gets its own identity, its own
+  allowlist, and its own audit actor type (`actor_type="mcp_agent"`,
+  distinct from hosted's `"principal"`/`"workload"`). Every invocation,
+  success or refusal, is audited with that actor type and the agent id;
+  `tests/test_mcp_server.py` asserts both the distinct actor type and that
+  an agent outside the allowlist (or presenting a wrong resource
+  indicator, or a token hash that doesn't match a listed agent id) is
+  refused and still audited.
+- **Injection resistance, extended to this new surface.** Every
+  `BoundedArguments` contract is an exact allowlist of field names, and
+  `FORBIDDEN_ARGUMENT_KEYS` (`rung`, `actor`, `tenant_id`, `principal_id`,
+  `risk_tier`, `scope`, ...) is checked independently as a second,
+  capability-registration-independent layer — "nothing an agent sends
+  selects a tenant, an actor, or a rung" holds structurally, not by
+  runtime value-sniffing. `tests/test_mcp_server.py` parametrizes over
+  exactly the attack shape build prompt 27's injection suite already
+  exercises (a malicious argument attempting to raise a rung or select
+  another actor) and asserts refusal before any task is ever persisted.
+
+## 2026-08-01 — Meeting context over MCP: consume, don't capture (Phase P8, build prompt 34)
+
+Granola raised $125M at a $1.5B valuation (2026-03-25) explicitly to be an
+"enterprise AI context layer" with an MCP server; Circleback and comparable
+services are similar. Meeting content is a primary importance signal Attune
+cannot see today. Building capture was considered and rejected: Otter's
+class action over recording without all-participant consent survived a
+standing challenge in early 2026, with a federal court finding
+non-consensual recording a concrete injury. Consuming someone else's
+already-consented capture over MCP is a materially different legal and
+product position from creating it, and is what `ingestion/meeting_sources.py`
+does.
+
+- **Read-only, into the attention store, no write path — structurally, not
+  by convention.** `MeetingNote` carries no field or method that
+  round-trips back to the meeting tool, and `poll_meeting_source`'s only
+  effect is one `AttentionStore.add` call per note — the same "triage and
+  record, never reply/write" posture `dispatcher.handle_source_message`
+  already holds for Slack/Chat source messages (`ingestion/sources.py`),
+  applied to a new source. A successful prompt injection inside a meeting
+  summary has no write surface to reach.
+- **Meeting content is always ROUTINE priority, never a trusted urgency
+  signal.** `meeting_note_to_attention_item` never reads anything
+  resembling an urgency claim out of note text — the same forged-signal
+  defense `orchestrator/triage.py` already applies to message bodies,
+  applied here to note text, and tested directly
+  (`test_attention_item_is_always_routine_never_a_trusted_urgency_signal`).
+- **Cursor discipline and transport mirror the existing Slack/Chat source
+  pattern exactly**: a generic per-provider high-water mark, first run
+  baselines to "now" and dispatches nothing (never replay meeting history
+  from before Attune was configured to read it), the cursor advances on
+  successful listing independent of downstream per-note success, and a
+  downstream failure enqueues a durable retry (the `"meeting_source"`
+  kind) rather than blocking or silently dropping a note. Transport is the
+  same injected `mcp_call(server, tool, arguments)` shape
+  `connectors/mcp.py`'s `McpWorkspaceConnector` already uses, under a
+  distinct logical server name (`"meetings"`) so a deployment can point it
+  at a completely different MCP package/vendor without touching the
+  Gmail/Calendar connector at all.
+- **Scope boundary, stated plainly**: this build prompt wires the source
+  module and its offline test suite (`tests/test_meeting_sources.py`), not
+  a live poller registered in `runtime.py`'s scheduler or a new
+  `Settings`/`.env.example` surface for provider URLs and per-deployment
+  opt-in. That wiring is mechanical (the same shape as every existing
+  `poll_*_source` call site) but is deliberately deferred rather than
+  rushed across scheduler/doctor/config plumbing in this same change,
+  matching this codebase's own precedent for scoping a build prompt to
+  "one real call site, not all four" (see build prompt 32's attention
+  budget entry above) when the remaining wiring adds no new design
+  decision, only more call sites.
+
+## 2026-08-01 — Declining browser automation, for now (Phase P8, build prompt 34)
+
+Computer-use is table stakes elsewhere: Claude in Chrome is GA on all paid
+plans with record-and-replay, Claude Code has computer use in CLI and
+Desktop, and Gemini Spark drives Chrome using saved passwords. Attune has
+none, and the gap is real — but the case against is strong enough to write
+down rather than leave as an unexamined omission.
+
+- **The numbers.** Anthropic's own published figure is 11.2% residual
+  prompt-injection success even WITH mitigations (23.6% without). ChatGPT
+  Atlas's own deprecation cited injection and URL-handling leaks as
+  reasons. A browser session is a much larger, much less structured attack
+  surface than a Gmail/Calendar/Chat/Slack API response — it can render
+  arbitrary attacker-controlled pages, and "don't click things a page
+  tells you to click" is exactly the class of instruction a model cannot
+  reliably follow under adversarial pressure.
+- **It contradicts the product's stated first principle.** `docs/design.md`
+  principle 6 states plainly that the model is not a security principal —
+  identity, tenant selection, authorization, capability limits, approvals,
+  and provider effects are enforced deterministically outside the model.
+  Every other capability in this codebase honors that by construction: a
+  bounded tool contract, a typed capability registry, a human approval
+  gate. A browser session has no equivalent bounded contract — the model's
+  own judgment about what's safe to click IS the security boundary, which
+  is precisely the architecture principle 6 exists to rule out.
+- **Attune's four sources all have good APIs.** Gmail, Calendar, Google
+  Chat, and Slack are the entire product surface today, and none of them
+  need a browser to reach — this isn't a gap that blocks a capability
+  Attune actually needs, it's a gap relative to competitors who use the
+  browser as their primary interop mechanism because they lack Attune's
+  API access in the first place.
+- **Conditions under which this would be revisited**: (1) a workspace
+  surface Attune needs has no API and genuinely requires browser
+  automation to reach — not merely "would be more convenient" over an
+  existing API path; (2) the published residual injection-success rate
+  for browser agents drops by roughly an order of magnitude with
+  mitigations that don't depend on the calling product's own prompt
+  engineering; and (3) a bounded, typed contract for browser actions
+  exists — analogous to the MCP tool contract or the capability
+  registry — so a browser action can be gated by the same deterministic,
+  non-model authorization path every other capability already goes
+  through, rather than by the model's own judgment about a rendered page.
+  Absent all three, browser automation stays out of scope.
