@@ -1,0 +1,6 @@
+{
+  "edit_burden_proxy": 0.05,
+  "pairwise_win_rate": 0.05,
+  "injection_success_rate": 0.05,
+  "triage_accuracy": 0.05
+}

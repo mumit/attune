@@ -44,9 +44,16 @@ def test_parser_knows_all_subcommands():
     for argv in (["doctor"], ["status", "--check"], ["repair", "--yes"],
                  ["brief"], ["brief", "--post"],
                  ["run", "--no-checks"], ["init", "--fresh"],
-                 ["memory"], ["autonomy"], ["importance"]):
+                 ["memory"], ["autonomy"], ["importance"], ["metrics"],
+                 ["eval"], ["eval", "run", "--offline"], ["eval", "capture"],
+                 ["eval", "label", "--sample", "5"]):
         args = parser.parse_args(argv)
         assert hasattr(args, "func")
+
+
+def test_eval_without_subcommand_prints_help(capsys):
+    assert main(["eval"]) == 1
+    assert "run" in capsys.readouterr().out
 
 
 def test_main_without_subcommand_prints_help_and_fails(capsys):

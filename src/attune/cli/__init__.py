@@ -13,6 +13,8 @@ a 600-line manual runbook. The CLI is the human front door:
     attune memory    (subcommand group — arrives with roadmap M4)
     attune autonomy  (subcommand group — arrives with roadmap M4)
     attune metrics   the north-star metric + coverage (build prompt 26)
+    attune eval      pairwise judging, triage/injection regression, CI gate
+                     (build prompt 27)
 
 Stdlib ``argparse`` — a CLI with five subcommands doesn't justify a click/
 typer dependency. Heavy imports happen inside subcommands so
@@ -204,6 +206,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_metrics.set_defaults(func=_cmd_metrics)
 
+    p_eval = sub.add_parser(
+        "eval",
+        help="the eval harness: pairwise judging, triage/injection regression, CI gate",
+    )
+    eval_sub = p_eval.add_subparsers(dest="eval_command")
+    e_run = eval_sub.add_parser(
+        "run", help="assemble the full eval report (pairwise, triage, injection)"
+    )
+    e_run.add_argument(
+        "--offline", action="store_true",
+        help="use deterministic, non-network fakes (CI regression-gate snapshot only; "
+        "not a quality signal — see docs/decisions.md)",
+    )
+    e_run.add_argument("--seed", type=int, default=0, help="RNG seed (position randomization)")
+    e_run.add_argument("--output", default=None, help="write the report as JSON to this path")
+    e_run.set_defaults(func=_cmd_eval_run)
+    e_capture = eval_sub.add_parser(
+        "capture", help="turn decided ledger rows into redacted regression case files"
+    )
+    e_capture.add_argument(
+        "--since-days", type=int, default=None,
+        help="only consider proposals decided in the last N days (default: all)",
+    )
+    e_capture.set_defaults(func=_cmd_eval_capture)
+    e_label = eval_sub.add_parser(
+        "label", help="hand-label a sample of cases for judge-human agreement"
+    )
+    e_label.add_argument(
+        "--sample", type=int, default=None, help="label at most this many cases (default: all)"
+    )
+    e_label.add_argument(
+        "--labels-path", default=None, help="where to append labels (default: settings-configured)"
+    )
+    e_label.set_defaults(func=_cmd_eval_label)
+    p_eval.set_defaults(func=_cmd_eval_help, parser=p_eval)
+
     p_slack = sub.add_parser(
         "slack", help="Slack app helpers (manifest generation)"
     )
@@ -380,6 +418,29 @@ def _cmd_metrics(args: Any) -> int:
     from .metrics_cmd import run_metrics
 
     return run_metrics(window_days=args.window_days)
+
+
+def _cmd_eval_run(args: Any) -> int:
+    from .eval_cmd import run_eval_run
+
+    return run_eval_run(offline=args.offline, seed=args.seed, output=args.output)
+
+
+def _cmd_eval_capture(args: Any) -> int:
+    from .eval_cmd import run_eval_capture
+
+    return run_eval_capture(since_days=args.since_days)
+
+
+def _cmd_eval_label(args: Any) -> int:
+    from .eval_cmd import run_eval_label
+
+    return run_eval_label(sample=args.sample, labels_path=args.labels_path)
+
+
+def _cmd_eval_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
 
 
 def _cmd_slack_manifest(args: Any) -> int:

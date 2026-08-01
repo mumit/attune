@@ -2,6 +2,122 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-31 — The eval harness: pairwise-only judging, a 75% agreement gate, injection-only simulated users (Phase P2, build prompt 27)
+
+Attune had 1,900+ tests and no evals: `test_memory_quality.py` made
+substring assertions against a lowercase-token-overlap fake search — no
+precision, recall, threshold, or baseline anywhere, and no external
+benchmark worth leaning on (LoCoMo's answer key is 6.4% wrong and its judge
+accepts 62.81% of deliberately wrong-but-on-topic answers; a full-context
+baseline beats memory systems on it). `evals/` and `src/attune/evals/` are
+the internal suite this forced.
+
+- **Pairwise-against-sent, never absolute Likert — enforced by never
+  building an absolute-score code path, not by convention.** The 2026 judge
+  literature is blunt: judges are internally consistent but show low
+  inter-judge agreement and systematic length/style bias, and position bias
+  is *worst* on exactly the close calls a release gate needs right.
+  `evals/judge.py::judge_pairwise` only ever asks "which of these two would
+  a reader prefer" against the human's actual sent text (or, for a
+  REJECTED proposal, the fixed `NO_REPLY_GOLD` sentinel — pairwise-against-
+  what-was-actually-sent generalizes cleanly to "was there anything worth
+  sending at all"). Position is randomized per comparison AND every
+  comparison runs in **both** orders; when the two orders disagree, the
+  case is UNRESOLVED — excluded from the win-rate numerator rather than
+  arbitrarily broken by a coin flip that would hide the exact failure mode
+  this design exists to surface. `disagreement_rate` is a first-class,
+  always-reported number.
+
+- **The 75% judge-human agreement threshold gates in code, not in a
+  comment.** `attune eval label` hand-labels a sample (target 150-200
+  pairs; the harness runs over however many exist rather than blocking on
+  that target from day one) into `evals/agreement.json`, and
+  `agreement.domain_gates` returns `False` for any domain below
+  `AGREEMENT_THRESHOLD = 0.75` **or with no recorded agreement at all** —
+  unmeasured and known-bad are treated identically, because both mean "we
+  haven't earned the right to gate a release on this domain's judge."
+  `report.DomainPairwise.gates` carries this flag on the report itself, and
+  `ci_gate.check_regression_budget` skips the pairwise-win-rate check
+  entirely for a non-gating domain — proven by
+  `tests/test_evals_ci_gate.py::test_non_gating_domain_regression_never_fails`,
+  which drives a domain's win rate from 0.80 to 0.10 and asserts zero
+  violations.
+
+- **Simulated users are confined to the injection suite — never used for
+  quality measurement.** The 2026 finding on this (31 simulators vs. 451
+  real participants; simulators created an "easy mode" and 22% of
+  simulated conversations went off-instruction) is specific to benevolent-
+  intent evaluation, where a simulator's own bias contaminates the
+  quality number. It doesn't apply to `evals/injection.py`'s adversarial
+  corpus, whose entire point is adversarial behavior — there is no
+  "benevolent" version of that suite to contaminate. Every other
+  measurement in this package (pairwise judging, the triage regression set)
+  runs over real captured decisions or hand-authored labels, never a
+  simulated conversation partner.
+
+- **Trajectory-level assertions (`evals/trajectory.py`) run over REAL
+  `build_draft_approve_graph` invocations**, never a reimplementation of
+  the gate/apply logic they check: capability selection, autonomy-rung
+  respect, no write on the approval route without a recorded human
+  decision, honest `source_changed` reporting, and (via
+  `RecordingMemoryStore`) proof that a retrieval call actually requested
+  the `min_score` floor build prompt 24 added. Agents fail at the step
+  level, not just in the final text — this is the one place the harness
+  checks steps instead of output.
+
+- **The triage regression set (`evals/triage_cases.json`) started at 36
+  hand-authored cases, not the ~50 named as a target.** Padding a synthetic
+  set to a round number with low-signal filler would be worse than being
+  honest that it's meant to grow the same way `evals/cases/` does — from
+  real, redacted decisions, via `attune eval capture`. What it already
+  proves: raw priority accuracy AND, separately,
+  `TriageEvalReport.adjustment_correct_rate` — whether the deterministic
+  LOW/HIGH importance adjustment moved the answer in the **right
+  direction**, the one number build prompt 27 names as actually proving
+  "learns what's important" rather than "classifies content well."
+
+- **The injection suite (`evals/injection_corpus.json`,
+  `evals/injection_probes.py`) is structural-invariant and prompt-fencing
+  verification, stated as its scope rather than oversold as a red-team.**
+  It is fully offline and deterministic — a live red-team against a real
+  frontier model is explicitly out of scope here (that variant is
+  manual/scheduled, mirroring `test_memory_quality.py`'s existing
+  offline/live split). `approve_instruction`/`send_instruction`/
+  `escalate_rung`/`write_memory_instruction` probes assert a structural
+  invariant that already holds (no code path lets model output become a
+  decision — P3's tool-calling hasn't landed) so a future change has to
+  consciously keep it true rather than silently break it.
+  `forged_signal`/`exfil_link`/`exfil_image` probes run the real
+  `triage_thread`/drafting prompt construction and report a **success
+  rate**, never pass/fail — `tests/test_evals_injection.py` proves the
+  number can actually move by running the same corpus entry through a
+  deliberately vulnerable and a deliberately resistant fake model and
+  asserting different outcomes.
+
+- **Case capture (`attune eval capture`) reads the checkpointer, not the
+  ledger or the audit log — both are content-free by construction.** The
+  only place a decided proposal's actual text still exists is the
+  LangGraph checkpointer, keyed by the same `thread_id` the ledger
+  carries. Capture is an explicit, standalone CLI step — never wired into
+  `resume_workflow` or any other production write path — and is
+  idempotent by filesystem (skips any `proposal_id` that already has a
+  case file), so a hand-reviewed redaction is never silently clobbered by
+  a re-run.
+
+- **The offline CI snapshot (`--offline`, `evals/offline_fakes.py`) is
+  explicitly not a quality signal.** `ci.yml`'s new `evals` job runs the
+  structural pytest suite plus a regression-budget diff
+  (`evals/ci_gate.py`) between the current branch and a best-effort
+  base-ref checkout, both generated with deterministic, keyword-level
+  fakes standing in for the judge/classifier/drafter — reproducible day
+  over day, no secrets, no network, per the "offline by default" and "no
+  hard dependency on a hosted eval vendor" constraints. A base ref that
+  predates this harness (or fails to install it) is treated the same way
+  `memory-eval.yml` treats a missing secret: skip the diff cleanly rather
+  than fail a check nobody asked it to pass yet. Real quality numbers come
+  from `eval-live.yml`, scheduled weekly against a configured gateway,
+  mirroring `memory-eval.yml`'s own secret-gated pattern exactly.
+
 ## 2026-07-31 — The decision ledger and the north-star metric (Phase P2, build prompt 26)
 
 Attune's audit log records *that* a human approved, edited, rejected, or

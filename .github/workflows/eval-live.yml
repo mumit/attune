@@ -1,0 +1,64 @@
+name: eval-live
+
+# Scheduled LIVE eval run (build prompt 27, docs/plan-2026-h2.md P2) — the
+# real-quality counterpart to ci.yml's `evals` job. That job runs the
+# offline-judgeable structural suite (position-swap disagreement wiring,
+# the 75%-agreement gate, the regression-budget diff) against deterministic
+# fakes on every PR — genuinely useful for catching plumbing regressions,
+# but its numbers are NOT a quality signal (see
+# src/attune/evals/offline_fakes.py's module docstring). This workflow runs
+# `attune eval run` against a REAL configured model gateway, the same
+# "offline in CI, live on a schedule" split memory-eval.yml already
+# established for the memory-quality eval.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Monday 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  live-eval-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Check required secrets
+        id: check
+        env:
+          ATTUNE_LLM_API_KEY: ${{ secrets.ATTUNE_LLM_API_KEY }}
+          ATTUNE_LLM_BASE_URL: ${{ secrets.ATTUNE_LLM_BASE_URL }}
+          ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
+        # Secrets can't be referenced directly in `if:` conditionals, so
+        # they're exported to the environment above and checked here; a
+        # missing gateway configuration skips the job cleanly (exit 0 with
+        # a notice) instead of failing a scheduled run nobody is watching —
+        # the same posture memory-eval.yml already established.
+        run: |
+          if [ -z "$ATTUNE_LLM_API_KEY" ] || [ -z "$ATTUNE_LLM_BASE_URL" ] || \
+             [ -z "$ATTUNE_MODEL_DEFAULT" ]; then
+            echo "::notice::Live eval secrets are not configured (ATTUNE_LLM_API_KEY, ATTUNE_LLM_BASE_URL, ATTUNE_MODEL_DEFAULT) — skipping this run."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run the live eval report
+        if: steps.check.outputs.configured == 'true'
+        env:
+          ATTUNE_LLM_API_KEY: ${{ secrets.ATTUNE_LLM_API_KEY }}
+          ATTUNE_LLM_BASE_URL: ${{ secrets.ATTUNE_LLM_BASE_URL }}
+          ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
+        run: |
+          mkdir -p evals/reports
+          attune eval run --output evals/reports/live.json
+      - name: Upload the live eval report
+        if: steps.check.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-live-report
+          path: evals/reports/live.json

@@ -30,3 +30,53 @@ jobs:
         run: |
           pip install -r deploy/republisher/requirements.txt pytest
           pytest deploy/republisher/test_main.py -q
+
+  evals:
+    # The offline-judgeable eval suite (build prompt 27, docs/plan-2026-h2.md
+    # P2): pairwise/agreement/trajectory/triage/injection structural tests,
+    # every collaborator injected/fake — no network, no secrets. The
+    # live-judge variant stays scheduled (eval-live.yml), mirroring
+    # memory-eval.yml's existing "offline in CI, live on a schedule" split.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run the offline-judgeable eval suite
+        run: pytest tests/test_evals_*.py -q
+      - name: Generate this branch's offline eval snapshot
+        env:
+          ATTUNE_MODEL_DEFAULT: offline-fake
+        run: |
+          mkdir -p evals/reports
+          attune eval run --offline --seed 42 --output evals/reports/current.json
+      - name: Generate the base branch's offline eval snapshot (best-effort)
+        if: github.event_name == 'pull_request'
+        env:
+          ATTUNE_MODEL_DEFAULT: offline-fake
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if git worktree add /tmp/base-ref "$BASE_SHA"; then
+            python -m venv /tmp/base-venv
+            if /tmp/base-venv/bin/pip install --upgrade pip >/dev/null 2>&1 \
+                && /tmp/base-venv/bin/pip install -e "/tmp/base-ref[dev]" >/tmp/base-install.log 2>&1 \
+                && /tmp/base-venv/bin/attune eval run --offline --seed 42 \
+                     --output "$GITHUB_WORKSPACE/evals/reports/base.json"; then
+              echo "base report generated"
+            else
+              echo "::notice::base ref has no (working) eval harness yet -- skipping the regression diff this run"
+            fi
+          else
+            echo "::notice::could not create a worktree for the base ref -- skipping the regression diff this run"
+          fi
+      - name: Regression gate (per-scorer deltas against the base branch)
+        run: |
+          python -m attune.evals.ci_gate evals/reports/current.json evals/reports/base.json \
+            --budget evals/regression_budget.json
