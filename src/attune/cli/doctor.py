@@ -390,6 +390,35 @@ def check_audit_chain(settings) -> tuple[str, str]:
     )
 
 
+def check_scheduler_jobs(settings) -> tuple[str, str]:
+    """Surface a silently failing recurring job (build prompt 32, task 4).
+
+    ``Scheduler``'s durable store persists ``last_outcome``/``last_error``/
+    ``last_success_at`` per job precisely so this doesn't need a live
+    process to answer — a job that has been failing every tick for days is
+    otherwise invisible until someone notices its symptom (no brief posted,
+    watches lapsed). Non-fatal (WARN, not FAIL): one bad job must not block
+    ``attune run`` from starting the rest.
+    """
+    import os
+
+    from ..scheduler import SqliteSchedulerStore
+
+    path = settings.scheduler_db_path
+    if not os.path.exists(path):
+        return SKIP, f"{path} does not exist yet (no job has run)"
+
+    statuses = SqliteSchedulerStore(path).all()
+    if not statuses:
+        return SKIP, "no recurring jobs recorded yet"
+
+    failing = [s for s in statuses if s.last_outcome == "failure"]
+    if failing:
+        names = ", ".join(f"{s.name} ({s.last_error})" for s in failing)
+        return WARN, f"{len(failing)} job(s) last failed: {names}"
+    return PASS, f"{len(statuses)} job(s) tracked, none currently failing"
+
+
 def run_doctor(
     checks: list[Check] | None = None,
     *,
@@ -633,6 +662,7 @@ def build_checks() -> list[Check]:  # pragma: no cover - thin assembly; each
         Check("calendar-writes", lambda: check_calendar_writes(settings)),
         Check("mail-send", lambda: check_mail_send(settings)),
         Check("audit-chain", lambda: check_audit_chain(settings)),
+        Check("scheduler-jobs", lambda: check_scheduler_jobs(settings)),
         Check("gmail-read", check_gmail_read),
         Check("calendar-read", check_calendar_read),
         Check("qdrant", check_qdrant),

@@ -19,6 +19,8 @@ a 600-line manual runbook. The CLI is the human front door:
                      (build prompt 29)
     attune undo      undo a previously applied effect, within its undo
                      window (build prompt 31)
+    attune routine   user-authored recurring proactivity — the daily brief
+                     ships as one default routine (build prompt 32)
 
 Stdlib ``argparse`` — a CLI with five subcommands doesn't justify a click/
 typer dependency. Heavy imports happen inside subcommands so
@@ -268,6 +270,30 @@ def build_parser() -> argparse.ArgumentParser:
     pb_revert.set_defaults(func=_cmd_playbook_revert)
     p_playbook.set_defaults(func=_cmd_playbook_help, parser=p_playbook)
 
+    p_routine = sub.add_parser(
+        "routine", help="user-authored recurring proactivity (the brief is a default)"
+    )
+    routine_sub = p_routine.add_subparsers(dest="routine_command")
+    r_add = routine_sub.add_parser(
+        "add", help="add a routine — a bounded, scheduled read request"
+    )
+    r_add.add_argument("--say", required=True, dest="request", help="the bounded read request")
+    r_add.add_argument("--at", required=True, dest="schedule", help="e.g. 'weekday 08:00', 'daily 07:30'")
+    r_add.add_argument("--name", default=None, help="default: derived from the request")
+    r_add.set_defaults(func=_cmd_routine_add)
+    r_list = routine_sub.add_parser("list", help="list configured routines")
+    r_list.set_defaults(func=_cmd_routine_list)
+    r_show = routine_sub.add_parser("show", help="show one routine's detail")
+    r_show.add_argument("name")
+    r_show.set_defaults(func=_cmd_routine_show)
+    r_remove = routine_sub.add_parser("remove", help="remove a routine")
+    r_remove.add_argument("name")
+    r_remove.set_defaults(func=_cmd_routine_remove)
+    r_run = routine_sub.add_parser("run", help="fire a routine now, as a one-off preview")
+    r_run.add_argument("name")
+    r_run.set_defaults(func=_cmd_routine_run)
+    p_routine.set_defaults(func=_cmd_routine_help, parser=p_routine)
+
     p_undo = sub.add_parser(
         "undo", help="undo a previously applied effect within its undo window"
     )
@@ -506,6 +532,41 @@ def _cmd_playbook_revert(args: Any) -> int:
 
 
 def _cmd_playbook_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
+
+
+def _cmd_routine_add(args: Any) -> int:
+    from .routine_cmd import run_routine_add
+
+    return run_routine_add(args.request, schedule=args.schedule, name=args.name)
+
+
+def _cmd_routine_list(args: Any) -> int:
+    from .routine_cmd import run_routine_list
+
+    return run_routine_list()
+
+
+def _cmd_routine_show(args: Any) -> int:
+    from .routine_cmd import run_routine_show
+
+    return run_routine_show(args.name)
+
+
+def _cmd_routine_remove(args: Any) -> int:
+    from .routine_cmd import run_routine_remove
+
+    return run_routine_remove(args.name)
+
+
+def _cmd_routine_run(args: Any) -> int:
+    from .routine_cmd import run_routine_run
+
+    return run_routine_run(args.name)
+
+
+def _cmd_routine_help(args: Any) -> int:
     args.parser.print_help()
     return 1
 

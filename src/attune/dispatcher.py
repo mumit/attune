@@ -338,6 +338,8 @@ def handle_gmail_notification(
     mail_labels_enabled: bool = False,
     mail_send_enabled: bool = False,
     ledger: Any = None,
+    attention_budget_store: Any = None,
+    daily_attention_budget: int | None = None,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -518,17 +520,45 @@ def handle_gmail_notification(
         ranked = _rank_label_offers_by_noise_confidence(
             label_offerable, importance_profile=app_ctx.importance_profile
         )
-        offers_made = 0
+        # Build prompt 32, tasks 2/3: when the shared daily attention
+        # budget is wired in, it replaces the fixed MAX_LABEL_PROPOSALS_
+        # PER_RUN arrival-order cap — the ranking above is UNCHANGED
+        # (most-confidently-noise first), only the cap becomes "whatever's
+        # left of today's shared budget" instead of a fixed per-run
+        # number, and every candidate this run couldn't afford is recorded
+        # as a suppressed_by_budget ledger row rather than silently
+        # dropped. Absent either collaborator (every pre-existing caller),
+        # behavior is byte-identical to before this build prompt.
+        if attention_budget_store is not None and daily_attention_budget is not None:
+            from .orchestrator.attention_budget import BudgetCandidate, spend_budget
+
+            candidates = [
+                BudgetCandidate(
+                    id=thread.thread_id, domain="mail", action="label",
+                    tier_rank=len(ranked) - i,  # preserves the noise-confidence order above
+                )
+                for i, (thread, triage) in enumerate(ranked)
+            ]
+            delivered_ids = {
+                c.id for c in spend_budget(
+                    candidates, budget_store=attention_budget_store,
+                    budget=daily_attention_budget, ledger=ledger,
+                    audit_log=audit_log, user_id=user_id,
+                )
+            }
+            ranked = [
+                (thread, triage) for thread, triage in ranked
+                if thread.thread_id in delivered_ids
+            ]
+        else:
+            ranked = ranked[:MAX_LABEL_PROPOSALS_PER_RUN]
         for thread, triage in ranked:
-            if offers_made >= MAX_LABEL_PROPOSALS_PER_RUN:
-                break
             offered = _offer_archive_proposal(
                 app_ctx, thread, triage, user_id=user_id,
                 post_approval=post_approval, pending=pending,
                 audit_log=audit_log, notify=notify,
             )
             if offered is not None:
-                offers_made += 1
                 submitted.append(offered)
 
     return submitted
@@ -2251,6 +2281,55 @@ def _execute_interaction_plan(
         channel=channel,
         conversation=conversation,
     )
+
+
+def run_routine(
+    app_ctx: AppContext,
+    routine: Any,
+    *,
+    workspace: WorkspaceConnector,
+    user_id: str,
+    brief_fn: Callable[[], str] | None = None,
+    audit_log: AuditLog | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Execute one ``orchestrator.routines.Routine`` and return the produced
+    text (build prompt 32, task 1) — the scheduled-firing counterpart to a
+    live DM, reusing the EXACT SAME planner and execution path
+    (:func:`plan_interaction` / :func:`_execute_interaction_plan`) rather
+    than a second implementation.
+
+    The plan is re-derived FRESH here, from ``now`` — never cached from
+    creation time (``orchestrator.routines.validate_routine_request`` only
+    ever validates at creation, it never hands its plan back to be reused)
+    — so a routine asking about "today's conflicts" resolves "today"
+    against the day it actually fires. ``channel="routine"`` and
+    ``conversation=None``: a routine has no live conversation to append to,
+    and no user message to rate-limit against (this call happens on a
+    schedule, never in response to inbound chat).
+
+    A live re-plan can, in principle, classify differently than it did at
+    creation time (the model isn't perfectly deterministic); WRITE/GENERAL
+    at firing time are handled exactly like a live DM would (WRITE reports
+    the honest refusal text, GENERAL falls through to `None`, rendered here
+    as a plain "nothing to report" line — a routine must never silently
+    post nothing without explanation).
+    """
+    plan = plan_interaction(
+        app_ctx.client, routine.request,
+        timezone_name=app_ctx.settings.timezone, now=now,
+    )
+    response = _execute_interaction_plan(
+        app_ctx, plan, text=routine.request, user_id=user_id, channel="routine",
+        workspace=workspace, brief_fn=brief_fn, conversation=None,
+        audit_log=audit_log,
+    )
+    if response is None:
+        response = (
+            f"Routine {routine.name!r} ({routine.request!r}) had nothing "
+            "to report this run."
+        )
+    return response
 
 
 def _mail_source(threads: list[Any], timezone_name: str) -> str:

@@ -144,6 +144,16 @@ class Settings:
     autonomy_state_path: str = "./autonomy_grants.json"
     importance_profile_path: str = "./importance_profile.json"
     nudge_state_path: str = "./nudge_state.json"
+    # Build prompt 32, task 1: user-authored recurring routines — the daily
+    # brief ships as one default routine, seeded here on first touch (see
+    # orchestrator.routines.open_routine_store).
+    routine_state_path: str = "./routines.json"
+    # Build prompt 32, task 2: the global daily cap on unsolicited proactive
+    # messages across every feature combined — replaces the per-feature
+    # MAX_*_PER_RUN arrival-order caps. See docs/decisions.md for the
+    # default's basis (the 3-5/day tolerance the market has converged on).
+    daily_attention_budget: int = 5
+    attention_budget_db_path: str = "./attention_budget.db"
     retry_queue_db_path: str = "./source_retries.db"
     # Build prompt 26: the decision ledger. A SQLite database (per
     # docs/plan-2026-h2.md P2's instruction to land this in "the SQLite
@@ -151,6 +161,10 @@ class Settings:
     # table gets aggregated by `attune metrics`), same discipline as
     # retry_queue_db_path above.
     ledger_db_path: str = "./decision_ledger.db"
+    # Build prompt 32, task 4: the durable scheduler's job ledger (next-run
+    # per job, last outcome, last error) — same per-feature-owns-its-db
+    # pattern as retry_queue_db_path/ledger_db_path above.
+    scheduler_db_path: str = "./scheduler.db"
 
     # Build prompt 29: the git-backed playbook directory (one Markdown file
     # per domain, its own git repository) — instance state like every other
@@ -362,8 +376,14 @@ class Settings:
             autonomy_state_path=_path("ATTUNE_AUTONOMY_STATE_PATH", "autonomy_grants.json"),
             importance_profile_path=_path("ATTUNE_IMPORTANCE_PATH", "importance_profile.json"),
             nudge_state_path=_path("ATTUNE_NUDGE_STATE_PATH", "nudge_state.json"),
+            routine_state_path=_path("ATTUNE_ROUTINE_STATE_PATH", "routines.json"),
+            daily_attention_budget=int(e.get("ATTUNE_DAILY_ATTENTION_BUDGET", "5")),
+            attention_budget_db_path=_path(
+                "ATTUNE_ATTENTION_BUDGET_DB_PATH", "attention_budget.db"
+            ),
             retry_queue_db_path=_path("ATTUNE_RETRY_QUEUE_DB_PATH", "source_retries.db"),
             ledger_db_path=_path("ATTUNE_LEDGER_DB_PATH", "decision_ledger.db"),
+            scheduler_db_path=_path("ATTUNE_SCHEDULER_DB_PATH", "scheduler.db"),
             playbook_dir=_path("ATTUNE_PLAYBOOK_DIR", "playbook"),
             eval_cases_dir=e.get("ATTUNE_EVAL_CASES_DIR") or "./evals/cases",
             eval_triage_cases_path=e.get("ATTUNE_EVAL_TRIAGE_CASES_PATH") or "./evals/triage_cases.json",

@@ -22,6 +22,7 @@ from attune.cli.doctor import (
     check_channel_routes,
     check_data_dir,
     check_google_oauth_app,
+    check_scheduler_jobs,
     check_source_channels,
     run_doctor,
 )
@@ -880,6 +881,66 @@ def test_audit_chain_fails_with_line_number_on_tamper(tmp_path):
     status, detail = check_audit_chain(settings)
     assert status == FAIL
     assert "line 2" in detail
+
+
+# ---------------------------------------------------------------------------
+# scheduler-jobs (build prompt 32, task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_scheduler_jobs_skips_when_db_absent(tmp_path):
+    from attune.config import Settings
+
+    settings = Settings.from_env({
+        "ATTUNE_SCHEDULER_DB_PATH": str(tmp_path / "scheduler.db"),
+    })
+    status, detail = check_scheduler_jobs(settings)
+    assert status == SKIP
+
+
+def test_scheduler_jobs_passes_when_none_failing(tmp_path):
+    from datetime import datetime, timezone
+
+    from attune.config import Settings
+    from attune.scheduler import JobStatus, SqliteSchedulerStore
+
+    path = tmp_path / "scheduler.db"
+    SqliteSchedulerStore(str(path)).save(JobStatus(
+        name="daily_brief", last_outcome="success",
+        last_success_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    ))
+    settings = Settings.from_env({"ATTUNE_SCHEDULER_DB_PATH": str(path)})
+    status, detail = check_scheduler_jobs(settings)
+    assert status == PASS
+    assert "1 job" in detail
+
+
+def test_scheduler_jobs_warns_on_a_failing_job_reports_through_status_and_doctor(tmp_path):
+    """A job that raised on its last run is surfaced, not silently invisible."""
+    from datetime import datetime, timezone
+
+    from attune.config import Settings
+    from attune.scheduler import JobStatus, SqliteSchedulerStore
+
+    path = tmp_path / "scheduler.db"
+    SqliteSchedulerStore(str(path)).save(JobStatus(
+        name="daily_brief", last_outcome="failure",
+        last_error="RuntimeError: boom",
+        last_success_at=datetime(2026, 7, 9, tzinfo=timezone.utc),
+    ))
+    settings = Settings.from_env({"ATTUNE_SCHEDULER_DB_PATH": str(path)})
+    status, detail = check_scheduler_jobs(settings)
+    assert status == WARN
+    assert "daily_brief" in detail
+    assert "boom" in detail
+
+    # And it appears in the full doctor battery output (which `attune
+    # status --check` runs), not just when called directly.
+    lines: list[str] = []
+    checks = [Check("scheduler-jobs", lambda: check_scheduler_jobs(settings))]
+    code = run_doctor(checks, out=lines.append)
+    assert any("daily_brief" in line for line in lines)
+    assert code == 0  # WARN is not fatal
 
 
 # ---------------------------------------------------------------------------

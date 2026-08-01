@@ -6,7 +6,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from attune.scheduler import Job, Scheduler, daily_at, every
+from attune.scheduler import (
+    CatchUp,
+    Job,
+    Scheduler,
+    SqliteSchedulerStore,
+    daily_at,
+    every,
+)
 
 UTC = timezone.utc
 
@@ -136,3 +143,151 @@ def test_error_clears_after_successful_run():
     flag["fail"] = False
     s.run_pending(t0 + timedelta(hours=2))
     assert "j" not in s.last_error
+
+
+# ---------------------------------------------------------------------------
+# Durability + catch-up semantics (build prompt 32, task 4)
+# ---------------------------------------------------------------------------
+
+
+def test_first_run_ever_schedules_without_firing_even_with_a_store(tmp_path):
+    """A job the store has NEVER seen behaves exactly like the old
+    in-memory-only scheduler: scheduled fresh, never fired."""
+    calls: list[str] = []
+    store = SqliteSchedulerStore(str(tmp_path / "scheduler.db"))
+    s = Scheduler([_counter_job("daily_brief", daily_at("07:30"), calls)], store=store)
+    t0 = datetime(2026, 7, 10, 5, 0, tzinfo=UTC)
+
+    assert s.run_pending(t0) == []
+    assert calls == []
+    assert store.load("daily_brief").next_run == datetime(2026, 7, 10, 7, 30, tzinfo=UTC)
+
+
+def test_fire_once_catchup_after_a_missed_window_fires_exactly_once(tmp_path):
+    """A restart after a missed brief window posts exactly one brief."""
+    calls: list[str] = []
+    db_path = str(tmp_path / "scheduler.db")
+    t0 = datetime(2026, 7, 10, 5, 0, tzinfo=UTC)
+
+    # Process 1: schedules the job for 07:30, then goes down before firing.
+    store1 = SqliteSchedulerStore(db_path)
+    s1 = Scheduler(
+        [Job("daily_brief", daily_at("07:30"), lambda: calls.append("daily_brief"),
+             catch_up=CatchUp.FIRE_ONCE)],
+        store=store1,
+    )
+    s1.run_pending(t0)
+    assert calls == []
+
+    # Process 2 (a fresh Scheduler instance, simulating a restart) starts up
+    # well past the missed 07:30 window.
+    store2 = SqliteSchedulerStore(db_path)
+    s2 = Scheduler(
+        [Job("daily_brief", daily_at("07:30"), lambda: calls.append("daily_brief"),
+             catch_up=CatchUp.FIRE_ONCE)],
+        store=store2,
+    )
+    restart_now = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+    fired = s2.run_pending(restart_now)
+
+    assert fired == ["daily_brief"]
+    assert calls == ["daily_brief"]
+    # rescheduled for tomorrow, from the restart time forward — not "every
+    # missed occurrence since 07:30".
+    assert s2.next_run("daily_brief") == datetime(2026, 7, 11, 7, 30, tzinfo=UTC)
+
+    # A second tick shortly after does NOT fire again.
+    s2.run_pending(restart_now + timedelta(minutes=5))
+    assert calls == ["daily_brief"]
+
+
+def test_fire_once_catchup_after_three_missed_windows_still_fires_exactly_once(tmp_path):
+    calls: list[str] = []
+    db_path = str(tmp_path / "scheduler.db")
+    t0 = datetime(2026, 7, 10, 5, 0, tzinfo=UTC)
+
+    store1 = SqliteSchedulerStore(db_path)
+    Scheduler(
+        [Job("daily_brief", daily_at("07:30"), lambda: calls.append("x"))],
+        store=store1,
+    ).run_pending(t0)
+
+    # Three days pass with the process down the whole time.
+    store2 = SqliteSchedulerStore(db_path)
+    restart_now = datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
+    fired = Scheduler(
+        [Job("daily_brief", daily_at("07:30"), lambda: calls.append("x"))],
+        store=store2,
+    ).run_pending(restart_now)
+
+    assert fired == ["daily_brief"]
+    assert calls == ["x"]  # exactly once, not three times
+
+
+def test_skip_catchup_reschedules_silently_without_firing(tmp_path):
+    calls: list[str] = []
+    db_path = str(tmp_path / "scheduler.db")
+    t0 = datetime(2026, 7, 10, 5, 0, tzinfo=UTC)
+
+    store1 = SqliteSchedulerStore(db_path)
+    Scheduler(
+        [Job("sweep", every(minutes=5), lambda: calls.append("x"), catch_up=CatchUp.SKIP)],
+        store=store1,
+    ).run_pending(t0)
+
+    store2 = SqliteSchedulerStore(db_path)
+    restart_now = t0 + timedelta(hours=6)  # long overdue
+    fired = Scheduler(
+        [Job("sweep", every(minutes=5), lambda: calls.append("x"), catch_up=CatchUp.SKIP)],
+        store=store2,
+    ).run_pending(restart_now)
+
+    assert fired == []
+    assert calls == []
+    assert Scheduler(
+        [Job("sweep", every(minutes=5), lambda: calls.append("x"))], store=store2,
+    ).next_run("sweep") is None  # not yet re-bootstrapped in a THIRD instance
+    assert store2.load("sweep").next_run == restart_now + timedelta(minutes=5)
+
+
+def test_last_error_and_last_success_persist_and_reload(tmp_path):
+    db_path = str(tmp_path / "scheduler.db")
+    t0 = datetime(2026, 7, 10, 5, 0, tzinfo=UTC)
+
+    def boom():
+        raise RuntimeError("kaboom")
+
+    store1 = SqliteSchedulerStore(db_path)
+    s1 = Scheduler([Job("bad", every(hours=1), boom)], store=store1)
+    s1.run_pending(t0)
+    s1.run_pending(t0 + timedelta(hours=1))
+
+    status = store1.load("bad")
+    assert status.last_outcome == "failure"
+    assert "RuntimeError" in status.last_error
+    assert status.last_run_at == t0 + timedelta(hours=1)
+
+    # A fresh Scheduler instance (new process) reloads the error without
+    # needing to re-run the job.
+    store2 = SqliteSchedulerStore(db_path)
+    s2 = Scheduler([Job("bad", every(hours=1), boom)], store=store2)
+    s2.run_pending(t0 + timedelta(hours=1, minutes=1))  # not yet due again
+    assert s2.last_error["bad"]
+
+
+def test_sqlite_scheduler_store_round_trips_all_fields(tmp_path):
+    from attune.scheduler import JobStatus
+
+    store = SqliteSchedulerStore(str(tmp_path / "scheduler.db"))
+    ts = datetime(2026, 7, 10, 7, 30, tzinfo=UTC)
+    store.save(JobStatus(
+        name="j", next_run=ts, last_run_at=ts, last_outcome="success",
+        last_error=None, last_success_at=ts,
+    ))
+    loaded = store.load("j")
+    assert loaded == JobStatus(
+        name="j", next_run=ts, last_run_at=ts, last_outcome="success",
+        last_error=None, last_success_at=ts,
+    )
+    assert store.load("missing") is None
+    assert [s.name for s in store.all()] == ["j"]

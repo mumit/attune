@@ -1334,10 +1334,12 @@ def test_build_scheduler_assembles_expected_jobs():
     sweep when a registry exists, consolidation always."""
     runtime = _runtime(slack=_FakeSlackChannel(), slack_say=lambda **kw: None)
     names = [j.name for j in runtime.build_scheduler().jobs]
-    # default mode is poll -> no renew_watches job
+    # default mode is poll -> no renew_watches job. The daily brief now
+    # ships as the default routine (build prompt 32) rather than a
+    # hardcoded job — see routine:morning_brief.
     assert names == [
-        "daily_brief", "sweep_pending", "sweep_pending_expiry", "source_retries",
-        "consolidate", "autonomy_digest",
+        "routine:morning_brief", "sweep_pending", "sweep_pending_expiry",
+        "source_retries", "consolidate", "autonomy_digest",
     ]
 
     # push mode gets the daily renewal job
@@ -1345,7 +1347,7 @@ def test_build_scheduler_assembles_expected_jobs():
     push.settings = _settings(ATTUNE_INGESTION_MODE="push")
     names = [j.name for j in push.build_scheduler().jobs]
     assert names == [
-        "daily_brief", "renew_watches", "sweep_pending", "sweep_pending_expiry",
+        "routine:morning_brief", "renew_watches", "sweep_pending", "sweep_pending_expiry",
         "source_retries", "consolidate", "autonomy_digest",
     ]
 
@@ -1356,10 +1358,10 @@ def test_build_scheduler_assembles_expected_jobs():
     names = [j.name for j in nudging.build_scheduler().jobs]
     assert "follow_up_nudges" in names
 
-    # No channel configured -> no brief job (nowhere to post it).
+    # No channel configured -> no routine jobs (nowhere to post them).
     quiet = _runtime()
     names = [j.name for j in quiet.build_scheduler().jobs]
-    assert "daily_brief" not in names
+    assert "routine:morning_brief" not in names
     assert "follow_up_nudges" not in names  # user_id "me" can't detect quiet
 
     # No registry -> no sweep job.
@@ -1370,17 +1372,54 @@ def test_build_scheduler_assembles_expected_jobs():
     assert "sweep_pending_expiry" not in names
 
 
-def test_scheduler_brief_job_uses_configured_time_and_tz():
-    from datetime import datetime, timezone as _tz
+def test_default_routine_exists_after_first_touch_and_removing_it_stops_the_brief(tmp_path):
+    """Build prompt 32, task 1: the daily brief ships as one default
+    routine, visible/editable/removable — not the architecture itself.
+    A fresh deployment gets it for free on first touch; removing it stops
+    the brief being scheduled at all, with no separate "stop the brief"
+    mechanism needed."""
+    from attune.orchestrator.routines import DEFAULT_ROUTINE_NAME, open_routine_store
 
     runtime = _runtime(slack=_FakeSlackChannel(), slack_say=lambda **kw: None)
-    runtime.settings = _settings(ATTUNE_BRIEF_TIME="06:15", ATTUNE_TIMEZONE="America/Vancouver")
+
+    assert runtime.routine_store.get(DEFAULT_ROUTINE_NAME) is not None
+    names = [j.name for j in runtime.build_scheduler().jobs]
+    assert f"routine:{DEFAULT_ROUTINE_NAME}" in names
+
+    assert runtime.routine_store.remove(DEFAULT_ROUTINE_NAME) is True
+    names_after_removal = [j.name for j in runtime.build_scheduler().jobs]
+    assert f"routine:{DEFAULT_ROUTINE_NAME}" not in names_after_removal
+
+    # And it stays gone — reopening the store never re-seeds it.
+    reopened = open_routine_store(runtime.settings.routine_state_path, brief_time="07:30")
+    assert reopened.get(DEFAULT_ROUTINE_NAME) is None
+
+
+def test_scheduler_brief_job_uses_configured_time_and_tz():
+    """The default routine's schedule is baked in from ``brief_time``/
+    ``timezone`` AT SEEDING TIME (build prompt 32) — unlike the old
+    hardcoded job, which re-read settings on every ``build_scheduler``
+    call, a routine owns its own persisted schedule string. So the
+    settings override must be in place BEFORE the routine store is first
+    touched (construction), not applied to an already-built Runtime."""
+    from datetime import datetime, timezone as _tz
+
+    settings = _settings(ATTUNE_BRIEF_TIME="06:15", ATTUNE_TIMEZONE="America/Vancouver")
+    runtime = build_runtime(
+        settings,
+        app=_app_ctx(), connector=_FakeConnector(), gmail_service=_FakeGmailService(),
+        watch_state=_FakeWatchState(), chat_state=_FakeChatState(),
+        chat_events_service=object(), calendar_service=object(),
+        pending=_FakePending(), conversation=_FakeConversation(),
+        retry_queue=_FakeRetryQueue(),
+        slack=_FakeSlackChannel(), slack_say=lambda **kw: None,
+    )
     scheduler = runtime.build_scheduler()
 
     # First tick schedules; 06:15 Vancouver in July (PDT) is 13:15 UTC.
     t0 = datetime(2026, 7, 10, 1, 0, tzinfo=_tz.utc)
     scheduler.run_pending(t0)
-    assert scheduler.next_run("daily_brief") == datetime(
+    assert scheduler.next_run("routine:morning_brief") == datetime(
         2026, 7, 10, 13, 15, tzinfo=_tz.utc
     )
 

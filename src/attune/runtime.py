@@ -39,6 +39,8 @@ from typing import Any, Callable
 
 from .app import AppContext, build_app
 from .brief import JsonBriefSnapshot, assemble_brief
+from .orchestrator.attention_budget import SqliteDailyAttentionBudgetStore
+from .orchestrator.routines import open_routine_store
 from .config import IngestionMode, Settings
 from .conversation import JsonConversationLog
 from .connectors import WorkspaceConnector, make_connector
@@ -288,6 +290,16 @@ class Runtime:
     # posted-card snapshots + rejection cooldowns. See post_autonomy_digest
     # and _post_autonomy_card.
     graduation_state: Any = None
+    # Build prompt 32, task 1: user-authored recurring routines
+    # (orchestrator.routines.RoutineStore) — the daily brief is now shipped
+    # as one default routine rather than a hardcoded scheduler job; see
+    # build_scheduler and run_scheduled_routine.
+    routine_store: Any = None
+    # Build prompt 32, tasks 2/3: the shared daily attention budget —
+    # orchestrator.attention_budget.SqliteDailyAttentionBudgetStore in
+    # production. One counter across every proactive feature, replacing
+    # the per-feature MAX_*_PER_RUN arrival-order caps.
+    attention_budget_store: Any = None
 
     # --- event processing (testable) ---------------------------------------
 
@@ -310,6 +322,8 @@ class Runtime:
             mail_labels_enabled=self.settings.mail_labels_enabled,
             mail_send_enabled=self.settings.mail_send_enabled,
             ledger=self.app.ledger,
+            attention_budget_store=self.attention_budget_store,
+            daily_attention_budget=self.settings.daily_attention_budget,
         )
 
     def process_chat_event(self, event: dict[str, Any]) -> None:
@@ -1055,11 +1069,24 @@ class Runtime:
         daily brief at ``brief_time``, daily watch renewals, 6-hourly pending
         sweep, nightly consolidation at ``consolidate_time``, daily manual-
         engagement recovery (build prompt 25, task 2) — all in
-        ``settings.timezone`` where a wall-clock time is involved."""
-        from .scheduler import Job, Scheduler, daily_at, every
+        ``settings.timezone`` where a wall-clock time is involved.
+
+        Build prompt 32, task 4: every job is backed by
+        ``SqliteSchedulerStore(settings.scheduler_db_path)``, so a restart
+        picks up exactly where the last process left off rather than
+        silently forgetting every job ever existed. Daily/weekly-cadence
+        jobs (brief, watch renewal, consolidation, manual-engagement
+        recovery, the autonomy digest, follow-up nudges) use the default
+        ``CatchUp.FIRE_ONCE`` — a missed occurrence is worth catching up on
+        exactly once. Tight, low-stakes interval jobs (the pending sweeps,
+        the retry drain) use ``CatchUp.SKIP`` — a few minutes late costs
+        nothing, and firing immediately on every restart would just be
+        noise for a job that cadences in minutes, not days.
+        """
+        from .scheduler import CatchUp, Job, Scheduler, SqliteSchedulerStore, daily_at, every
 
         tz = self.settings.timezone
-        scheduler = Scheduler()
+        scheduler = Scheduler(store=SqliteSchedulerStore(self.settings.scheduler_db_path))
         has_brief_destination = (
             "slack" in self.settings.brief_channels
             and self.slack is not None and self.slack_say is not None
@@ -1074,24 +1101,53 @@ class Runtime:
             "google_chat" in self.settings.notification_channels
             and self.gchat is not None and self.settings.chat_default_space
         )
-        if has_brief_destination:
-            scheduler.add(
-                Job("daily_brief", daily_at(self.settings.brief_time, tz), self.post_brief)
-            )
+        if (has_brief_destination or has_notification_destination) and self.routine_store is not None:
+            # Build prompt 32, task 1: the brief stops being a hardcoded
+            # job — it is now the default routine (see
+            # orchestrator.routines.open_routine_store), so every routine
+            # (including that default) is scheduled the same generic way.
+            # Removing the default routine removes this job at the next
+            # ``build_scheduler`` call — no separate "stop the brief" path.
+            from .orchestrator.routines import parse_schedule
+
+            for routine in self.routine_store.list():
+                try:
+                    next_run_fn = parse_schedule(routine.schedule, tz)
+                except Exception:  # noqa: BLE001 — one bad routine must not break scheduling
+                    logger.warning(
+                        "routine %s has an invalid schedule %r — skipped",
+                        routine.name, routine.schedule, exc_info=True,
+                    )
+                    continue
+                scheduler.add(
+                    Job(
+                        f"routine:{routine.name}", next_run_fn,
+                        lambda r=routine: self.run_scheduled_routine(r),
+                    )
+                )
         if self.settings.ingestion_mode == IngestionMode.PUSH:
             scheduler.add(
                 Job("renew_watches", every(hours=24), self.renew_all_watches)
             )
         if self.pending is not None:
             scheduler.add(
-                Job("sweep_pending", every(hours=6), self.sweep_pending_ignored)
+                Job(
+                    "sweep_pending", every(hours=6), self.sweep_pending_ignored,
+                    catch_up=CatchUp.SKIP,
+                )
             )
             scheduler.add(
-                Job("sweep_pending_expiry", every(hours=6), self.sweep_pending_expired)
+                Job(
+                    "sweep_pending_expiry", every(hours=6), self.sweep_pending_expired,
+                    catch_up=CatchUp.SKIP,
+                )
             )
         if self.retry_queue is not None:
             scheduler.add(
-                Job("source_retries", every(minutes=5), self.drain_source_retries)
+                Job(
+                    "source_retries", every(minutes=5), self.drain_source_retries,
+                    catch_up=CatchUp.SKIP,
+                )
             )
         scheduler.add(
             Job(
@@ -1121,6 +1177,44 @@ class Runtime:
                     )
                 )
         return scheduler
+
+    def run_scheduled_routine(self, routine: Any) -> Any:
+        """Fire one user-authored routine (build prompt 32, task 1).
+
+        Re-plans FRESH against the current moment — never a cached
+        creation-time plan (see ``orchestrator.routines``' module
+        docstring for why "today's conflicts" must resolve against the day
+        the routine actually fires). When the live plan resolves to
+        ``BRIEF``, this calls :meth:`post_brief` verbatim — the exact same
+        pipeline (attention/pending/snapshot wiring, ``brief_channels``
+        destinations) the hardcoded daily-brief job used before this build
+        prompt, which is what "existing behaviour is preserved" means for
+        the default routine. Any other bounded intent (MAIL/CALENDAR) runs
+        through ``dispatcher.run_routine`` — the same planner and execution
+        path a live DM uses — and posts the result as a plain notification
+        (``notification_channels``), since it's genuinely a NEW proactive
+        message, not the brief.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+
+        from .interaction import InteractionIntent, plan_interaction
+
+        now = _dt.now(_tz.utc)
+        plan = plan_interaction(
+            self.app.client, routine.request,
+            timezone_name=self.settings.timezone, now=now,
+        )
+        if plan.intent == InteractionIntent.BRIEF:
+            return self.post_brief()
+
+        from .dispatcher import run_routine as _run_routine
+
+        text = _run_routine(
+            self.app, routine, workspace=self.connector,
+            user_id=self.settings.user_id, audit_log=self.app.audit_log, now=now,
+        )
+        self._notify_all(text)
+        return text
 
     def sweep_pending_ignored(self, *, now: Any = None) -> int:
         """Turn stale unanswered approval cards into IGNORED memory signals
@@ -1692,6 +1786,8 @@ def build_runtime(
     slack_client: Any = None,
     brief_snapshot: Any = None,
     graduation_state: Any = None,
+    routine_store: Any = None,
+    attention_budget_store: Any = None,
 ) -> Runtime:
     """Assemble a :class:`Runtime` from config and optional overrides.
 
@@ -1781,6 +1877,12 @@ def build_runtime(
     )
     resolved_graduation_state = graduation_state or JsonGraduationState(
         settings.graduation_state_path
+    )
+    resolved_routine_store = routine_store or open_routine_store(
+        settings.routine_state_path, brief_time=settings.brief_time
+    )
+    resolved_attention_budget_store = attention_budget_store or SqliteDailyAttentionBudgetStore(
+        settings.attention_budget_db_path
     )
 
     # The one shared resume path for Slack's synchronous button clicks and
@@ -2002,4 +2104,6 @@ def build_runtime(
         slack_client=resolved_slack_client,
         brief_snapshot=resolved_brief_snapshot,
         graduation_state=resolved_graduation_state,
+        routine_store=resolved_routine_store,
+        attention_budget_store=resolved_attention_budget_store,
     )

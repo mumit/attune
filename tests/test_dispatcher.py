@@ -1542,6 +1542,59 @@ def test_noise_archive_proposals_capped_and_ranked_low_tier_first():
     assert set(offered_refs) == {"t_low1", "t_low2", "t_norm"}
 
 
+def test_noise_archive_proposals_capped_by_shared_attention_budget_not_fixed_constant(tmp_path):
+    """Build prompt 32, tasks 2/3: when the shared daily attention budget
+    is wired in, IT (not MAX_LABEL_PROPOSALS_PER_RUN) governs the cap, and
+    every candidate it couldn't afford gets a suppressed_by_budget ledger
+    row — ranking (most-confidently-noise first) is unchanged."""
+    from attune.orchestrator.attention_budget import SqliteDailyAttentionBudgetStore
+    from attune.orchestrator.importance import ImportanceTier, TierAssessment
+    from attune.orchestrator.ledger import SqliteDecisionLedger
+
+    class _Profile:
+        def __init__(self, tiers):
+            self._tiers = tiers
+
+        def assess(self, sender, *, now=None):
+            return TierAssessment(self._tiers.get(sender, ImportanceTier.NORMAL), "x", False)
+
+    profile = _Profile({
+        "low1@x.com": ImportanceTier.LOW, "low2@x.com": ImportanceTier.LOW,
+        "normal1@x.com": ImportanceTier.NORMAL, "high1@x.com": ImportanceTier.HIGH,
+    })
+    label_graph = _FakeLabelGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), label_graph=label_graph, importance_profile=profile)
+    connector = _LabelCapableConnector({
+        "t_high": _FakeThread("t_high", from_addr="high1@x.com"),
+        "t_low1": _FakeThread("t_low1", from_addr="low1@x.com"),
+        "t_norm": _FakeThread("t_norm", from_addr="normal1@x.com"),
+        "t_low2": _FakeThread("t_low2", from_addr="low2@x.com"),
+    })
+    gmail = _FakeGmail(["t_high", "t_low1", "t_norm", "t_low2"])
+    budget_store = SqliteDailyAttentionBudgetStore(str(tmp_path / "budget.db"))
+    ledger = SqliteDecisionLedger(str(tmp_path / "ledger.db"))
+
+    handle_gmail_notification(
+        app, _NOISE_NOTIFICATION,
+        gmail_service=gmail, watch_state=_FakeWatchState(history_id="100"),
+        connector=connector,
+        post_approval=lambda *a, **kw: None,
+        user_id="me@example.com",
+        triage_fn=_noise_triage_fn,
+        mail_labels_enabled=True,
+        ledger=ledger,
+        attention_budget_store=budget_store,
+        daily_attention_budget=2,  # tighter than MAX_LABEL_PROPOSALS_PER_RUN=3
+    )
+
+    assert len(label_graph.calls) == 2  # governed by the budget, not the constant
+    offered_refs = {c["state"]["incoming_ref"] for c in label_graph.calls}
+    assert offered_refs == {"t_low1", "t_low2"}  # still most-confidently-noise first
+
+    suppressed = [r for r in ledger.rows() if r.decision == "suppressed_by_budget"]
+    assert {r.thread_id for r in suppressed} == {"t_norm", "t_high"}
+
+
 def test_noise_archive_proposal_apply_calls_label_thread_and_audits():
     """make_label_apply_fn end-to-end: approving materializes via
     connector.label_thread (never create_draft), and the audit trail
