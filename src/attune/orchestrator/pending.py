@@ -57,6 +57,16 @@ class PendingApproval:
     # field existed simply parse back with sender=None, so an old JSON file
     # keeps working, it just can't feed the profile.
     sender: str | None = None
+    # thread.subject / event.summary — the discriminating topic
+    # sweep_ignored needs to write a real, retrievable summary instead of a
+    # raw thread/event id (build prompt 25, task 1). Same back-compat
+    # posture as ``sender``: absent on entries persisted before this field
+    # existed, parsing back as None.
+    subject: str | None = None
+    # The effective triage.Priority value at posting time (mail only; no
+    # analogous model classification for a deterministic calendar proposal)
+    # — feeds the same capture text as ``subject`` above.
+    priority: str | None = None
 
 
 class PendingApprovals(Protocol):
@@ -72,6 +82,8 @@ class PendingApprovals(Protocol):
         domain: str,
         posted_at: datetime,
         sender: str | None = None,
+        subject: str | None = None,
+        priority: str | None = None,
     ) -> None:
         """Record a newly posted approval card as pending."""
         ...
@@ -128,6 +140,8 @@ class JsonPendingApprovals:
         domain: str,
         posted_at: datetime,
         sender: str | None = None,
+        subject: str | None = None,
+        priority: str | None = None,
     ) -> None:
         with self._lock, locked(self._path + ".lock"):
             data = self._load()
@@ -137,6 +151,8 @@ class JsonPendingApprovals:
                 "posted_at": posted_at.astimezone(timezone.utc).isoformat(),
                 "status": STATUS_PENDING,
                 "sender": sender,
+                "subject": subject,
+                "priority": priority,
             }
             self._save(data)
 
@@ -193,6 +209,8 @@ class JsonPendingApprovals:
                 posted_at=datetime.fromisoformat(raw["posted_at"]),
                 status=raw.get("status", STATUS_PENDING),
                 sender=raw.get("sender"),  # absent on pre-Phase-1 entries
+                subject=raw.get("subject"),  # absent on pre-build-prompt-25 entries
+                priority=raw.get("priority"),
             )
             for tid, raw in data.items()
             if raw.get("status") == STATUS_PENDING
@@ -244,6 +262,12 @@ def sweep_ignored(
     carry no organizer) simply have ``sender=None`` — ``capture_action_signal``
     already treats that as "skip the profile write, keep the memory write".
 
+    The captured summary (build prompt 25, task 1) names the counterpart and
+    subject when the entry has them, rather than the raw ``source_ref`` (a
+    Gmail thread id) the pre-fix code wrote — the content-free string that
+    made ``triage._past_reactions``'s sender-scoped query unable to ever
+    retrieve an ignored-card signal.
+
     Memory-write only: the underlying mail is untouched, and the paused
     workflow itself stays resumable in the checkpointer (a very late click
     still works — it just resumes a workflow whose ignore signal was already
@@ -256,18 +280,23 @@ def sweep_ignored(
             continue
         mark = getattr(registry, "mark_ignored", registry.resolve)
         mark(entry.lg_tid)
+        age_days = (now - entry.posted_at).days
+        subject_bit = f' "{entry.subject}"' if entry.subject else ""
+        counterpart_bit = f" from {entry.sender}" if entry.sender else f" for {entry.source_ref}"
         capture_action_signal(
             store,
             user_id=user_id,
             domain=entry.domain,
             signal=ActionSignal.IGNORED,
             summary=(
-                f"approval card for {entry.source_ref} left untouched "
-                f"{(now - entry.posted_at).days}d"
+                f"approval card{subject_bit}{counterpart_bit} left untouched "
+                f"{age_days}d"
             ),
             metadata={"source_ref": entry.source_ref, "lg_tid": entry.lg_tid},
             importance_profile=importance_profile,
             sender=entry.sender,
+            subject=entry.subject,
+            priority=entry.priority,
         )
         if audit_log is not None:
             audit_log.record(

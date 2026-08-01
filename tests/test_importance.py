@@ -536,3 +536,232 @@ def test_cli_unpin(tmp_path, capsys):
 
     code = run_importance_unpin("vip@example.com", importance_profile=profile)
     assert "had no pin set" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Probation: the LOW-absorbing-state recovery path (build prompt 25, task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_low_run_without_now_never_reports_probation(tmp_path):
+    """Omitting ``now`` (existing callers, hosted's PostgresImportanceProfile
+    before this build prompt) reproduces the exact prior behavior."""
+    from attune.orchestrator.importance import assess_from_signals
+
+    effective = [
+        (ActionSignal.IGNORED, T0 + timedelta(days=i)) for i in range(3)
+    ]
+    assessment = assess_from_signals(effective)
+    assert assessment.tier == ImportanceTier.LOW
+    assert assessment.probation is False
+
+
+def test_low_run_recent_signal_is_not_on_probation(tmp_path):
+    from attune.orchestrator.importance import assess_from_signals
+
+    effective = [
+        (ActionSignal.IGNORED, T0 + timedelta(days=i)) for i in range(3)
+    ]
+    assessment = assess_from_signals(effective, now=T0 + timedelta(days=3))
+    assert assessment.tier == ImportanceTier.LOW
+    assert assessment.probation is False
+
+
+def test_low_run_stale_past_probation_days_surfaces_once(tmp_path):
+    from attune.orchestrator.importance import (
+        PROBATION_DAYS,
+        assess_from_signals,
+    )
+
+    last_signal_ts = T0 + timedelta(days=2)
+    effective = [(ActionSignal.IGNORED, T0 + timedelta(days=i)) for i in range(3)]
+    stale_now = last_signal_ts + timedelta(days=PROBATION_DAYS)
+
+    assessment = assess_from_signals(effective, now=stale_now)
+
+    assert assessment.tier == ImportanceTier.LOW
+    assert assessment.probation is True
+    assert "probation" in assessment.reason
+
+
+def test_profile_assess_threads_now_into_probation(tmp_path):
+    """The end-to-end path a real caller uses:
+    ``JsonImportanceProfile.assess(sender, now=...)``."""
+    from attune.orchestrator.importance import PROBATION_DAYS
+
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    stale_now = T0 + timedelta(days=2 + PROBATION_DAYS)
+
+    assessment = profile.assess("newsletter@example.com", now=stale_now)
+
+    assert assessment.tier == ImportanceTier.LOW
+    assert assessment.probation is True
+
+
+def test_a_fresh_signal_after_probation_resets_the_clock(tmp_path):
+    """Whatever happens to the probation-surfaced message (approved,
+    rejected, or swept as ignored) records a fresh signal, which moves the
+    run's last timestamp forward and clears probation again."""
+    from attune.orchestrator.importance import PROBATION_DAYS
+
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    stale_now = T0 + timedelta(days=2 + PROBATION_DAYS)
+    assert profile.assess("newsletter@example.com", now=stale_now).probation is True
+
+    # The surfaced message gets ignored again (the sweep, or a human reject).
+    profile.record_signal(
+        "newsletter@example.com", ActionSignal.IGNORED, ts=stale_now
+    )
+
+    assert profile.assess("newsletter@example.com", now=stale_now).probation is False
+
+
+# ---------------------------------------------------------------------------
+# record_manual_engagement (build prompt 25, task 2): the other recovery
+# path — a principal manually replying to a LOW-tier sender from Gmail
+# directly, outside any draft-approve workflow.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSentThreadConnector:
+    def __init__(self, threads):
+        self._threads = threads
+
+    def list_threads(self, query, max_results=10):
+        assert query == "in:sent"
+        return self._threads
+
+
+def _sent_thread(*, from_addr, subject, last_message_at, reply_to=""):
+    from attune.connectors.base import EmailThread
+
+    return EmailThread(
+        thread_id="t1", subject=subject, snippet="", from_addr=from_addr,
+        body="", last_from_addr="me@example.com",
+        last_message_at=last_message_at, reply_to=reply_to,
+    )
+
+
+def test_record_manual_engagement_records_weak_positive_for_low_sender(tmp_path):
+    from attune.orchestrator.importance import record_manual_engagement
+
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    now = T0 + timedelta(days=10)
+    assert profile.assess("newsletter@example.com", now=now).tier == ImportanceTier.LOW
+
+    connector = _FakeSentThreadConnector([
+        _sent_thread(
+            from_addr="newsletter@example.com", subject="Re: unsubscribe?",
+            last_message_at=now - timedelta(hours=1),
+        )
+    ])
+    store = _FakeMemoryStore()
+
+    recorded = record_manual_engagement(
+        connector, profile, store,
+        user_id="me@example.com", user_email="me@example.com", now=now,
+    )
+
+    assert recorded == 1
+    assert store.added  # the memory dual-write happened too
+    new_assessment = profile.assess("newsletter@example.com", now=now)
+    # A fresh APPROVED signal was recorded; the run is no longer 3/3 negative.
+    assert new_assessment.tier != ImportanceTier.LOW
+
+
+def test_record_manual_engagement_ignores_non_low_senders(tmp_path):
+    from attune.orchestrator.importance import record_manual_engagement
+
+    profile = _profile(tmp_path)  # no recorded signals -> NORMAL
+    now = T0 + timedelta(days=10)
+    connector = _FakeSentThreadConnector([
+        _sent_thread(
+            from_addr="friend@example.com", subject="Hey",
+            last_message_at=now - timedelta(hours=1),
+        )
+    ])
+    store = _FakeMemoryStore()
+
+    recorded = record_manual_engagement(
+        connector, profile, store,
+        user_id="me@example.com", user_email="me@example.com", now=now,
+    )
+
+    assert recorded == 0
+    assert not store.added
+
+
+def test_record_manual_engagement_skips_thread_to_self():
+    """A thread whose counterparty resolves to the principal's own address
+    (an owner-only sent thread) has nobody to record a signal for."""
+    from attune.orchestrator.importance import record_manual_engagement
+
+    class _AlwaysLowProfile:
+        def assess(self, sender, *, now=None):
+            return TierAssessment(ImportanceTier.LOW, "low", False)
+
+    now = T0 + timedelta(days=10)
+    connector = _FakeSentThreadConnector([
+        _sent_thread(
+            from_addr="me@example.com", subject="note to self",
+            last_message_at=now - timedelta(hours=1),
+        )
+    ])
+    store = _FakeMemoryStore()
+
+    recorded = record_manual_engagement(
+        connector, _AlwaysLowProfile(), store,
+        user_id="me@example.com", user_email="me@example.com", now=now,
+    )
+
+    assert recorded == 0
+    assert not store.added
+
+
+def test_record_manual_engagement_profile_failure_skips_thread_not_pass():
+    """One bad assessment must not abort the pass for every other thread."""
+    from attune.orchestrator.importance import record_manual_engagement
+
+    class _FlakyProfile:
+        def __init__(self):
+            self.calls = 0
+
+        def assess(self, sender, *, now=None):
+            self.calls += 1
+            if sender == "broken@example.com":
+                raise RuntimeError("boom")
+            return TierAssessment(ImportanceTier.LOW, "low", False)
+
+    now = T0 + timedelta(days=10)
+    connector = _FakeSentThreadConnector([
+        _sent_thread(
+            from_addr="broken@example.com", subject="a",
+            last_message_at=now - timedelta(hours=2),
+        ),
+        _sent_thread(
+            from_addr="ok@example.com", subject="b",
+            last_message_at=now - timedelta(hours=1),
+        ),
+    ])
+    store = _FakeMemoryStore()
+    profile = _FlakyProfile()
+
+    recorded = record_manual_engagement(
+        connector, profile, store,
+        user_id="me@example.com", user_email="me@example.com", now=now,
+    )
+
+    assert recorded == 1  # the second thread still got recorded
+    assert profile.calls == 2

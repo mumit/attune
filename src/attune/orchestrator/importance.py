@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -83,11 +84,30 @@ from typing import Any, Protocol
 from ..fslock import locked
 from ..memory.signals import ActionSignal
 
+logger = logging.getLogger(__name__)
+
 DECAY_DAYS = 90
 MAX_SIGNALS = 20
 LOW_RUN_THRESHOLD = 3
 HIGH_MIN_SIGNALS = 5
 HIGH_MIN_RATE = 0.8
+
+# Build prompt 25, task 2 (the LOW absorbing state): today, once a sender is
+# demoted to LOW, triage demotes its mail toward NOISE, NOISE returns before
+# any card is posted (absent the label gates), and hygiene-action captures
+# (LABEL approvals) never touch the profile — so the signal list stops
+# growing and the tier is frozen until DECAY_DAYS (90) passes or a human runs
+# `attune importance pin`. PROBATION_DAYS is the bounded recovery path: once
+# this long has passed since the LOW run's LAST recorded signal with no
+# fresher one arriving, the NEXT assessment carries `probation=True`, and
+# triage (`_apply_importance_adjustment`) skips the demotion for that one
+# message — the model's own classification stands, unadjusted, giving the
+# sender a real chance to be re-evidenced. Whatever happens next (approved,
+# rejected, or swept as ignored 48h later) records a FRESH signal, which
+# moves the run's last timestamp forward and clears probation until
+# PROBATION_DAYS elapses again with nothing new. Deterministic, inspectable
+# (the reason string names it), no model call.
+PROBATION_DAYS = 14
 
 _NEGATIVE_SIGNALS = (ActionSignal.IGNORED, ActionSignal.REJECTED)
 _POSITIVE_SIGNALS = (ActionSignal.APPROVED, ActionSignal.EDITED)
@@ -112,6 +132,11 @@ class TierAssessment:
     tier: ImportanceTier
     reason: str
     pinned: bool
+    # True only for a LOW verdict whose run has gone PROBATION_DAYS+ without
+    # a fresh signal (module-level constant's docstring) — the caller
+    # (triage._apply_importance_adjustment) reads this to let one message
+    # through unadjusted rather than compounding the freeze.
+    probation: bool = False
 
 
 class ImportanceProfile(Protocol):
@@ -232,7 +257,7 @@ class JsonImportanceProfile:
         if not effective:
             return TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
 
-        return assess_from_signals(effective)
+        return assess_from_signals(effective, now=now)
 
     def senders(self) -> list[str]:
         with self._lock, locked(self._path + ".lock"):
@@ -324,6 +349,8 @@ class JsonImportanceProfile:
 
 def assess_from_signals(
     effective: list[tuple[ActionSignal, datetime]],
+    *,
+    now: datetime | None = None,
 ) -> TierAssessment:
     """Rules 4-6 over an already-decayed, oldest-first signal list.
 
@@ -331,6 +358,11 @@ def assess_from_signals(
     reusable rule engine the hosted seam imports (module docstring) — the
     tier thresholds must exist as one piece of code, not be reimplemented
     against a different storage backend.
+
+    ``now``, when given, additionally evaluates the probation rule (module
+    constant :data:`PROBATION_DAYS`) against the LOW run's most recent
+    signal. Omitting it (existing callers that predate probation) reproduces
+    the exact prior behavior — ``probation`` stays ``False``.
     """
     signals_only = [sig for sig, _ in effective]
 
@@ -350,11 +382,18 @@ def assess_from_signals(
             verb = "rejected"
         else:
             verb = "ignored or rejected"
-        return TierAssessment(
-            ImportanceTier.LOW,
-            f"sender {verb} {run} of last {run} proposals",
-            False,
-        )
+        reason = f"sender {verb} {run} of last {run} proposals"
+        probation = False
+        if now is not None:
+            last_ts = effective[-1][1]
+            if now - last_ts >= timedelta(days=PROBATION_DAYS):
+                probation = True
+                reason += (
+                    f"; on probation ({PROBATION_DAYS}+ days since the last "
+                    "signal) — next message surfaces unadjusted to "
+                    "re-evidence the tier"
+                )
+        return TierAssessment(ImportanceTier.LOW, reason, False, probation=probation)
 
     # Rule 5 (HIGH): a strong approval ratio over enough signals.
     total = len(signals_only)
@@ -376,3 +415,81 @@ def assess_from_signals(
         "— not enough to change the tier",
         False,
     )
+
+
+def record_manual_engagement(
+    connector: Any,
+    importance_profile: ImportanceProfile,
+    store: Any,
+    *,
+    user_id: str,
+    user_email: str,
+    now: datetime | None = None,
+    max_results: int = 20,
+) -> int:
+    """The other half of the LOW-absorbing-state fix (build prompt 25, task
+    2): a principal who manually replies to a LOW-tier sender from Gmail
+    directly — never going through a draft-approve workflow, so nothing
+    would otherwise ever call :func:`~memory.signals.capture_action_signal`
+    for it — gets a weak positive recorded anyway. Reads
+    ``brief.find_recent_sent_threads`` (the SAME ``in:sent`` connector call
+    :func:`~brief.find_quiet_threads` already makes, filtered the opposite
+    way), and for each recently-sent thread whose counterparty currently
+    assesses LOW, records ``ActionSignal.APPROVED`` — the ordinary
+    dual-write (:func:`~memory.signals.capture_action_signal` with both
+    ``importance_profile`` and ``sender`` given), so this is one behavior
+    with two stores exactly like every other capture site, not a special
+    case.
+
+    Deliberately narrow: this recovers a sender from a stale LOW freeze via
+    real re-engagement, the same evidentiary bar :data:`assess_from_signals`
+    already applies everywhere else — it does not invent a new kind of
+    trust. A profile-assessment failure for one thread is logged and
+    skipped, never allowed to abort the pass for every other thread; a
+    connector failure propagates (the caller — ``runtime.py``'s scheduled
+    job — is responsible for catching it, the same posture every other
+    scheduled job in this codebase takes for a connector-level failure).
+
+    Un-archiving a LOW-tier sender's mail (the module docstring's other
+    named recovery trigger) is deliberately NOT implemented here: reliably
+    distinguishing "the principal restored this to the inbox" from "this is
+    simply new mail" needs either a new connector capability or scanning the
+    audit log for this codebase's own prior archive actions, and the cost of
+    either was judged disproportionate to a weak, best-effort signal — see
+    ``docs/decisions.md`` for the scope call.
+    """
+    from ..brief import find_recent_sent_threads
+    from ..memory.signals import ActionSignal, capture_action_signal
+
+    threads = find_recent_sent_threads(
+        connector, user_email=user_email, now=now, max_results=max_results
+    )
+    recorded = 0
+    for thread in threads:
+        counterpart = thread.reply_to or thread.from_addr
+        if not counterpart or user_email.lower() in counterpart.lower():
+            continue
+        try:
+            tier = importance_profile.assess(counterpart, now=now).tier
+        except Exception:  # noqa: BLE001 — one bad assessment must not
+            # abort the pass for every other thread in this run.
+            logger.warning(
+                "importance profile assess failed for sender=%s", counterpart,
+                exc_info=True,
+            )
+            continue
+        if tier != ImportanceTier.LOW:
+            continue
+        capture_action_signal(
+            store,
+            user_id=user_id,
+            domain="mail",
+            signal=ActionSignal.APPROVED,
+            summary="principal manually replied despite the sender's LOW tier",
+            sender=counterpart,
+            subject=thread.subject,
+            metadata={"observed": "manual_reply"},
+            importance_profile=importance_profile,
+        )
+        recorded += 1
+    return recorded

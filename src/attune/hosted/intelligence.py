@@ -197,7 +197,7 @@ class PostgresImportanceProfile:
         effective = [pair for pair in rows if pair[1] >= cutoff]
         if not effective:
             return TierAssessment(ImportanceTier.NORMAL, "no recorded signals", False)
-        return assess_from_signals(effective)
+        return assess_from_signals(effective, now=now)
 
     def pin(self, sender: str, tier: ImportanceTier) -> None:
         if not isinstance(tier, ImportanceTier):

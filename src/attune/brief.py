@@ -450,6 +450,16 @@ def _pending_tally_line(pending: Any, approval_channel_name: str | None) -> str 
     return f"{count} proposal{plural} awaiting your decision in {label}"
 
 
+def _list_sent_threads(
+    connector: WorkspaceConnector, max_results: int
+) -> list[EmailThread]:
+    """The shared ``in:sent`` read both :func:`find_quiet_threads` and
+    :func:`find_recent_sent_threads` filter over — one Gmail round trip for
+    both quiet-thread detection and the manual-engagement recovery signal
+    (``orchestrator.importance.record_manual_engagement``), not two."""
+    return connector.list_threads("in:sent", max_results=max_results)
+
+
 def find_quiet_threads(
     connector: WorkspaceConnector,
     *,
@@ -466,7 +476,7 @@ def find_quiet_threads(
     """
     now = now or datetime.now(timezone.utc)
     threshold = timedelta(days=min_age_days)
-    sent = connector.list_threads("in:sent", max_results=max_results * 2)
+    sent = _list_sent_threads(connector, max_results * 2)
     quiet = [
         t
         for t in sent
@@ -475,6 +485,43 @@ def find_quiet_threads(
         and now - t.last_message_at >= threshold
     ]
     return quiet[:max_results]
+
+
+def find_recent_sent_threads(
+    connector: WorkspaceConnector,
+    *,
+    user_email: str,
+    now: datetime | None = None,
+    max_age_days: int = 2,
+    max_results: int = 20,
+) -> list[EmailThread]:
+    """Threads where the user sent the last message within ``max_age_days``
+    — the mirror image of :func:`find_quiet_threads`' silence filter, over
+    the SAME ``in:sent`` read (:func:`_list_sent_threads`).
+
+    Feeds ``orchestrator.importance.record_manual_engagement`` (Phase 1,
+    G5/G6, build prompt 25's LOW-absorbing-state fix): a principal who
+    manually replies to a LOW-tier sender — from Gmail directly, outside any
+    Attune draft-approve workflow — is evidence the tier should move, and
+    this is the read that lets that reply be noticed at all. ``max_age_days``
+    defaults to roughly this job's own scheduled cadence (daily) plus a
+    safety margin, not :data:`QUIET_MIN_AGE_DAYS` — a wide window would let
+    the SAME reply be picked up and re-recorded on every subsequent run
+    until it ages out, over-counting one manual reply as several weak
+    positives (acceptable for a weak signal bounded by
+    ``importance.MAX_SIGNALS``, but not worth widening further).
+    """
+    now = now or datetime.now(timezone.utc)
+    threshold = timedelta(days=max_age_days)
+    sent = _list_sent_threads(connector, max_results * 2)
+    recent = [
+        t
+        for t in sent
+        if user_email.lower() in (t.last_from_addr or "").lower()
+        and t.last_message_at is not None
+        and now - t.last_message_at < threshold
+    ]
+    return recent[:max_results]
 
 
 def _order_by_importance(

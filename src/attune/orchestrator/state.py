@@ -52,6 +52,13 @@ class DraftApproveState(TypedDict, total=False):
                                      # thread.from_addr; calendar: organizer, or
                                      # None) — feeds the per-sender importance
                                      # profile at capture time (Phase 1, G5)
+    subject: Optional[str]           # thread.subject / event.summary — the
+                                     # discriminating topic feeding the
+                                     # capture node's signal text (build
+                                     # prompt 25, task 1). Attacker-influenced
+                                     # (a Subject header); capture_action_signal
+                                     # fences it before it ever reaches a
+                                     # prompt.
     priority: Optional[str]          # effective triage.Priority value ("urgent" |
                                      # "routine" | "noise") that got this workflow
                                      # started (Phase 1, G4) — a seam for future

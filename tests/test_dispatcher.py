@@ -2157,7 +2157,8 @@ def test_symmetric_conflict_pair_gets_one_card():
         def get_pending_for_source(self, ref):
             return registered.get(ref)
 
-        def register(self, *, lg_tid, source_ref, domain, posted_at, sender=None):
+        def register(self, *, lg_tid, source_ref, domain, posted_at, sender=None,
+                     subject=None, priority=None):
             registered[source_ref] = object()
 
     handle_calendar_notification(

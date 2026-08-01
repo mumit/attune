@@ -153,6 +153,46 @@ def test_edit_path_captures_correction():
     assert "correction" in signals and "action" in signals
 
 
+def test_edit_path_scopes_correction_to_sender_and_subject():
+    """Build prompt 25, task 3: capture_correction used to be called with no
+    context at all, so its extraction prompt rendered "Context: n/a" and
+    every learned preference was scoped to the bare string "mail" — this
+    now passes the counterparty and thread subject."""
+
+    class _CapturingStore(MemoryStore):
+        def __init__(self):
+            self.added_messages: list = []
+
+        def add(self, messages, *, user_id, metadata=None, infer=True):
+            self.added_messages.append(messages)
+            return []
+
+        def search(self, query, *, user_id, limit=8, min_score=None):
+            return []
+
+        def get_all(self, *, user_id, limit=100):
+            return []
+
+        def delete(self, memory_id):
+            pass
+
+    store = _CapturingStore()
+    graph = build_draft_approve_graph(client=FakeClient(), store=store)
+    cfg = {"configurable": {"thread_id": "t-edit-ctx"}}
+    graph.invoke(
+        _base_state(sender="alice@example.com", subject="Re: Thursday call"), cfg
+    )
+    graph.invoke(
+        Command(resume={"decision": "edited", "text": "Sure, Thursday works."}), cfg
+    )
+
+    correction_messages = next(
+        m for m in store.added_messages
+        if isinstance(m, list) and "Context:" in m[0].content
+    )
+    assert "Context: alice@example.com — Re: Thursday call" in correction_messages[0].content
+
+
 def test_reject_path_no_final_text():
     store = FakeStore()
     graph = build_draft_approve_graph(client=FakeClient(), store=store)

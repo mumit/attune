@@ -17,28 +17,27 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any
-
-
-class Scope(str, Enum):
-    """Memory scoping. Kept small; maps onto Mem0's user/agent/run ids.
-
-    The assistant runs as one agent for one principal, so ``user_id`` is the
-    principal and ``run_id`` optionally isolates a single workflow's episodic
-    trace. Instance isolation separation is handled by running *separate
-    deployments with separate stores* (design 4.7), not by scoping within one
-    store — so cross-deployment leakage is impossible by construction.
-    """
-
-    USER = "user"
-    AGENT = "agent"
-    RUN = "run"
 
 
 @dataclass
 class MemoryRecord:
-    """A single retrieved memory, normalized across substrates."""
+    """A single retrieved memory, normalized across substrates.
+
+    ``created_at``/``updated_at`` are the substrate's own write-time
+    timestamps (Mem0's, mapped in ``Mem0Store._to_record``) — what makes
+    "most recent" an honest claim instead of substrate-order guesswork.
+
+    ``valid_from``/``valid_to``/``superseded_by`` are bitemporal metadata
+    (``docs/plan-2026-h2.md`` P1, ``docs/landscape-2026.md`` §5): the 80% of
+    Graphiti's advantage — "who/what was true as of when" — achievable as
+    metadata on existing records rather than a second, graph-shaped store.
+    ``valid_from`` defaults to write time for every record
+    (``Mem0Store.add``); ``valid_to``/``superseded_by`` are set only when
+    consolidation supersedes a fact, and a record with a past ``valid_to`` is
+    filtered out of ordinary ``search``/``get_all`` results — present for
+    audit, invisible to retrieval.
+    """
 
     id: str
     text: str
@@ -46,6 +45,9 @@ class MemoryRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    superseded_by: str | None = None
 
 
 @dataclass

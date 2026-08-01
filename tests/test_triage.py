@@ -246,7 +246,7 @@ def test_thrice_ignored_sender_demotes_routine_to_noise_same_day(tmp_path):
 
     result = triage_thread(
         client, "weekly digest", sender="newsletter@example.com",
-        importance_profile=profile,
+        importance_profile=profile, now=T0 + timedelta(days=2),
     )
 
     assert result.priority == Priority.NOISE
@@ -314,6 +314,35 @@ def test_low_tier_never_demotes_noise_further():
     assert result.adjusted is False
 
 
+def test_low_sender_recovers_via_probation_without_decay_or_pin(tmp_path):
+    """Acceptance (build prompt 25, task 2): a LOW sender can recover via
+    the probation path without waiting DECAY_DAYS (90 days) or being pinned.
+    Before this fix, a LOW-tier sender's mail stayed demoted forever once
+    the profile stopped accumulating fresh signals (the dispatcher NOISE
+    branch never records one, and hygiene-action approvals deliberately
+    don't either) — frozen until decay or a manual `attune importance pin`.
+    """
+    from attune.orchestrator.importance import PROBATION_DAYS
+
+    profile = _profile(tmp_path)
+    for i in range(3):
+        profile.record_signal(
+            "newsletter@example.com", ActionSignal.IGNORED, ts=T0 + timedelta(days=i)
+        )
+    stale_now = T0 + timedelta(days=2 + PROBATION_DAYS)  # < DECAY_DAYS (90), no pin
+    client = _FakeClient("PRIORITY: ROUTINE\nREASON: standard follow-up.")
+
+    result = triage_thread(
+        client, "weekly digest", sender="newsletter@example.com",
+        importance_profile=profile, now=stale_now,
+    )
+
+    # The demotion that would otherwise fire (ROUTINE -> NOISE) is skipped
+    # this one time — the model's own classification stands unadjusted.
+    assert result.priority == Priority.ROUTINE
+    assert result.adjusted is False
+
+
 def test_normal_tier_never_adjusts(tmp_path):
     client = _FakeClient("PRIORITY: ROUTINE\nREASON: fine.")
     profile = _profile(tmp_path)  # unknown sender -> NORMAL, "no recorded signals"
@@ -370,7 +399,7 @@ def test_importance_adjustment_applies_even_to_parse_failure_fallback(tmp_path):
 
     result = triage_thread(
         client, "weekly digest", sender="newsletter@example.com",
-        importance_profile=profile,
+        importance_profile=profile, now=T0 + timedelta(days=2),
     )
 
     assert result.priority == Priority.NOISE

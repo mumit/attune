@@ -608,6 +608,7 @@ def submit_gmail_thread(
         "retrieval_query": retrieval_query,
         "incoming_ref": gmail_tid,
         "sender": thread.from_addr,
+        "subject": thread.subject,
         "priority": triage.priority.value,
         "priority_adjusted": triage.adjusted,
         "source_snapshot": (
@@ -688,6 +689,7 @@ def submit_gmail_thread(
         pending.register(
             lg_tid=lg_tid, source_ref=gmail_tid, domain="mail",
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
+            subject=thread.subject, priority=triage.priority.value,
         )
     return lg_tid
 
@@ -793,6 +795,7 @@ def _offer_archive_proposal(
         "incoming_summary": _archive_proposal_text(thread, triage),
         "incoming_ref": thread.thread_id,
         "sender": thread.from_addr,
+        "subject": thread.subject,
         "label_name": DEFAULT_NOISE_LABEL,
         "source_snapshot": snapshot,
         "user_id": user_id, "action": Action.LABEL.value, "domain": Domain.MAIL.value,
@@ -832,6 +835,7 @@ def _offer_archive_proposal(
         pending.register(
             lg_tid=lg_tid, source_ref=thread.thread_id, domain="mail",
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
+            subject=thread.subject, priority=triage.priority.value,
         )
     return lg_tid
 
@@ -1350,6 +1354,7 @@ def _offer_decline_proposal(
         "incoming_summary": reason_text,
         "incoming_ref": event.event_id,
         "sender": None,
+        "subject": event.summary,
         "source_snapshot": snapshot,
         "user_id": user_id,
         "action": Action.DECLINE_INVITE.value,
@@ -1391,6 +1396,7 @@ def _offer_decline_proposal(
         pending.register(
             lg_tid=lg_tid, source_ref=event.event_id, domain="calendar",
             posted_at=datetime.now(timezone.utc), sender=None,
+            subject=event.summary,
         )
     return lg_tid
 
@@ -1478,6 +1484,7 @@ def _offer_reschedule_proposal(
         "incoming_summary": incoming_summary,
         "incoming_ref": own_event.event_id,
         "sender": None,
+        "subject": own_event.summary,
         "reschedule_start": start.isoformat(),
         "reschedule_end": end.isoformat(),
         "source_snapshot": own_event.start.isoformat(),
@@ -1521,6 +1528,7 @@ def _offer_reschedule_proposal(
         pending.register(
             lg_tid=lg_tid, source_ref=own_event.event_id, domain="calendar",
             posted_at=datetime.now(timezone.utc), sender=None,
+            subject=own_event.summary,
         )
     return lg_tid
 
@@ -1710,6 +1718,7 @@ def _offer_resolution_hold(
         # simply gets nothing to record for calendar holds until one is
         # added (capture_action_signal is a no-op without a sender).
         "sender": None,
+        "subject": event.summary,
         "user_id": user_id,
         "action": "create_hold",
         "domain": "calendar",
@@ -1762,6 +1771,7 @@ def _offer_resolution_hold(
         pending.register(
             lg_tid=lg_tid, source_ref=event.event_id, domain="calendar",
             posted_at=datetime.now(timezone.utc), sender=None,
+            subject=event.summary,
         )
     return lg_tid
 

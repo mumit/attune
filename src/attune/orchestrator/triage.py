@@ -78,11 +78,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from ..llm import Task, create_chat_completion, model_for
-from ..memory.signals import frame_memory_text
+from ..memory.signals import UNTRUSTED_FIELD_NOTE, UNTRUSTED_FIELD_OPEN, frame_memory_text
 from .importance import ImportanceTier
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ def triage_thread(
     importance_profile: Any = None,
     trusted_context: str | None = None,
     min_score: float | None = None,
+    now: datetime | None = None,
 ) -> TriageResult:
     """Classify one incoming thread as URGENT, ROUTINE, or NOISE.
 
@@ -146,7 +148,12 @@ def triage_thread(
     rules and the asymmetry rationale) — this adjustment DOES apply on top
     of the parse-failure default, unlike the soft memory garnish above.
     Profile failures fall back to the unadjusted result; a broken profile
-    read must never break triage.
+    read must never break triage. ``now`` (hermetic-clock discipline,
+    ``docs/decisions.md``'s P0 repair entry) is threaded through to the
+    profile's ``assess`` call so the probation rule
+    (``importance.PROBATION_DAYS``) evaluates against the caller's clock,
+    not a bare ``datetime.now()`` a test can't freeze; defaults to the real
+    wall clock via ``assess`` itself when omitted.
 
     ``trusted_context``, when given, is appended to the SYSTEM prompt —
     the same placement as the past-reactions garnish — never to the
@@ -178,6 +185,13 @@ def triage_thread(
             "\n\nPAST REACTIONS (the user's own captured behavior toward this "
             "sender — trusted context, weigh it):\n" + reactions
         )
+        if UNTRUSTED_FIELD_OPEN in reactions:
+            # A captured action signal's sender/subject is attacker-
+            # influenced (build prompt 25, task 1) even though the capture
+            # event itself is trusted — see memory/signals.py's
+            # UNTRUSTED_FIELD_NOTE and frame_memory_text's module docstring
+            # for the same provenance discipline applied elsewhere.
+            system += "\n\n" + UNTRUSTED_FIELD_NOTE
     if trusted_context:
         system += (
             "\n\nPROVIDER FACTS (computed by trusted code from event "
@@ -193,7 +207,7 @@ def triage_thread(
         ],
     )
     result = _parse_triage_response(resp.choices[0].message.content)
-    return _apply_importance_adjustment(result, importance_profile, sender)
+    return _apply_importance_adjustment(result, importance_profile, sender, now=now)
 
 
 def _past_reactions(
@@ -227,7 +241,11 @@ def _past_reactions(
 
 
 def _apply_importance_adjustment(
-    result: TriageResult, importance_profile: Any, sender: str | None
+    result: TriageResult,
+    importance_profile: Any,
+    sender: str | None,
+    *,
+    now: datetime | None = None,
 ) -> TriageResult:
     """Apply the deterministic per-sender tier adjustment (module docstring,
     v3) on top of a model classification. Returns ``result`` unchanged when
@@ -239,11 +257,21 @@ def _apply_importance_adjustment(
         return result
 
     try:
-        assessment = importance_profile.assess(sender)
+        assessment = importance_profile.assess(sender, now=now)
     except Exception:  # noqa: BLE001 — a broken profile must never break triage
         logger.warning(
             "importance profile assess failed for sender=%s", sender, exc_info=True
         )
+        return result
+
+    if assessment.tier == ImportanceTier.LOW and assessment.probation:
+        # LOW-absorbing-state recovery (build prompt 25, task 2): the
+        # sender's run has gone stale (importance.PROBATION_DAYS+ since the
+        # last recorded signal), so this ONE message is let through with the
+        # model's own classification unadjusted, rather than compounding a
+        # freeze that would otherwise only ever heal via DECAY_DAYS or a
+        # manual pin. Whatever the human (or the ignore-sweep) does next
+        # records a fresh signal, which resets this clock.
         return result
 
     new_priority: Priority | None = None

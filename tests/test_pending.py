@@ -92,6 +92,46 @@ def test_register_defaults_sender_to_none(tmp_path):
     assert entry.sender is None
 
 
+def test_register_stores_subject_and_priority_when_given(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(
+        lg_tid="gmail:t1:100", source_ref="t1", domain="mail",
+        posted_at=T0, sender="sender@example.com",
+        subject="Re: proposal", priority="routine",
+    )
+    entry = reg.get_pending_for_source("t1")
+    assert entry.subject == "Re: proposal"
+    assert entry.priority == "routine"
+
+
+def test_register_defaults_subject_and_priority_to_none(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+    entry = reg.get_pending_for_source("t1")
+    assert entry.subject is None
+    assert entry.priority is None
+
+
+def test_legacy_entry_without_subject_or_priority_parses_back_as_none(tmp_path):
+    """A JSON file written before ``subject``/``priority`` existed (build
+    prompt 25, task 1) must still load — same back-compat posture as
+    ``sender``."""
+    import json
+
+    path = tmp_path / "pending.json"
+    path.write_text(json.dumps({
+        "gmail:t1:100": {
+            "source_ref": "t1", "domain": "mail",
+            "posted_at": T0.isoformat(), "status": "pending",
+            "sender": "sender@example.com",
+        }
+    }))
+    entry = JsonPendingApprovals(str(path)).get_pending_for_source("t1")
+    assert entry is not None
+    assert entry.subject is None
+    assert entry.priority is None
+
+
 def test_legacy_entry_without_sender_field_parses_back_as_none(tmp_path):
     """A JSON file written before ``sender`` existed must still load —
     PendingApproval.sender defaults to None (backward compatibility)."""
@@ -243,6 +283,32 @@ def test_sweep_skips_profile_write_when_sender_absent(tmp_path):
     assert swept == 1          # the memory write still happens
     assert len(store.added) == 1
     assert profile.senders() == []  # nothing to record without a sender
+
+
+def test_sweep_writes_a_discriminating_summary_not_a_raw_thread_id(tmp_path):
+    """The bug build prompt 25 exists to fix: the pre-fix sweep wrote
+    ``f"approval card for {entry.source_ref} left untouched Nd"`` — a raw
+    Gmail thread id, no sender, no subject. The captured text must now name
+    the counterparty and subject, and carry them in metadata too."""
+    reg = _registry(tmp_path)
+    store = FakeStore()
+    reg.register(
+        lg_tid="gmail:t1:100", source_ref="t1", domain="mail",
+        posted_at=T0, sender="newsletter@example.com",
+        subject="Re: your weekly digest", priority="routine",
+    )
+
+    sweep_ignored(reg, store, user_id="u1", now=T0 + timedelta(hours=49))
+
+    assert len(store.added) == 1
+    written = store.added[0]
+    assert "newsletter@example.com" in written["messages"]
+    assert "your weekly digest" in written["messages"]
+    assert written["metadata"]["sender"] == "newsletter@example.com"
+    assert written["metadata"]["subject"] == "Re: your weekly digest"
+    assert written["metadata"]["priority"] == "routine"
+    # the raw thread id no longer stands in for the summary itself
+    assert written["messages"] != "approval card for t1 left untouched 2d"
 
 
 def test_sweep_respects_custom_max_age(tmp_path):

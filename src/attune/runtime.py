@@ -712,6 +712,46 @@ class Runtime:
         )
         return report
 
+    def record_manual_engagement(self, *, now: Any = None) -> int:
+        """Daily: the manual-reply half of the LOW-absorbing-state fix
+        (build prompt 25, task 2 — see
+        ``orchestrator.importance.record_manual_engagement``'s own
+        docstring for the full mechanism). Needs a real user address (the
+        connector's ``in:sent`` read is matched against it) and an
+        importance profile; no-op without either, the same guard
+        ``post_follow_up_nudges`` already uses for its own email-address
+        dependency.
+        """
+        user = self.settings.user_id
+        if "@" not in user or self.app.importance_profile is None:
+            return 0
+
+        from .orchestrator.importance import record_manual_engagement
+
+        recorded = record_manual_engagement(
+            self.connector,
+            self.app.importance_profile,
+            self.app.store,
+            user_id=user,
+            user_email=user,
+            now=now,
+        )
+        if recorded and self.app.audit_log is not None:
+            from datetime import datetime, timezone as _tz
+
+            self.app.audit_log.record(
+                thread_id="ops:manual_engagement",
+                workflow="ops",
+                events=[{
+                    "event": "manual_engagement_recorded",
+                    "ts": datetime.now(_tz.utc).isoformat(),
+                    "count": recorded,
+                }],
+                domain="ops",
+                user_id=user,
+            )
+        return recorded
+
     def post_follow_up_nudges(self, *, now: Any = None) -> list:
         """Daily: offer follow-up drafts for quiet threads (design 3.3).
         Each nudge is a normal FOLLOW_UP draft-approve workflow whose card
@@ -895,7 +935,8 @@ class Runtime:
     def build_scheduler(self) -> Any:
         """Assemble the standard job set from settings (roadmap prompt 05):
         daily brief at ``brief_time``, daily watch renewals, 6-hourly pending
-        sweep, nightly consolidation at ``consolidate_time`` — all in
+        sweep, nightly consolidation at ``consolidate_time``, daily manual-
+        engagement recovery (build prompt 25, task 2) — all in
         ``settings.timezone`` where a wall-clock time is involved."""
         from .scheduler import Job, Scheduler, daily_at, every
 
@@ -938,6 +979,14 @@ class Runtime:
                 self.run_consolidation,
             )
         )
+        if "@" in self.settings.user_id and self.app.importance_profile is not None:
+            scheduler.add(
+                Job(
+                    "manual_engagement",
+                    every(hours=24),
+                    self.record_manual_engagement,
+                )
+            )
         if has_notification_destination:
             scheduler.add(
                 Job("autonomy_digest", every(hours=24 * 7), self.post_autonomy_digest)
