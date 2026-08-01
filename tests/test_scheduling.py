@@ -180,3 +180,127 @@ def test_zero_duration_event_yields_nothing():
         end=datetime(2026, 7, 10, 9, 0, tzinfo=timezone.utc),
     )
     assert propose_free_slots(_FakeConnector([]), e) == []
+
+
+# ---------------------------------------------------------------------------
+# propose_free_slots — cross-attendee find-time (build prompt 30, task 6.3)
+# ---------------------------------------------------------------------------
+
+
+class _FreeBusyConnector(_FakeConnector):
+    """Extends _FakeConnector with a fake free_busy query."""
+
+    def __init__(self, events, *, busy_by_email=None, supports=True):
+        super().__init__(events)
+        self._busy_by_email = busy_by_email or {}
+        self._supports = supports
+        self.free_busy_calls: list[dict] = []
+
+    def supports_freebusy(self):
+        return self._supports
+
+    def free_busy(self, emails, *, time_min, time_max):
+        self.free_busy_calls.append(
+            {"emails": list(emails), "time_min": time_min, "time_max": time_max}
+        )
+        return {e: self._busy_by_email.get(e, []) for e in emails}
+
+
+def test_attendees_absent_never_calls_free_busy():
+    """Back-compat: no attendees passed -> connector.free_busy is never
+    consulted, even when the connector supports it."""
+    conn = _FreeBusyConnector([], busy_by_email={"a@x.com": []})
+    conflicted = _event("e1", 0, duration_min=30)
+
+    slots = propose_free_slots(conn, conflicted)
+
+    assert len(slots) == 1  # unaffected by the attendee machinery
+    assert conn.free_busy_calls == []
+
+
+def test_connector_without_freebusy_support_falls_back_to_primary_only():
+    """attendees passed, but the connector doesn't support the freebusy
+    query -> degrades to primary-calendar-only search, never crashes."""
+    conn = _FreeBusyConnector(
+        [], busy_by_email={"a@x.com": [(
+            datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 10, 18, 0, tzinfo=timezone.utc),
+        )]},
+        supports=False,
+    )
+    conflicted = _event("e1", 0, duration_min=30)
+
+    slots = propose_free_slots(conn, conflicted, attendees=["a@x.com"])
+
+    assert len(slots) == 1  # attendee's (unreachable) busy day is ignored
+    assert conn.free_busy_calls == []
+
+
+def test_slot_free_on_primary_but_busy_for_attendee_is_excluded():
+    """The whole point of task 6.3: a slot open on the organizer's own
+    calendar but busy for an attendee must not be proposed."""
+    conflicted = _event("e1", 0, duration_min=30)  # forces an 08:00 slot search
+    # Attendee is busy 08:00-11:00 -- the primary-calendar-only search
+    # would have offered 08:00 first; cross-attendee awareness should push
+    # past it to the next real gap.
+    conn = _FreeBusyConnector(
+        [], busy_by_email={
+            "attendee@x.com": [(
+                datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc),
+                datetime(2026, 7, 10, 11, 0, tzinfo=timezone.utc),
+            )],
+        },
+    )
+
+    slots_without_attendee = propose_free_slots(conn, conflicted)
+    assert slots_without_attendee[0][0].hour == 8  # would have offered 08:00
+
+    slots_with_attendee = propose_free_slots(
+        conn, conflicted, attendees=["attendee@x.com"]
+    )
+    assert all(s[0].hour >= 11 for s in slots_with_attendee)
+    assert conn.free_busy_calls == [{
+        "emails": ["attendee@x.com"],
+        "time_min": datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc),
+        "time_max": datetime(2026, 7, 10, 18, 0, tzinfo=timezone.utc),
+    }]
+
+
+def test_free_busy_query_failure_falls_back_to_primary_only():
+    """Best-effort: a raising free_busy must not break the whole find-time
+    search — the caller (e.g. an unreachable attendee) still gets
+    primary-calendar-only slots rather than a crash."""
+
+    class _RaisingConnector(_FakeConnector):
+        def supports_freebusy(self):
+            return True
+
+        def free_busy(self, emails, *, time_min, time_max):
+            raise RuntimeError("boom")
+
+    conflicted = _event("e1", 0, duration_min=30)
+    conn = _RaisingConnector([])
+
+    slots = propose_free_slots(conn, conflicted, attendees=["a@x.com"])
+
+    assert len(slots) == 1
+
+
+def test_multiple_attendees_busy_blocks_are_all_merged():
+    conflicted = _event("e1", 0, duration_min=30)
+    conn = _FreeBusyConnector(
+        [], busy_by_email={
+            "a@x.com": [(
+                datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc),
+                datetime(2026, 7, 10, 9, 0, tzinfo=timezone.utc),
+            )],
+            "b@x.com": [(
+                datetime(2026, 7, 10, 9, 0, tzinfo=timezone.utc),
+                datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc),
+            )],
+        },
+    )
+
+    slots = propose_free_slots(conn, conflicted, attendees=["a@x.com", "b@x.com"])
+
+    assert all(s[0].hour >= 10 for s in slots)

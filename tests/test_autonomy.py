@@ -1,10 +1,14 @@
+import pytest
+
 from attune.orchestrator.autonomy import (
     Action,
     Domain,
     GrantScope,
     PermissionMatrix,
+    RiskTier,
     Rung,
     default_matrix,
+    max_rung_for_risk_tier,
 )
 
 
@@ -263,3 +267,44 @@ def test_default_matrix_default_posture_unchanged_by_scoping_support():
             assert m.max_rung(action, domain) < Rung.ACT_NOTIFY
     assert m.allows(Action.DRAFT_REPLY, Domain.MAIL, Rung.PROPOSE)
     assert not m.allows(Action.SEND_REPLY, Domain.MAIL, Rung.PROPOSE)
+
+
+# --- Build prompt 30, task 5: the Rung <-> RiskTier mapping ----------------
+
+
+@pytest.mark.parametrize(
+    "tier, expected_ceiling",
+    [
+        (RiskTier.R0, Rung.AUTONOMOUS),
+        (RiskTier.R1, Rung.AUTONOMOUS),
+        (RiskTier.R2, Rung.ACT_NOTIFY),
+        (RiskTier.R3, Rung.ACT_NOTIFY),
+        (RiskTier.R4, Rung.PROPOSE),
+    ],
+)
+def test_max_rung_for_risk_tier_mapping_is_pinned(tier, expected_ceiling):
+    """Pins the one-place Rung <-> RiskTier mapping (build prompt 30, task
+    5) against security-architecture.md §8.2's own risk-tier table. A
+    change to this mapping is a deliberate security-posture decision, not
+    an incidental refactor — this test is what makes that loud."""
+    assert max_rung_for_risk_tier(tier) == expected_ceiling
+
+
+def test_max_rung_for_risk_tier_covers_every_tier():
+    """Every RiskTier value has an entry -- an omission here would silently
+    KeyError the first time a capability at that tier asked for its
+    ceiling, at gate time, on a path a human is waiting on."""
+    for tier in RiskTier:
+        assert isinstance(max_rung_for_risk_tier(tier), Rung)
+
+
+def test_max_rung_for_risk_tier_matches_send_reply_graduation_ceiling():
+    """SEND_REPLY (R3) keeps every one of its current protections (build
+    prompt 30 constraints): its risk-tier ceiling is ACT_NOTIFY, matching
+    grants.GRADUATION_CARD_MAX_RUNG exactly — R3's extra constraint (CLI-
+    only, excluded from one-click graduation cards) is enforced by
+    GRADUATION_CARD_EXCLUDED_ACTIONS/GRADUATION_CARD_MAX_RUNG, not by this
+    mapping alone; this test pins that the two stay consistent."""
+    from attune.orchestrator.grants import GRADUATION_CARD_MAX_RUNG
+
+    assert max_rung_for_risk_tier(RiskTier.R3) == GRADUATION_CARD_MAX_RUNG

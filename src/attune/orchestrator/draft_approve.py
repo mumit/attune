@@ -58,9 +58,6 @@ from ..prompts import PROMPT_DRAFT, render_system_message
 from .autonomy import Action, Domain, PermissionMatrix, Rung, default_matrix
 from .state import DraftApproveState
 
-# Cap to prevent runaway conditional loops (a real production failure mode).
-MAX_ITERATIONS = 10
-
 # Hygiene/logistics actions (Phase 3 stage 1's LABEL; stage 2's
 # DECLINE_INVITE/RESCHEDULE) -- see the `capture` node's docstring for the
 # full rule this set backs. Kept as a set, not stacked booleans, so a
@@ -118,6 +115,7 @@ def build_draft_approve_graph(
     min_score: float | None = None,
     capabilities: ModelCapabilities | None = None,
     playbook: Any = None,
+    registry: Any = None,
 ):
     """Compile the draft-and-approve graph.
 
@@ -165,6 +163,24 @@ def build_draft_approve_graph(
             (:func:`_default_draft_fn` does). Absent (the default), every
             playbook-shaped field in state stays empty and this graph's
             behavior is byte-identical to before prompt 29.
+        registry: build prompt 30's optional capability registry (a
+            duck-typed object exposing ``get(action_value) ->
+            Capability | None``; see ``orchestrator.capabilities``). When
+            present, the ``draft``/``apply`` nodes look up
+            ``registry.get(state["action"])`` PER INVOCATION and use that
+            capability's ``propose``/``apply`` instead of the ``draft_fn``/
+            ``apply_fn`` closed over at compile time — this is what lets one
+            compiled graph handle every registered capability instead of
+            three separately-compiled graphs, one per fixed ``draft_fn``/
+            ``apply_fn`` pair. A ``state["action"]`` absent from the
+            registry falls back to the closed-over ``draft_fn``/``apply_fn``
+            (defensive; production registers every capability the graph is
+            ever invoked with). Absent (the default, ``None``), every direct
+            caller of this function keeps today's behavior exactly: one
+            fixed ``draft_fn``/``apply_fn`` pair for the whole graph — this
+            is what keeps every existing direct
+            ``build_draft_approve_graph(...)`` test call site (which never
+            passes a registry) byte-identical.
     """
     try:
         from langgraph.graph import END, START, StateGraph
@@ -247,7 +263,6 @@ def build_draft_approve_graph(
             "retrieved_memories": snippets,
             "retrieved_memory_ids": memory_ids,
             "playbook_bullet_ids": list(playbook_bullet_ids),
-            "iteration_count": state.get("iteration_count", 0) + 1,
             "audit_events": [_audit("retrieved", **audit_fields)],
         }
 
@@ -262,23 +277,36 @@ def build_draft_approve_graph(
         node. Token usage/cache-hit are only ever populated when ``draft_fn``
         actually calls a model AND declares the ``usage_sink`` keyword (see
         :func:`_accepts_kwarg`) -- a fixed draft_fn never sets them.
+
+        Build prompt 30: when a ``registry`` was passed to
+        :func:`build_draft_approve_graph`, ``registry.get(state["action"])``
+        is resolved PER INVOCATION and its ``propose`` callable is used in
+        place of the closed-over ``draft_fn`` -- this is the generic-dispatch
+        seam that lets one compiled graph serve every registered capability
+        (see that function's own docstring). Falls back to ``draft_fn`` when
+        there's no registry, or the registry has no entry for this action.
         """
+        propose_fn = draft_fn
+        if registry is not None:
+            capability = registry.get(state.get("action"))
+            if capability is not None:
+                propose_fn = capability.propose
         extra_kwargs: dict[str, Any] = {}
-        if _accepts_kwarg(draft_fn, "capabilities"):
+        if _accepts_kwarg(propose_fn, "capabilities"):
             extra_kwargs["capabilities"] = capabilities
         usage_box: list[Any] = []
-        if _accepts_kwarg(draft_fn, "usage_sink"):
+        if _accepts_kwarg(propose_fn, "usage_sink"):
             extra_kwargs["usage_sink"] = usage_box.append
         # Build prompt 29: the playbook slice the retrieve node already
         # loaded (state["playbook_bullet_ids"] names exactly the bullets
-        # rendered here) — only passed when draft_fn declares it, the same
+        # rendered here) — only passed when propose_fn declares it, the same
         # gating _accepts_kwarg already applies to capabilities/usage_sink,
         # so archive_draft_fn/calendar_action_draft_fn (no **kwargs catch-all)
         # are unaffected.
-        if playbook is not None and state.get("playbook_bullet_ids") and _accepts_kwarg(draft_fn, "playbook_text"):
+        if playbook is not None and state.get("playbook_bullet_ids") and _accepts_kwarg(propose_fn, "playbook_text"):
             slice_text, _ids = playbook.render_slice(state["domain"])
             extra_kwargs["playbook_text"] = slice_text
-        text = draft_fn(
+        text = propose_fn(
             client,
             state["incoming_summary"],
             state.get("retrieved_memories", []),
@@ -353,6 +381,12 @@ def build_draft_approve_graph(
         return Command(
             goto=target,
             update={
+                # Build prompt 30: the routing decision as a typed state
+                # value — dispatcher._auto_rung reads these two fields
+                # directly instead of string-matching over audit_events for
+                # an "autonomy_gate" event with routed_to=="auto_apply".
+                "routed_to": target,
+                "gate_max_rung": int(matched_rung),
                 "audit_events": [
                     _audit(
                         "autonomy_gate",
@@ -407,7 +441,18 @@ def build_draft_approve_graph(
 
         Never raises: an apply failure must not lose the decision or the
         capture step that follows; it's recorded in state (``apply_error``)
-        and the audit trail so the channel can report it honestly."""
+        and the audit trail so the channel can report it honestly.
+
+        Build prompt 30: dispatches through ``registry.get(state["action"])``
+        the same way ``draft`` does, when a registry is present — the
+        ``action`` this reads comes back off the CHECKPOINTED state restored
+        on resume, never from the thread_id or which graph object happened
+        to be used to call ``resume_workflow``. That's what makes a resume
+        structurally unable to run another capability's apply function (the
+        class of bug the old thread_id-prefix graph selection caused): even
+        a resume against the wrong compiled graph object would still look up
+        the SAME capability here, because there's only one graph and the
+        dispatch key travels in state, not in which object was invoked."""
         decision = state.get("decision")
         if decision not in ("approved", "edited") or not state.get("final_text"):
             return {
@@ -416,8 +461,13 @@ def build_draft_approve_graph(
                     _audit("apply_skipped", reason=decision or "no_decision")
                 ],
             }
+        apply_impl = apply_fn
+        if registry is not None:
+            capability = registry.get(state.get("action"))
+            if capability is not None:
+                apply_impl = capability.apply
         try:
-            ref = apply_fn(dict(state))
+            ref = apply_impl(dict(state))
         except SourceChangedError as exc:
             return {
                 "applied_ref": None,

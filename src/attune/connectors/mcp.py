@@ -125,6 +125,13 @@ class McpWorkspaceConnector(WorkspaceConnector):
             {"thread_id": thread_id, "add_labels": [label]},
         )
 
+    def supports_add_label(self) -> bool:
+        """Structural capability: TOOL_ADD_LABEL genuinely implements
+        add-only labeling in contract v1 (build prompt 30, task 6.1) —
+        unlike :meth:`supports_labeling`, which gates removal-capable
+        operations contract v1 has no tool for."""
+        return True
+
     # send_reply intentionally NOT overridden: the managed Gmail server has no
     # send tool, so the safe draft-only default from the base class stands.
 

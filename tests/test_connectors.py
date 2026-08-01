@@ -554,3 +554,295 @@ def test_mcp_event_carries_optional_calendar_write_fields():
     assert event2.organizer == ""
     assert event2.organizer_is_self is False
     assert event2.response_status == ""
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 30, task 6.1: generic add_label/remove_label/mark_read
+# ---------------------------------------------------------------------------
+
+
+def test_base_supports_add_label_false_by_default():
+    conn = _MinimalConnector()
+    assert conn.supports_add_label() is False
+
+
+def test_mcp_connector_supports_add_label():
+    """MCP's TOOL_ADD_LABEL genuinely implements add-only labeling, unlike
+    the removal-capable operations (label_thread/remove_label/mark_read),
+    which stay refused — a different probe (supports_add_label vs.
+    supports_labeling) is what lets this connector support one without the
+    other."""
+    conn = McpWorkspaceConnector(FakeMcp())
+    assert conn.supports_add_label() is True
+    assert conn.supports_labeling() is False
+
+
+def test_direct_oauth_supports_add_label():
+    conn = DirectOAuthConnector(gmail_service=FakeGmailLabelService())
+    assert conn.supports_add_label() is True
+
+
+def test_base_remove_label_and_mark_read_refuse_by_default():
+    conn = _MinimalConnector()
+    assert conn.supports_labeling() is False
+    with pytest.raises(LabelNotPermitted):
+        conn.remove_label("t1", label="Finance")
+    with pytest.raises(LabelNotPermitted):
+        conn.mark_read("t1")
+
+
+def test_mcp_connector_does_not_support_remove_label_or_mark_read():
+    """Contract v1 has no label-removal tool, so both removal-shaped write
+    paths stay refused on MCP, same as label_thread — google_oauth only,
+    pending a v2 contract."""
+    conn = McpWorkspaceConnector(FakeMcp())
+    with pytest.raises(LabelNotPermitted):
+        conn.remove_label("t1", label="Finance")
+    with pytest.raises(LabelNotPermitted):
+        conn.mark_read("t1")
+
+
+def test_direct_oauth_remove_label_disabled_by_default():
+    gmail = FakeGmailLabelService()
+    conn = DirectOAuthConnector(gmail_service=gmail, labels_enabled=False)
+    with pytest.raises(LabelNotPermitted):
+        conn.remove_label("t1", label=DEFAULT_NOISE_LABEL)
+    assert gmail.modify_calls == []
+
+
+def test_direct_oauth_remove_label_removes_resolved_label_id():
+    gmail = FakeGmailLabelService(
+        existing_labels=[{"id": "Label_5", "name": "Finance"}]
+    )
+    conn = DirectOAuthConnector(gmail_service=gmail, labels_enabled=True)
+
+    conn.remove_label("t1", label="Finance")
+
+    assert len(gmail.modify_calls) == 1
+    call = gmail.modify_calls[0]
+    assert call["id"] == "t1"
+    assert call["body"] == {"removeLabelIds": ["Label_5"]}
+    assert "addLabelIds" not in call["body"]
+
+
+def test_direct_oauth_mark_read_disabled_by_default():
+    gmail = FakeGmailLabelService()
+    conn = DirectOAuthConnector(gmail_service=gmail, labels_enabled=False)
+    with pytest.raises(LabelNotPermitted):
+        conn.mark_read("t1")
+    assert gmail.modify_calls == []
+
+
+def test_direct_oauth_mark_read_removes_unread_system_label():
+    gmail = FakeGmailLabelService()
+    conn = DirectOAuthConnector(gmail_service=gmail, labels_enabled=True)
+
+    conn.mark_read("t1")
+
+    assert gmail.modify_calls == [
+        {"userId": "me", "id": "t1", "body": {"removeLabelIds": ["UNREAD"]}}
+    ]
+    # UNREAD is a Gmail system label — no label-id resolution round trip.
+    assert gmail.list_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 30, task 6.2: RSVP_ACCEPT / RSVP_TENTATIVE
+# ---------------------------------------------------------------------------
+
+
+def test_base_accept_and_tentative_invite_refuse_by_default():
+    conn = _MinimalCalendarConnector()
+    assert conn.supports_calendar_writes() is False
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.accept_invite("e1")
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.tentative_invite("e1")
+
+
+def test_mcp_connector_does_not_support_accept_or_tentative_invite():
+    """Contract v1 has no RSVP tool at all, so every RSVP response
+    (decline/accept/tentative) stays refused on MCP."""
+    conn = McpWorkspaceConnector(FakeMcp())
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.accept_invite("e1")
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.tentative_invite("e1")
+
+
+def test_direct_oauth_accept_invite_disabled_by_default():
+    cal = FakeCalendarWriteService({
+        "e1": {
+            "id": "e1",
+            "attendees": [{"email": "me@x.com", "self": True, "responseStatus": "needsAction"}],
+        }
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=False, owner_email="me@x.com"
+    )
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.accept_invite("e1")
+    assert cal.patch_calls == []
+    assert cal.get_calls == []
+
+
+def test_direct_oauth_accept_invite_patches_only_principal_attendee():
+    cal = FakeCalendarWriteService({
+        "e1": {
+            "id": "e1",
+            "attendees": [
+                {"email": "me@x.com", "self": True, "responseStatus": "needsAction"},
+                {"email": "other@x.com", "responseStatus": "declined"},
+            ],
+        }
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+
+    conn.accept_invite("e1")
+
+    assert len(cal.patch_calls) == 1
+    patched = cal.patch_calls[0]["body"]["attendees"]
+    mine = next(a for a in patched if a["email"] == "me@x.com")
+    theirs = next(a for a in patched if a["email"] == "other@x.com")
+    assert mine["responseStatus"] == "accepted"
+    assert theirs["responseStatus"] == "declined"  # untouched
+
+
+def test_direct_oauth_tentative_invite_patches_only_principal_attendee():
+    cal = FakeCalendarWriteService({
+        "e1": {
+            "id": "e1",
+            "attendees": [{"email": "me@x.com", "self": True, "responseStatus": "needsAction"}],
+        }
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+
+    conn.tentative_invite("e1")
+
+    mine = cal.patch_calls[0]["body"]["attendees"][0]
+    assert mine["responseStatus"] == "tentative"
+
+
+def test_direct_oauth_accept_invite_refuses_when_not_an_attendee():
+    cal = FakeCalendarWriteService({
+        "e1": {"id": "e1", "attendees": [{"email": "other@x.com", "responseStatus": "accepted"}]}
+    })
+    conn = DirectOAuthConnector(
+        calendar_service=cal, calendar_writes_enabled=True, owner_email="me@x.com"
+    )
+
+    with pytest.raises(CalendarWriteNotPermitted):
+        conn.accept_invite("e1")
+    assert cal.patch_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Build prompt 30, task 6.3: freebusy / cross-attendee find-time
+# ---------------------------------------------------------------------------
+
+
+def test_base_supports_freebusy_false_by_default():
+    conn = _MinimalCalendarConnector()
+    assert conn.supports_freebusy() is False
+    with pytest.raises(NotImplementedError):
+        from datetime import datetime
+
+        conn.free_busy(
+            ["a@x.com"],
+            time_min=datetime(2026, 7, 10, 8, 0),
+            time_max=datetime(2026, 7, 10, 18, 0),
+        )
+
+
+def test_mcp_connector_does_not_support_freebusy():
+    """Contract v1 has no freebusy tool, so cross-attendee find-time falls
+    back to the primary-calendar-only search on MCP — google_oauth only,
+    pending a v2 contract."""
+    conn = McpWorkspaceConnector(FakeMcp())
+    assert conn.supports_freebusy() is False
+
+
+class FakeFreeBusyService:
+    """Minimal fake for calendar().freebusy().query(...)."""
+
+    def __init__(self, response: dict):
+        self._response = response
+        self.query_bodies: list[dict] = []
+
+    def freebusy(self):
+        return self
+
+    def query(self, *, body):
+        self.query_bodies.append(body)
+        return _Exec(self._response)
+
+
+def test_direct_oauth_supports_freebusy():
+    conn = DirectOAuthConnector(calendar_service=FakeFreeBusyService({"calendars": {}}))
+    assert conn.supports_freebusy() is True
+
+
+def test_direct_oauth_free_busy_returns_busy_blocks_per_email():
+    from datetime import datetime, timezone as _tz
+
+    cal = FakeFreeBusyService({
+        "calendars": {
+            "a@x.com": {"busy": [
+                {"start": "2026-07-10T09:00:00+00:00", "end": "2026-07-10T09:30:00+00:00"},
+            ]},
+            "b@x.com": {"busy": []},
+        }
+    })
+    conn = DirectOAuthConnector(calendar_service=cal)
+
+    result = conn.free_busy(
+        ["a@x.com", "b@x.com"],
+        time_min=datetime(2026, 7, 10, 8, 0, tzinfo=_tz.utc),
+        time_max=datetime(2026, 7, 10, 18, 0, tzinfo=_tz.utc),
+    )
+
+    assert result["a@x.com"] == [(
+        datetime(2026, 7, 10, 9, 0, tzinfo=_tz.utc),
+        datetime(2026, 7, 10, 9, 30, tzinfo=_tz.utc),
+    )]
+    assert result["b@x.com"] == []
+    assert cal.query_bodies[0]["items"] == [{"id": "a@x.com"}, {"id": "b@x.com"}]
+
+
+def test_direct_oauth_free_busy_omits_addresses_with_no_visibility():
+    from datetime import datetime, timezone as _tz
+
+    cal = FakeFreeBusyService({
+        "calendars": {
+            "unreachable@external.com": {"errors": [{"reason": "notFound"}]},
+        }
+    })
+    conn = DirectOAuthConnector(calendar_service=cal)
+
+    result = conn.free_busy(
+        ["unreachable@external.com"],
+        time_min=datetime(2026, 7, 10, 8, 0, tzinfo=_tz.utc),
+        time_max=datetime(2026, 7, 10, 18, 0, tzinfo=_tz.utc),
+    )
+
+    assert result == {}
+
+
+def test_direct_oauth_free_busy_empty_emails_short_circuits():
+    from datetime import datetime, timezone as _tz
+
+    cal = FakeFreeBusyService({"calendars": {}})
+    conn = DirectOAuthConnector(calendar_service=cal)
+
+    result = conn.free_busy(
+        [],
+        time_min=datetime(2026, 7, 10, 8, 0, tzinfo=_tz.utc),
+        time_max=datetime(2026, 7, 10, 18, 0, tzinfo=_tz.utc),
+    )
+
+    assert result == {}
+    assert cal.query_bodies == []

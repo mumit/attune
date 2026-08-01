@@ -117,7 +117,24 @@ class _FakeGraph:
             "proposed_draft": self._proposed,
             "retrieved_memories": self._memories,
             "audit_events": self._audit_events,
+            # Build prompt 30: the real gate node now ALSO sets these as
+            # typed top-level state fields (dispatcher._auto_rung reads
+            # them directly instead of scanning audit_events) — derived
+            # here from the same "autonomy_gate" event these fakes already
+            # construct, so every existing _auto_graph(...)-style caller
+            # keeps working without touching its own audit_events literal.
+            **_typed_gate_fields(self._audit_events),
         }
+
+
+def _typed_gate_fields(audit_events: list[dict]) -> dict:
+    for event in audit_events:
+        if event.get("event") == "autonomy_gate":
+            return {
+                "routed_to": event.get("routed_to"),
+                "gate_max_rung": event.get("max_rung"),
+            }
+    return {}
 
 
 class _FakeAuditLog:
@@ -1017,16 +1034,18 @@ class _AutoSendGraph:
 
     def invoke(self, state, config):
         self.calls.append({"state": state, "config": config})
+        audit_events = [
+            {"event": "autonomy_gate", "ts": "2026-07-10T00:00:01+00:00",
+             "action": state.get("action"), "domain": "mail",
+             "max_rung": self._rung, "routed_to": "auto_apply"},
+            {"event": "auto_applied", "ts": "2026-07-10T00:00:02+00:00"},
+        ]
         return {
             "proposed_draft": "drafted reply",
             "retrieved_memories": [],
-            "audit_events": [
-                {"event": "autonomy_gate", "ts": "2026-07-10T00:00:01+00:00",
-                 "action": state.get("action"), "domain": "mail",
-                 "max_rung": self._rung, "routed_to": "auto_apply"},
-                {"event": "auto_applied", "ts": "2026-07-10T00:00:02+00:00"},
-            ],
+            "audit_events": audit_events,
             "applied_ref": self._applied_ref,
+            **_typed_gate_fields(audit_events),
         }
 
 
@@ -1351,6 +1370,7 @@ class _FakeLabelGraph:
             "proposed_draft": self._proposed,
             "retrieved_memories": [],
             "audit_events": self._audit_events,
+            **_typed_gate_fields(self._audit_events),
         }
 
 
@@ -2416,6 +2436,7 @@ class _FakeCalendarActionGraph:
             "proposed_draft": self._proposed,
             "retrieved_memories": [],
             "audit_events": self._audit_events,
+            **_typed_gate_fields(self._audit_events),
         }
 
 

@@ -124,8 +124,15 @@ class DraftApproveState(TypedDict, total=False):
     # See docs/decisions.md.
     label_name: Optional[str]
 
+    # Build prompt 30: the gate's routing decision as a typed value, read
+    # directly by dispatcher._auto_rung instead of string-matching over
+    # audit_events for an "autonomy_gate" event with routed_to=="auto_apply".
+    # None until the gate node runs; "approve" or "auto_apply" after.
+    routed_to: Optional[str]
+    # The matched (capped) rung the gate used to route, only meaningful
+    # when routed_to == "auto_apply" — the same value the audit event's
+    # max_rung field already carried, now also readable without a scan.
+    gate_max_rung: Optional[int]
+
     # --- accumulator: append-only, survives resume ---
     audit_events: Annotated[list[dict[str, Any]], operator.add]
-
-    # --- guard against runaway loops (design/prod lesson) ---
-    iteration_count: int

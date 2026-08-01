@@ -4086,3 +4086,176 @@ index it queries for exactly that content.
   above; and one full end-to-end test wiring a real compiled draft-approve
   graph, `resume_workflow`, the decision ledger, and the reflector together.
   Full suite: 2117 passed, 57 skipped, zero regressions.
+
+## 2026-07-31 — The capability registry: collapse the eleven-file ceremony (Phase P5, build prompt 30)
+
+Closes `docs/plan-2026-h2.md` P5's first prompt. Adding one action to
+Attune touched 11–13 files, and three compiled LangGraph instances existed
+solely because `draft_fn` differed between them — selected at resume time
+by string-prefix matching on `thread_id`, which had already caused one live
+bug (approving an archive card ran the draft graph's apply function and
+created a Gmail draft instead of archiving).
+
+- **One declarative descriptor, one registry.** `orchestrator/
+  capabilities.py`'s `Capability` dataclass carries everything that
+  previously varied per action — `action`, `domain`, `risk_tier`, `propose`/
+  `apply` (the exact `draft_fn`/`apply_fn` callables each capability already
+  used), optional `compensate`/`freshness_check`/`render_card`/
+  `confirmation_text`/`rank`/`max_per_run`, and `thread_namespace`.
+  `CapabilityRegistry` is an immutable, exact-`Action`-keyed map with a
+  duck-typed `.get()`. `build_capability_registry()` registers all seven
+  pre-existing capabilities (`DRAFT_REPLY`, `SEND_REPLY`, `LABEL`,
+  `CREATE_HOLD`, `DECLINE_INVITE`, `RESCHEDULE`, `FOLLOW_UP`) from their
+  *existing* functions unchanged — this is a naming exercise, not a
+  behavior change, and the refactor's own acceptance bar (every existing
+  capability test passes unmodified) is the proof.
+- **One compiled graph, generic dispatch.** `draft_approve.
+  build_draft_approve_graph` gained an optional `registry` parameter. When
+  present, the `draft`/`apply` nodes resolve `registry.get(state["action"])`
+  PER INVOCATION and use that capability's `propose`/`apply` instead of the
+  closed-over `draft_fn`/`apply_fn`; absent (the default), behavior is
+  byte-identical to before this prompt — the ~43 direct
+  `build_draft_approve_graph(...)` call sites across `test_orchestrator.py`
+  needed zero changes. `app.build_app` now compiles the graph exactly ONCE,
+  passing the registry, and assigns the SAME object to `AppContext.graph`/
+  `.label_graph`/`.calendar_action_graph` — `dispatcher.py`'s existing
+  per-attribute call sites (`app_ctx.label_graph.invoke(...)`,
+  `app_ctx.calendar_action_graph.invoke(...)`) keep working unmodified,
+  since in production they're now the identical compiled graph.
+- **`runtime._graph_for_thread_id` is deleted, not fixed again.**
+  `_resolve_resume` always resumes `app.graph` — there's nothing left to
+  select, since all three `AppContext` graph attributes are the same
+  object and the registry dispatches on `state["action"]`, a value that
+  travels in CHECKPOINTED state restored on resume, never derived from
+  thread_id or which object was invoked. This is a structural fix, not a
+  patched one: the class of bug (resuming the wrong graph object) can no
+  longer exist, regardless of thread_id shape. The ~250-line test block in
+  `test_runtime.py` that pinned the old prefix-matching mechanism
+  (`test_resolve_resume_regression_archive_card_applies_label_not_draft`
+  and four siblings) tested the exact mechanism being deleted; it's
+  replaced by `test_resolve_resume_dispatches_by_state_action_never_by_
+  thread_id` (which deliberately mismatches thread_id prefixes against
+  actions to prove dispatch reads only `state["action"]`) and
+  `test_resolve_resume_always_resumes_app_graph`.
+- **The gate's routing decision is a typed state value.**
+  `DraftApproveState` gained `routed_to`/`gate_max_rung`, set by the `gate`
+  node's `Command(update=...)` alongside the `autonomy_gate` audit event it
+  already emitted. `dispatcher._auto_rung` reads these two fields directly
+  instead of scanning `audit_events` for an `"autonomy_gate"` event with
+  `routed_to == "auto_apply"`. Three hand-rolled test fakes in
+  `test_dispatcher.py` (`_FakeGraph`, `_FakeLabelGraph`,
+  `_FakeCalendarActionGraph`, plus `_AutoSendGraph`) construct their own
+  `audit_events` to simulate an auto-applied run; each now derives the
+  typed fields from that same list via a shared `_typed_gate_fields`
+  helper, so no test's assertions changed — only the fixtures' return
+  shape, to match the real node's new output.
+- **`MAX_ITERATIONS`/`iteration_count` are deleted, not bounded.** Neither
+  was read anywhere; `iteration_count` was incremented once per `retrieve()`
+  call and never compared against `MAX_ITERATIONS` — a safety-shaped
+  constant nothing enforced. Removed from `draft_approve.py`,
+  `orchestrator/__init__.py`'s exports, and the `DraftApproveState`
+  TypedDict. The many call sites across `dispatcher.py`/`followup.py`/the
+  test suite that still pass `"iteration_count": 0` in an initial state
+  dict are harmless — LangGraph silently ignores dict keys a
+  `StateGraph`'s schema doesn't declare (confirmed empirically before
+  relying on it), so none of those ~20 call sites needed touching.
+- **`RiskTier`'s canonical home moves to `orchestrator.autonomy`, next to
+  `Rung`.** Following the `hosted/intelligence.py` pattern (hosted imports
+  from local core, never the reverse — confirmed no `orchestrator/*` module
+  imports anything from `hosted/`, only the other direction), `RiskTier`
+  is now defined once in `orchestrator/autonomy.py`;
+  `hosted/capability_gateway.py` re-exports it
+  (`from ..orchestrator.autonomy import RiskTier`) so every existing
+  `from .capability_gateway import RiskTier` /
+  `from attune.hosted.capability_gateway import RiskTier` call site (4
+  hosted files, 4 test files) keeps working unmodified.
+  `max_rung_for_risk_tier(tier) -> Rung` is the one-place mapping: R0/R1
+  (automatic read; automatic-when-reversible) → `AUTONOMOUS`; R2 (explicit
+  approval by default) → `ACT_NOTIFY`; R3 (recent-authenticated approval of
+  the exact action) → `ACT_NOTIFY`, but reachable only via a CLI grant,
+  never a one-click card — the existing
+  `GRADUATION_CARD_EXCLUDED_ACTIONS`/`GRADUATION_CARD_MAX_RUNG` constants
+  already enforce exactly this for `SEND_REPLY`, confirmed consistent by
+  `test_max_rung_for_risk_tier_matches_send_reply_graduation_ceiling`; R4
+  (dedicated non-model administrative workflow) → `PROPOSE` (no R4
+  capability is registered on this graph — a "dedicated non-model
+  workflow" is by definition not something the draft-approve graph
+  enacts). This is a mapping, not a bijection: R3/R4 carry constraints
+  (CLI-only, recent-auth, no-model-in-the-loop) `Rung` alone can't express;
+  those stay enforced by their own existing mechanisms.
+- **Five new capabilities, all following the same registration shape.**
+  `ADD_LABEL`/`REMOVE_LABEL`/`MARK_READ` (generic mail hygiene, distinct
+  from `LABEL`'s specific "apply the noise label AND archive"): connector
+  gained `remove_label`/`mark_read` (mirroring `label_thread`'s
+  double-gate discipline exactly) and a new `supports_add_label()` probe —
+  `add_label` already existed with no call site, but needed its own probe
+  since it's genuinely low-risk (R1: no removal capability, works on MCP's
+  contract v1 today) unlike `REMOVE_LABEL`/`MARK_READ` (R1–R2, need the
+  removal-capable `gmail.modify` scope `supports_labeling()` already
+  gates, so MCP correctly stays refused for those two).
+  `RSVP_ACCEPT`/`RSVP_TENTATIVE` (R2): the positive counterparts to
+  `DECLINE_INVITE`, which was the only RSVP write before this prompt.
+  `DirectOAuthConnector.decline_invite` was refactored into a shared
+  `_respond_to_invite(event_id, response_status)` helper (byte-identical
+  behavior, confirmed by the unmodified existing decline tests) that
+  `accept_invite`/`tentative_invite` also call. Freebusy/cross-attendee
+  find-time: `WorkspaceConnector.free_busy()` (new, gated by
+  `supports_freebusy()`) queries Google's `calendar.freebusy.query` for a
+  list of attendee addresses in one call — no additional OAuth scope, and
+  no failure if an address has no shared visibility (that address is
+  simply absent from the result, never raises). `orchestrator.scheduling.
+  propose_free_slots` gained an optional `attendees` parameter: when
+  supplied and the connector supports it, a candidate slot is now checked
+  against every attendee's own busy blocks (merged via the same
+  interval-sweep the primary-calendar-only search already used — a sorted
+  merge of busy blocks from multiple sources handles overlaps correctly
+  without an explicit merge pass), never just `calendarId="primary"`
+  within the event's own 08:00–18:00 day. Absent `attendees` (every
+  pre-existing call site that doesn't pass one) or an unsupporting
+  connector, behavior is unchanged; `dispatcher.py`'s two call sites
+  (hold-offer, reschedule-offer) now pass `attendees=event.attendees`.
+  None of the five new capabilities is granted by `default_matrix()` —
+  "new capabilities are not granted by arriving" — so each needs an
+  explicit `attune autonomy grant` before ever proposing anything.
+- **Every capability registered is `compensate=None, irreversible=True`,
+  deliberately.** Build prompt 31 (reversibility and batching) is the one
+  tasked with real compensating actions (re-add `INBOX`, restore a prior
+  event time, delete a sent-in-error draft); this prompt's own constraint
+  ("never ship a capability without a compensating action or an explicit
+  `irreversible=True`") is satisfied honestly rather than pretending an
+  undo path exists before it does.
+- **Two deliberate scope boundaries, not oversights.** (1) The four
+  existing hand-written gate functions (`dispatcher._label_gates_pass`,
+  `_send_reply_gates_pass`, `_decline_gates_pass`, `_reschedule_gates_pass`)
+  are NOT retrofitted onto the new generic `capabilities.
+  capability_gates_pass` — they're safety-critical, heavily tested code
+  (`_send_reply_gates_pass` is imported and called directly by name in
+  `test_dispatcher.py`) with no acceptance-criterion benefit from a purely
+  cosmetic dedup. `capability_gates_pass` is for new capabilities only. (2)
+  `dispatcher.py`'s `app_ctx.label_graph`/`app_ctx.calendar_action_graph`
+  call sites are NOT switched to `app_ctx.graph` uniformly, even though
+  they're the same object in production — `test_dispatcher.py` passes
+  DISTINCT fake objects for each attribute
+  (`_fake_app_ctx(graph=_FakeGraph(), label_graph=_FakeLabelGraph())`) to
+  verify dispatcher calls the right one; switching call sites would break
+  those tests for no acceptance-criterion gain. Chat/Slack real write
+  capabilities (task 6.8) and `CREATE_EVENT`-with-attendees/`CANCEL_EVENT`/
+  recurring-event awareness/`SEND_NEW`/reply-all (tasks 6.4–6.8) remain
+  explicitly deferred, per the prompt's own "ship 1–3, defer 4–8."
+- **Verification.** New `tests/test_capabilities.py` (11 tests): one
+  compiled graph handling all 12 registered capabilities with each one's
+  own apply function firing exactly once; a resume dispatching by
+  `state["action"]` even when two capabilities deliberately share a
+  thread_id namespace; a brand-new capability registered ENTIRELY within
+  the test (a fake `_FakeSnoozeConnector`, no production file touched
+  outside the registry) participating in the same generic graph/gate
+  machinery; and `mark_read`/`rsvp_accept` each refusing independently on
+  flag-off, connector-unsupported, and rung-below-PROPOSE. New tests in
+  `test_autonomy.py` (Rung/RiskTier mapping pin), `test_connectors.py`
+  (add_label/remove_label/mark_read/RSVP/freebusy, 21 new tests), and
+  `test_scheduling.py` (cross-attendee find-time, 5 new tests). Full
+  suite: 2159 passed, 57 skipped, zero regressions in any pre-existing
+  test file's assertions (only the `_graph_for_thread_id` regression block
+  in `test_runtime.py` and the four gate-simulating fakes in
+  `test_dispatcher.py` were replaced/updated, both because they pinned or
+  simulated internals this prompt explicitly changed).

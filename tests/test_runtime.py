@@ -2020,27 +2020,51 @@ def test_phase4_exit_criterion_graduation_card_to_auto_send_with_notification(tm
 
 
 # ---------------------------------------------------------------------------
-# _resolve_resume — namespace-keyed graph selection (Phase 4 stage 2 fix)
+# _resolve_resume — one compiled graph, registry-based dispatch (build
+# prompt 30)
 #
-# A pre-existing gap found during this stage: production always resumed via
-# the shared draft graph regardless of which compiled graph a card's
-# thread_id actually belonged to. Approving an archive/decline/reschedule
-# card would therefore have applied the WRONG effect (create_draft instead
-# of label_thread/decline_invite/reschedule_event) — exactly the bug class
-# this project's approval spine exists to prevent. See docs/decisions.md.
+# Before this build prompt, production picked between three separately-
+# compiled graph OBJECTS by string-prefix-matching the thread_id
+# (_graph_for_thread_id, deleted). A pre-existing gap meant production
+# always resumed via the shared draft graph regardless of which compiled
+# graph a card's thread_id actually belonged to, so approving an archive/
+# decline card could apply the WRONG effect (create_draft instead of
+# label_thread/decline_invite) — exactly the bug class this project's
+# approval spine exists to prevent (docs/decisions.md).
+#
+# Build prompt 30 deletes the graph-selection mechanism entirely rather
+# than just fixing it again: app.build_app now compiles ONE graph (see
+# orchestrator.capabilities.CapabilityRegistry), and AppContext.graph/
+# label_graph/calendar_action_graph all reference that SAME object.
+# _resolve_resume always resumes app.graph; the one compiled graph's apply
+# node dispatches on state["action"] (checkpointed, restored on resume —
+# never derived from thread_id or which object was invoked), so a resume
+# running another capability's apply function is no longer a class of bug
+# that can exist, regardless of thread_id shape.
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_resume_regression_archive_card_applies_label_not_draft(tmp_path):
-    """THE regression pin: resuming an archive: thread must call
-    connector.label_thread, and must NEVER call connector.create_draft —
-    the exact wrong-effect bug this stage fixed."""
+def test_resolve_resume_dispatches_by_state_action_never_by_thread_id(tmp_path):
+    """THE regression pin, restated for the one-graph architecture:
+    resuming a LABEL-action workflow must call connector.label_thread (never
+    create_draft), and resuming a DECLINE_INVITE-action workflow must call
+    connector.decline_invite (never create_draft) — proven through ONE
+    compiled graph's registry-based dispatch on state["action"]. Both
+    workflows below deliberately share the SAME "archive:"-prefixed
+    thread_id namespace, to prove dispatch reads only state["action"],
+    never the thread_id string — the old prefix-matching mechanism this
+    build prompt deleted would have been vulnerable to exactly this
+    mismatch; the new one structurally cannot be, since there's only one
+    graph and its apply node never consults thread_id at all."""
     pytest.importorskip("langgraph")
+    from datetime import datetime, timezone as _tz
+
     from langgraph.checkpoint.memory import InMemorySaver
 
     from attune.orchestrator import (
-        archive_draft_fn,
+        build_capability_registry,
         build_draft_approve_graph,
+        make_calendar_action_apply_fn,
         make_connector_apply_fn,
         make_label_apply_fn,
     )
@@ -2050,6 +2074,7 @@ def test_resolve_resume_regression_archive_card_applies_label_not_draft(tmp_path
         def __init__(self):
             self.drafts: list[dict] = []
             self.labels: list[dict] = []
+            self.declined: list[str] = []
 
         def get_thread(self, thread_id):
             return type("T", (), {
@@ -2066,71 +2091,6 @@ def test_resolve_resume_regression_archive_card_applies_label_not_draft(tmp_path
                 {"thread_id": thread_id, "label": label, "archive": archive}
             )
 
-    connector = _Connector()
-    checkpointer = InMemorySaver()
-    shared_graph = build_draft_approve_graph(
-        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
-        apply_fn=make_connector_apply_fn(connector),
-    )
-    label_graph = build_draft_approve_graph(
-        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
-        draft_fn=archive_draft_fn, apply_fn=make_label_apply_fn(connector),
-    )
-    app = _app_ctx(graph=shared_graph, label_graph=label_graph)
-
-    thread_id = "archive:t1:nosnap"
-    text = "Archive 'Sale!' from deals@x.com — triaged noise: newsletter"
-    label_graph.invoke(
-        {
-            "user_id": "u1", "domain": "mail", "action": "label",
-            "incoming_ref": "t1", "incoming_summary": text,
-            "label_name": "Attune/Noise", "audit_events": [], "iteration_count": 0,
-        },
-        {"configurable": {"thread_id": thread_id}},
-    )
-
-    _resolve_resume(
-        thread_id, "approved", None, actor="U1", app=app, pending=None,
-        graduation_state=None, settings=_settings(),
-    )
-
-    assert connector.labels == [
-        {"thread_id": "t1", "label": "Attune/Noise", "archive": True}
-    ]
-    assert connector.drafts == []
-
-
-def test_resolve_resume_regression_decline_card_applies_decline_invite_not_draft(tmp_path):
-    """Same regression pin for decline-invite proposals: resuming a
-    decline: thread must call connector.decline_invite, never
-    connector.create_draft."""
-    pytest.importorskip("langgraph")
-    from datetime import datetime, timezone as _tz
-
-    from langgraph.checkpoint.memory import InMemorySaver
-
-    from attune.orchestrator import (
-        build_draft_approve_graph,
-        calendar_action_draft_fn,
-        make_calendar_action_apply_fn,
-        make_connector_apply_fn,
-    )
-    from attune.runtime import _resolve_resume
-
-    class _Connector:
-        def __init__(self):
-            self.drafts: list[dict] = []
-            self.declined: list[str] = []
-
-        def get_thread(self, thread_id):
-            return type("T", (), {
-                "subject": "x", "from_addr": "a@b.com", "last_message_at": None,
-            })()
-
-        def create_draft(self, **kw):
-            self.drafts.append(kw)
-            return type("R", (), {"draft_id": "d-wrong"})()
-
         def get_event(self, event_id):
             return type("E", (), {
                 "event_id": event_id,
@@ -2143,41 +2103,61 @@ def test_resolve_resume_regression_decline_card_applies_decline_invite_not_draft
 
     connector = _Connector()
     checkpointer = InMemorySaver()
-    shared_graph = build_draft_approve_graph(
-        client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
+    registry = build_capability_registry(
         apply_fn=make_connector_apply_fn(connector),
+        label_apply_fn=make_label_apply_fn(connector),
+        calendar_action_apply_fn=make_calendar_action_apply_fn(connector),
     )
-    calendar_action_graph = build_draft_approve_graph(
+    graph = build_draft_approve_graph(
         client=_FakeClient(), store=_FakeMemoryStore(), checkpointer=checkpointer,
-        draft_fn=calendar_action_draft_fn,
-        apply_fn=make_calendar_action_apply_fn(connector),
+        registry=registry,
     )
-    app = _app_ctx(graph=shared_graph, calendar_action_graph=calendar_action_graph)
+    # ONE compiled graph object behind every AppContext attribute — exactly
+    # how app.build_app wires it since this build prompt.
+    app = _app_ctx(graph=graph, label_graph=graph, calendar_action_graph=graph)
 
-    snapshot = "2026-07-10T14:00:00+00:00"
-    thread_id = f"decline:e1:{snapshot}"
-    calendar_action_graph.invoke(
+    label_thread_id = "archive:t1:nosnap"
+    graph.invoke(
+        {
+            "user_id": "u1", "domain": "mail", "action": "label",
+            "incoming_ref": "t1", "incoming_summary": "Archive it",
+            "label_name": "Attune/Noise", "audit_events": [],
+        },
+        {"configurable": {"thread_id": label_thread_id}},
+    )
+    _resolve_resume(
+        label_thread_id, "approved", None, actor="U1", app=app, pending=None,
+        graduation_state=None, settings=_settings(),
+    )
+    assert connector.labels == [
+        {"thread_id": "t1", "label": "Attune/Noise", "archive": True}
+    ]
+    assert connector.drafts == []
+
+    # Same "archive:" thread_id NAMESPACE, a DIFFERENT action in state.
+    decline_thread_id = "archive:e1:2026-07-10T14:00:00+00:00"
+    graph.invoke(
         {
             "user_id": "u1", "domain": "calendar", "action": "decline_invite",
             "incoming_ref": "e1", "incoming_summary": "Decline 'X'",
-            "source_snapshot": snapshot, "audit_events": [], "iteration_count": 0,
+            "source_snapshot": "2026-07-10T14:00:00+00:00", "audit_events": [],
         },
-        {"configurable": {"thread_id": thread_id}},
+        {"configurable": {"thread_id": decline_thread_id}},
     )
-
     _resolve_resume(
-        thread_id, "approved", None, actor="U1", app=app, pending=None,
+        decline_thread_id, "approved", None, actor="U1", app=app, pending=None,
         graduation_state=None, settings=_settings(),
     )
-
     assert connector.declined == ["e1"]
     assert connector.drafts == []
 
 
-def test_resolve_resume_falls_through_to_shared_graph_for_gmail_thread(tmp_path):
-    """Back-compat: an ordinary "gmail:" (DRAFT_REPLY/SEND_REPLY/FOLLOW_UP)
-    thread_id still resumes via the shared graph, unaffected by the
-    namespace-keyed routing added for archive/decline/reschedule."""
+def test_resolve_resume_always_resumes_app_graph(tmp_path):
+    """There is nothing left to select: every non-graduation/demotion
+    thread_id resumes via app.graph, regardless of its prefix — label_graph/
+    calendar_action_graph are kept as AppContext attributes only for
+    dispatcher.py's existing per-attribute call sites (test_dispatcher.py),
+    never consulted by the resume path."""
 
     class _RecordingGraph:
         def __init__(self):
@@ -2188,47 +2168,25 @@ def test_resolve_resume_falls_through_to_shared_graph_for_gmail_thread(tmp_path)
             return {"domain": "mail", "audit_events": [], "applied_ref": "shared"}
 
     shared_graph = _RecordingGraph()
-    label_graph = _RecordingGraph()
-    calendar_action_graph = _RecordingGraph()
+    other_graph = _RecordingGraph()
     app = _app_ctx(
-        graph=shared_graph, label_graph=label_graph,
-        calendar_action_graph=calendar_action_graph,
+        graph=shared_graph, label_graph=other_graph,
+        calendar_action_graph=other_graph,
     )
 
     from attune.runtime import _resolve_resume
 
-    _resolve_resume(
-        "gmail:t1:100", "approved", None, actor="U1", app=app, pending=None,
-        graduation_state=None, settings=_settings(),
-    )
+    for thread_id in (
+        "gmail:t1:100", "archive:t1:nosnap", "decline:e1:snap",
+        "calendar:reschedule:e1:202607101400",
+    ):
+        _resolve_resume(
+            thread_id, "approved", None, actor="U1", app=app, pending=None,
+            graduation_state=None, settings=_settings(),
+        )
 
-    assert shared_graph.invoked == 1
-    assert label_graph.invoked == 0
-    assert calendar_action_graph.invoked == 0
-
-
-def test_resolve_resume_routes_reschedule_thread_to_calendar_action_graph():
-    class _RecordingGraph:
-        def __init__(self):
-            self.invoked = 0
-
-        def invoke(self, arg, config):
-            self.invoked += 1
-            return {"domain": "calendar", "audit_events": [], "applied_ref": "ok"}
-
-    shared_graph = _RecordingGraph()
-    calendar_action_graph = _RecordingGraph()
-    app = _app_ctx(graph=shared_graph, calendar_action_graph=calendar_action_graph)
-
-    from attune.runtime import _resolve_resume
-
-    _resolve_resume(
-        "calendar:reschedule:e1:202607101400", "approved", None, actor="U1",
-        app=app, pending=None, graduation_state=None, settings=_settings(),
-    )
-
-    assert calendar_action_graph.invoked == 1
-    assert shared_graph.invoked == 0
+    assert shared_graph.invoked == 4
+    assert other_graph.invoked == 0
 
 
 def test_resolve_resume_routes_graduation_thread_to_resolve_autonomy_card(tmp_path):

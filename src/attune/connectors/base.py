@@ -261,11 +261,27 @@ class WorkspaceConnector(ABC):
         """Apply a label (organizational, low-risk). Optional to implement."""
         raise NotImplementedError
 
+    def supports_add_label(self) -> bool:
+        """Capability probe for :meth:`add_label` (build prompt 30, task
+        6.1). False by default — conservative, matching every other probe
+        on this interface. Distinct from :meth:`supports_labeling`: adding a
+        label needs no removal capability (Gmail's ``gmail.compose`` scope
+        already covers it, and MCP's ``TOOL_ADD_LABEL`` implements it too),
+        so a connector can support ``add_label`` while structurally lacking
+        :meth:`label_thread`/:meth:`remove_label`/:meth:`mark_read`, which
+        all need the removal-capable ``gmail.modify`` scope."""
+        return False
+
     def supports_labeling(self) -> bool:
-        """Capability probe for :meth:`label_thread` (Phase 3 stage 1, G9).
+        """Capability probe for :meth:`label_thread`/:meth:`remove_label`/
+        :meth:`mark_read` (Phase 3 stage 1, G9; build prompt 30, task 6.1)
+        — every operation on this interface that needs to REMOVE a label
+        (archiving removes INBOX; mark-read removes UNREAD), sharing one
+        probe because they all need the same removal-capable
+        ``gmail.modify`` scope.
 
         False by default. A caller (the dispatcher) checks this BEFORE
-        deciding whether to build an archive proposal at all — one of three
+        deciding whether to build a proposal at all — one of three
         independent gates (matrix rung, this probe, the deployment's opt-in
         flag) that must all hold for the write path to ever be reached."""
         return False
@@ -286,8 +302,68 @@ class WorkspaceConnector(ABC):
             "MCP has no such capability in contract v1."
         )
 
+    def remove_label(self, thread_id: str, *, label: str) -> None:
+        """Remove ``label`` from a thread (build prompt 30, task 6.1) — the
+        generic counterpart to :meth:`add_label`, needing the SAME
+        removal-capable scope :meth:`label_thread` does (Gmail's label
+        removal is undifferentiated by which label is removed).
+
+        Default implementation refuses: mirrors :meth:`label_thread`
+        exactly — opt-in per connector, gated by an OAuth scope and an
+        explicit deployment flag, and the MCP adapter never overrides this
+        (contract v1 has no label-removal tool)."""
+        raise LabelNotPermitted(
+            "This connector cannot remove labels. Direct OAuth requires "
+            "the gmail.modify scope AND ATTUNE_MAIL_LABELS_ENABLED; MCP "
+            "has no such capability in contract v1."
+        )
+
+    def mark_read(self, thread_id: str) -> None:
+        """Mark a thread read by removing Gmail's UNREAD label (build
+        prompt 30, task 6.1) — mechanically identical to
+        :meth:`remove_label` with ``label="UNREAD"``, kept as its own
+        method because "mark read" is a first-class capability/action in
+        its own right, not something a caller expresses as a raw label
+        name.
+
+        Default implementation refuses: mirrors :meth:`label_thread`/
+        :meth:`remove_label` exactly — opt-in per connector, gated by an
+        OAuth scope and an explicit deployment flag, and the MCP adapter
+        never overrides this (contract v1 has no label-removal tool)."""
+        raise LabelNotPermitted(
+            "This connector cannot mark threads read. Direct OAuth "
+            "requires the gmail.modify scope AND ATTUNE_MAIL_LABELS_ENABLED; "
+            "MCP has no such capability in contract v1."
+        )
+
     def create_hold(self, event: CalendarEvent) -> str:
         """Create a tentative calendar hold. Optional to implement."""
+        raise NotImplementedError
+
+    def supports_freebusy(self) -> bool:
+        """Capability probe for :meth:`free_busy` (build prompt 30, task
+        6.3). False by default. A caller (``orchestrator.scheduling.
+        propose_free_slots``) checks this BEFORE attempting a
+        cross-attendee find-time query — absent support, free-slot search
+        falls back to the primary calendar only (today's behavior),
+        never a crash on a backend that can't answer it."""
+        return False
+
+    def free_busy(
+        self, emails: list[str], *, time_min: datetime, time_max: datetime
+    ) -> "dict[str, list[tuple[datetime, datetime]]]":
+        """Busy time blocks for each address in ``emails`` within
+        ``[time_min, time_max)`` (build prompt 30, task 6.3) — read-only,
+        no scope beyond what listing the principal's own calendar already
+        needs (Google's freebusy API answers for any address that shares
+        free/busy visibility, typically the organization default, without
+        needing OAuth access to that person's calendar directly). Keyed by
+        the exact address requested; an address Google has no visibility
+        into is simply absent from the result (never raises) — the caller
+        treats "unknown" the same as "no reported busy blocks" rather than
+        failing the whole find-time search over one attendee.
+
+        Optional to implement — see :meth:`supports_freebusy`."""
         raise NotImplementedError
 
     def supports_calendar_writes(self) -> bool:
@@ -312,6 +388,42 @@ class WorkspaceConnector(ABC):
         raise CalendarWriteNotPermitted(
             "This connector cannot decline calendar invites. Direct OAuth "
             "requires a calendar write scope AND "
+            "ATTUNE_CALENDAR_WRITES_ENABLED; MCP has no such capability in "
+            "contract v1."
+        )
+
+    def accept_invite(self, event_id: str) -> None:
+        """Accept the calendar invite at ``event_id`` on the PRINCIPAL's own
+        behalf (build prompt 30, task 6.2) — the positive counterpart to
+        :meth:`decline_invite`, today the only RSVP write that exists,
+        which makes the calendar surface structurally negative. Patches
+        only the principal's own attendee responseStatus, never anyone
+        else's — same shape as :meth:`decline_invite`.
+
+        Default implementation refuses: mirrors :meth:`decline_invite`
+        exactly — calendar writes are opt-in per connector, gated by an
+        OAuth scope and an explicit deployment flag, and the MCP adapter
+        never overrides this (contract v1 has no RSVP tool)."""
+        raise CalendarWriteNotPermitted(
+            "This connector cannot accept calendar invites. Direct OAuth "
+            "requires a calendar write scope AND "
+            "ATTUNE_CALENDAR_WRITES_ENABLED; MCP has no such capability in "
+            "contract v1."
+        )
+
+    def tentative_invite(self, event_id: str) -> None:
+        """Mark the calendar invite at ``event_id`` tentative on the
+        PRINCIPAL's own behalf (build prompt 30, task 6.2) — same shape as
+        :meth:`accept_invite`/:meth:`decline_invite`, a third possible
+        RSVP response.
+
+        Default implementation refuses: mirrors :meth:`decline_invite`
+        exactly — calendar writes are opt-in per connector, gated by an
+        OAuth scope and an explicit deployment flag, and the MCP adapter
+        never overrides this (contract v1 has no RSVP tool)."""
+        raise CalendarWriteNotPermitted(
+            "This connector cannot mark calendar invites tentative. Direct "
+            "OAuth requires a calendar write scope AND "
             "ATTUNE_CALENDAR_WRITES_ENABLED; MCP has no such capability in "
             "contract v1."
         )

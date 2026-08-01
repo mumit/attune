@@ -89,9 +89,14 @@ from .orchestrator import (
     JsonPermissionMatrixStore,
     demotion_thread_id,
     graduation_thread_id,
+    make_accept_invite_apply_fn,
+    make_add_label_apply_fn,
     make_calendar_action_apply_fn,
     make_connector_apply_fn,
     make_label_apply_fn,
+    make_mark_read_apply_fn,
+    make_remove_label_apply_fn,
+    make_tentative_invite_apply_fn,
     resolve_autonomy_card,
     resume_workflow,
     suggest_demotions,
@@ -1521,50 +1526,43 @@ class Runtime:
             threading.Event().wait()
 
 
-def _graph_for_thread_id(
-    thread_id: str, *, graph: Any, label_graph: Any, calendar_action_graph: Any,
-) -> Any:
-    """Namespace-keyed graph selection for a resume (Phase 4 stage 2 fix —
-    see ``_resolve_resume``'s docstring for why this matters): every
-    proposal graph other than the shared draft/follow-up/hold one uses its
-    own thread-id prefix, so the same string that dispatcher.py used to
-    CHOOSE which graph to invoke() originally is also enough to choose
-    which one to resume() with. Falls back to ``graph`` for an
-    unrecognized/missing specific graph rather than raising, so a thread_id
-    this function doesn't yet know about still resumes SOMEWHERE instead of
-    crashing the resume path outright."""
-    if thread_id.startswith("archive:"):
-        return label_graph or graph
-    if thread_id.startswith("decline:") or thread_id.startswith("calendar:reschedule:"):
-        return calendar_action_graph or graph
-    return graph
-
-
 def _resolve_resume(
     thread_id: str, decision: str, text: str | None, *,
     actor: str | None, app: AppContext, pending: Any, graduation_state: Any,
     settings: Settings,
 ) -> Any:
-    """Shared resume-routing logic (Phase 4 stage 2 fix — a pre-existing
-    gap found during this stage; see docs/decisions.md), used by BOTH real
-    production resume paths: Slack/Chat's synchronous button-click resume
-    (``build_runtime``'s ``_bound_resume``, wired into both ``SlackChannel``
-    and ``GoogleChatChannel``) and Chat's async card-interaction path
+    """Shared resume-routing logic, used by BOTH real production resume
+    paths: Slack/Chat's synchronous button-click resume (``build_runtime``'s
+    ``_bound_resume``, wired into both ``SlackChannel`` and
+    ``GoogleChatChannel``) and Chat's async card-interaction path
     (``Runtime.process_chat_interaction``). Sharing one function means a
     routing fix here (or a future one) can't silently apply to only one
-    transport, the way the graph-selection bug did before this stage.
+    transport.
 
     Two cases, checked in order:
 
     1. A ``graduation:``/``demotion:`` thread_id has no LangGraph workflow
        behind it at all — routed to ``resolve_autonomy_card`` instead of a
        graph resume (Phase 4 stage 2, G13).
-    2. Everything else resumes via ``_graph_for_thread_id``'s namespace-
-       keyed graph selection: ``"archive:"`` → ``label_graph``,
-       ``"decline:"``/``"calendar:reschedule:"`` → ``calendar_action_graph``,
-       everything else (Gmail draft/follow-up/hold proposals, and
-       SEND_REPLY, which rides the SHARED graph via the action branch in
-       ``make_connector_apply_fn``) → the shared ``graph``.
+    2. Everything else resumes via ``app.graph``. Build prompt 30 collapsed
+       the three previously-separate compiled graphs
+       (``graph``/``label_graph``/``calendar_action_graph``) into ONE —
+       ``app.py`` builds them as the SAME object — so there is no longer
+       anything to select BY thread_id prefix: this used to be a namespace-
+       keyed lookup (``"archive:"`` -> ``label_graph``, ``"decline:"``/
+       ``"calendar:reschedule:"`` -> ``calendar_action_graph``, everything
+       else -> ``graph``), which is exactly the class of bug that made an
+       archive-card approval run the draft graph's apply function before
+       that lookup was fixed (docs/decisions.md). The one compiled graph's
+       ``apply`` node now dispatches on ``state["action"]`` (see
+       ``orchestrator.capabilities.CapabilityRegistry`` and
+       ``draft_approve.build_draft_approve_graph``'s ``registry``
+       parameter) — a value that travels in the CHECKPOINTED state restored
+       on resume, never in which object was invoked or a thread_id string —
+       so a resume against the wrong graph is no longer a class of bug that
+       can exist at all, regardless of which of ``app.graph``/
+       ``app.label_graph``/``app.calendar_action_graph`` a caller reaches
+       for.
     """
     if thread_id.startswith((GRADUATION_PREFIX, DEMOTION_PREFIX)):
         return resolve_autonomy_card(
@@ -1578,12 +1576,8 @@ def _resolve_resume(
             actor=actor,
         )
 
-    target_graph = _graph_for_thread_id(
-        thread_id, graph=app.graph, label_graph=app.label_graph,
-        calendar_action_graph=app.calendar_action_graph,
-    )
     return resume_workflow(
-        target_graph, thread_id, decision, text,
+        app.graph, thread_id, decision, text,
         pending=pending,
         audit_log=app.audit_log,
         user_id=settings.user_id,
@@ -1683,6 +1677,13 @@ def build_runtime(
         apply_fn=make_connector_apply_fn(resolved_connector, owner_email=_owner),
         label_apply_fn=make_label_apply_fn(resolved_connector),
         calendar_action_apply_fn=make_calendar_action_apply_fn(resolved_connector),
+        # Build prompt 30, task 6: same pre-bound-to-connector wiring as
+        # the three apply functions above.
+        add_label_apply_fn=make_add_label_apply_fn(resolved_connector),
+        remove_label_apply_fn=make_remove_label_apply_fn(resolved_connector),
+        mark_read_apply_fn=make_mark_read_apply_fn(resolved_connector),
+        accept_invite_apply_fn=make_accept_invite_apply_fn(resolved_connector),
+        tentative_invite_apply_fn=make_tentative_invite_apply_fn(resolved_connector),
     )
 
     resolved_pending = pending or JsonPendingApprovals(settings.pending_state_path)

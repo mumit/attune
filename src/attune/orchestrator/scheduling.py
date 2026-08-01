@@ -70,14 +70,26 @@ def propose_free_slots(
     event: CalendarEvent,
     *,
     max_candidates: int = 2,
+    attendees: "list[str] | None" = None,
 ) -> list[tuple[datetime, datetime]]:
     """Same-day free slots big enough to rebook ``event`` into.
 
     Read-only math: scans the conflicted event's own day (workday hours, in
     the event's timezone) for gaps of at least the event's duration between
-    the calendar's busy blocks. Returns up to ``max_candidates``
-    ``(start, end)`` pairs sized exactly to the event, earliest first —
-    empty when the day is packed (the caller falls back to notify-only).
+    busy blocks. Returns up to ``max_candidates`` ``(start, end)`` pairs
+    sized exactly to the event, earliest first — empty when the day is
+    packed (the caller falls back to notify-only).
+
+    ``attendees`` (build prompt 30, task 6.3): when supplied AND
+    ``connector.supports_freebusy()`` is true, each candidate slot is also
+    checked against every attendee's OWN busy blocks (via
+    ``connector.free_busy``) — a slot free on the organizer's own primary
+    calendar but busy for an attendee isn't actually bookable. Absent
+    attendees, or a connector that doesn't support the freebusy query, this
+    degrades to exactly today's primary-calendar-only behavior (back-compat
+    — every existing caller that doesn't pass ``attendees`` is unaffected).
+    A freebusy query failure is best-effort: logged, never lets one
+    unreachable attendee block the whole find-time search.
     """
     duration = event.end - event.start
     if duration <= timedelta(0):
@@ -88,15 +100,32 @@ def propose_free_slots(
     window_start = datetime.combine(day, time(WORKDAY_START_HOUR), tzinfo=tz)
     window_end = datetime.combine(day, time(WORKDAY_END_HOUR), tzinfo=tz)
 
-    busy = sorted(
-        (
-            (e.start, e.end)
-            for e in connector.list_events(
-                time_min=window_start, time_max=window_end
+    busy_blocks = [
+        (e.start, e.end)
+        for e in connector.list_events(time_min=window_start, time_max=window_end)
+    ]
+
+    if attendees and connector.supports_freebusy():
+        try:
+            per_attendee = connector.free_busy(
+                attendees, time_min=window_start, time_max=window_end
             )
-        ),
-        key=lambda pair: pair[0],
-    )
+        except Exception:  # noqa: BLE001 — best-effort, see docstring
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "cross-attendee free_busy query failed; falling back to "
+                "the primary calendar only", exc_info=True,
+            )
+            per_attendee = {}
+        for blocks in per_attendee.values():
+            busy_blocks.extend(blocks)
+
+    # A standard interval-merge sweep (sorted by start, cursor advances by
+    # max(cursor, end)) handles overlapping busy blocks from MULTIPLE
+    # sources (the organizer's own calendar plus every attendee's)
+    # correctly without needing an explicit merge pass first.
+    busy = sorted(busy_blocks, key=lambda pair: pair[0])
 
     slots: list[tuple[datetime, datetime]] = []
     cursor = window_start

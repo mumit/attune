@@ -211,6 +211,49 @@ class DirectOAuthConnector(WorkspaceConnector):
             body={"addLabelIds": [label_id]},
         ).execute()
 
+    def supports_add_label(self) -> bool:
+        """Structural capability: the direct-OAuth backend CAN add a label
+        with the same ``gmail.compose``-adjacent access ``create_draft``
+        already requires — see :meth:`add_label`'s own "low-risk,
+        organizational" posture (no deployment opt-in flag, unlike
+        :meth:`label_thread`/:meth:`remove_label`/:meth:`mark_read`, which
+        all need the removal-capable ``gmail.modify`` scope)."""
+        return True
+
+    def remove_label(self, thread_id: str, *, label: str) -> None:
+        """Remove ``label`` from a Gmail thread via ``threads.modify``
+        (build prompt 30, task 6.1) — same double-gate discipline as
+        :meth:`label_thread`: refuses unless ``labels_enabled`` was
+        explicitly set alongside the gmail.modify scope."""
+        if not self._labels_enabled:
+            raise LabelNotPermitted(
+                "DirectOAuthConnector labeling disabled: requires the "
+                "gmail.modify scope AND ATTUNE_MAIL_LABELS_ENABLED=1. "
+                "Draft-only is the default; nothing is archived silently."
+            )
+        label_id = self._resolve_label_id_cached(label)
+        self._gmail().users().threads().modify(
+            userId=_USER, id=thread_id, body={"removeLabelIds": [label_id]},
+        ).execute()
+
+    def mark_read(self, thread_id: str) -> None:
+        """Remove Gmail's UNREAD label via ``threads.modify`` (build prompt
+        30, task 6.1) — mechanically :meth:`remove_label` with
+        ``label="UNREAD"``, but UNREAD is a Gmail SYSTEM label (no lookup/
+        creation round trip the way a user label needs — see
+        :meth:`_resolve_label_id_cached`), so this calls ``modify``
+        directly with the literal id rather than resolving one. Same
+        double-gate discipline as :meth:`label_thread`/:meth:`remove_label`."""
+        if not self._labels_enabled:
+            raise LabelNotPermitted(
+                "DirectOAuthConnector labeling disabled: requires the "
+                "gmail.modify scope AND ATTUNE_MAIL_LABELS_ENABLED=1. "
+                "Draft-only is the default; nothing is archived silently."
+            )
+        self._gmail().users().threads().modify(
+            userId=_USER, id=thread_id, body={"removeLabelIds": ["UNREAD"]},
+        ).execute()
+
     def supports_labeling(self) -> bool:
         """Structural capability, independent of whether it's turned on —
         the direct-OAuth backend CAN label/archive (unlike MCP contract v1,
@@ -263,6 +306,45 @@ class DirectOAuthConnector(WorkspaceConnector):
             for e in res.get("items", [])
         ]
 
+    def supports_freebusy(self) -> bool:
+        """Structural capability: the direct-OAuth backend CAN query
+        free/busy via ``calendar.freebusy.query`` (build prompt 30, task
+        6.3) — read-only, no additional scope beyond what
+        ``calendar.readonly`` (already requested for every deployment)
+        covers."""
+        return True
+
+    def free_busy(
+        self, emails: list[str], *, time_min: datetime, time_max: datetime
+    ) -> "dict[str, list[tuple[datetime, datetime]]]":
+        if not emails:
+            return {}
+        res = (
+            self._calendar()
+            .freebusy()
+            .query(body={
+                "timeMin": _to_rfc3339(time_min),
+                "timeMax": _to_rfc3339(time_max),
+                "items": [{"id": email} for email in emails],
+            })
+            .execute()
+        )
+        result: "dict[str, list[tuple[datetime, datetime]]]" = {}
+        for email, data in res.get("calendars", {}).items():
+            # An attendee with no reported visibility (Google returns an
+            # "errors" entry rather than a "busy" list) is simply absent
+            # here — never raises, see this method's own docstring.
+            if "errors" in (data or {}):
+                continue
+            result[email] = [
+                (
+                    datetime.fromisoformat(block["start"]),
+                    datetime.fromisoformat(block["end"]),
+                )
+                for block in (data or {}).get("busy", [])
+            ]
+        return result
+
     def get_event(self, event_id: str) -> CalendarEvent:
         detail = (
             self._calendar()
@@ -298,15 +380,37 @@ class DirectOAuthConnector(WorkspaceConnector):
 
     def decline_invite(self, event_id: str) -> None:
         """Patch the PRINCIPAL's own attendee responseStatus to "declined"
-        (Phase 3 stage 2, Deliverable A) via ``events.patch`` — never
-        touches any other attendee's entry. Calendar's PATCH replaces the
-        whole ``attendees`` array rather than merging into it, so this
-        fetches the current array, flips only the principal's own entry,
-        and sends the full array back.
+        (Phase 3 stage 2, Deliverable A) — never touches any other
+        attendee's entry. See :meth:`_respond_to_invite` for the shared
+        fetch/patch mechanics every RSVP response (this, :meth:`accept_
+        invite`, :meth:`tentative_invite`) uses.
 
         Refuses unless ``calendar_writes_enabled`` was explicitly set
         alongside the calendar write scope (the same double-gate discipline
         as ``label_thread``/``labels_enabled``)."""
+        self._respond_to_invite(event_id, "declined")
+
+    def accept_invite(self, event_id: str) -> None:
+        """Patch the PRINCIPAL's own attendee responseStatus to "accepted"
+        (build prompt 30, task 6.2) — the positive counterpart to
+        :meth:`decline_invite`, same mechanics via
+        :meth:`_respond_to_invite`. Same double-gate discipline."""
+        self._respond_to_invite(event_id, "accepted")
+
+    def tentative_invite(self, event_id: str) -> None:
+        """Patch the PRINCIPAL's own attendee responseStatus to "tentative"
+        (build prompt 30, task 6.2) — same mechanics via
+        :meth:`_respond_to_invite`. Same double-gate discipline."""
+        self._respond_to_invite(event_id, "tentative")
+
+    def _respond_to_invite(self, event_id: str, response_status: str) -> None:
+        """Shared RSVP mechanics for :meth:`decline_invite`/
+        :meth:`accept_invite`/:meth:`tentative_invite` (build prompt 30,
+        task 6.2) via ``events.patch`` — never touches any other
+        attendee's entry. Calendar's PATCH replaces the whole
+        ``attendees`` array rather than merging into it, so this fetches
+        the current array, flips only the principal's own entry, and sends
+        the full array back."""
         if not self._calendar_writes_enabled:
             raise CalendarWriteNotPermitted(
                 "DirectOAuthConnector calendar writes disabled: requires "
@@ -325,13 +429,13 @@ class DirectOAuthConnector(WorkspaceConnector):
         for attendee in event.get("attendees", []):
             entry = dict(attendee)
             if self._is_self_attendee(entry):
-                entry["responseStatus"] = "declined"
+                entry["responseStatus"] = response_status
                 found_self = True
             updated_attendees.append(entry)
         if not found_self:
             raise CalendarWriteNotPermitted(
-                f"cannot decline {event_id}: the principal is not listed "
-                "as an attendee on this event"
+                f"cannot respond to {event_id}: the principal is not "
+                "listed as an attendee on this event"
             )
         self._calendar().events().patch(
             calendarId="primary",

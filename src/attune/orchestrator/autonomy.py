@@ -51,6 +51,28 @@ from enum import IntEnum, Enum
 from typing import Any
 
 
+class RiskTier(IntEnum):
+    """Product risk tiers (security-architecture.md §8.2). Canonical home is
+    here, next to :class:`Rung`, following the ``hosted/intelligence.py``
+    pattern (build prompt 30, task 5): ``hosted.capability_gateway``
+    re-exports this rather than defining its own — see that module's
+    ``RiskTier = RiskTier`` alias.
+
+    ``Rung`` answers "how much autonomy is GRANTED for this (action,
+    domain) right now" (:class:`PermissionMatrix` — earned, revocable,
+    varies over time). ``RiskTier`` answers "how dangerous is this ACTION,
+    independent of any grant" (fixed at capability-registration time). They
+    describe the same underlying concern from two directions;
+    :func:`max_rung_for_risk_tier` converts one into the other.
+    """
+
+    R0 = 0  # bounded search, summarize, agenda -- automatic read
+    R1 = 1  # reversible Attune-owned state, private preparation
+    R2 = 2  # Gmail draft, label, private tentative hold
+    R3 = 3  # send mail, external meeting mutation, broad channel post
+    R4 = 4  # deletion, bulk action, sharing/security change, access grant
+
+
 class Rung(IntEnum):
     """The earned-autonomy ladder. Higher = more autonomy."""
 
@@ -58,6 +80,51 @@ class Rung(IntEnum):
     PROPOSE = 2            # draft the action; wait for explicit approval
     ACT_NOTIFY = 3         # execute low-risk reversible action, notify after
     AUTONOMOUS = 4         # no notification needed (rare, explicitly graduated)
+
+
+# Build prompt 30, task 5: the ceiling a capability's registered RiskTier
+# permits — the highest Rung it may EVER be granted to, independent of
+# whether a grant actually exists. Not a bijection: R3/R4 carry additional
+# constraints Rung alone can't express (security-architecture.md §8.2's
+# "recent-authenticated approval of the exact action" for R3, "dedicated
+# non-model administrative workflow" for R4) — those stay enforced by their
+# own mechanisms, not by this mapping:
+#
+#   R0 automatic read                     -> AUTONOMOUS (no gate needed —
+#                                             read-only has no side effect
+#                                             to cap)
+#   R1 automatic when contained/reversible -> AUTONOMOUS
+#   R2 explicit approval by default         -> ACT_NOTIFY (a card may still
+#                                             graduate it there)
+#   R3 recent-authenticated approval of     -> ACT_NOTIFY, but ONLY reachable
+#      the exact action                       via a CLI grant, never a
+#                                             one-click card — see
+#                                             grants.GRADUATION_CARD_
+#                                             EXCLUDED_ACTIONS/
+#                                             GRADUATION_CARD_MAX_RUNG, which
+#                                             enforce exactly this for
+#                                             SEND_REPLY today
+#   R4 dedicated non-model administrative   -> PROPOSE — a human approves
+#      workflow                               every instance; no R4
+#                                             capability is registered on
+#                                             the draft-approve graph today
+#      (a "dedicated non-model workflow" is, by definition, not something
+#      this graph enacts at all)
+_MAX_RUNG_FOR_RISK_TIER: "dict[RiskTier, Rung]" = {
+    RiskTier.R0: Rung.AUTONOMOUS,
+    RiskTier.R1: Rung.AUTONOMOUS,
+    RiskTier.R2: Rung.ACT_NOTIFY,
+    RiskTier.R3: Rung.ACT_NOTIFY,
+    RiskTier.R4: Rung.PROPOSE,
+}
+
+
+def max_rung_for_risk_tier(tier: "RiskTier") -> "Rung":
+    """The highest :class:`Rung` a capability registered at ``tier`` may
+    ever be granted to. A grant above this ceiling is a policy bug, not
+    something this function itself prevents — see the module docstring
+    above for the R3/R4 constraints this mapping alone cannot express."""
+    return _MAX_RUNG_FOR_RISK_TIER[tier]
 
 
 class Domain(str, Enum):
@@ -81,6 +148,18 @@ class Action(str, Enum):
     RESCHEDULE = "reschedule"
     LABEL = "label"
     FOLLOW_UP = "follow_up"
+    # Build prompt 30, task 6.1: generic label/mark-read hygiene actions,
+    # distinct from LABEL (which is specifically "apply the noise label AND
+    # archive" — the Phase 3 stage 1 write path). These are ordinary
+    # single-effect mail hygiene, each independently grantable/revocable.
+    ADD_LABEL = "add_label"
+    REMOVE_LABEL = "remove_label"
+    MARK_READ = "mark_read"
+    # Build prompt 30, task 6.2: the positive calendar-RSVP counterparts to
+    # DECLINE_INVITE — today only decline exists, which makes the calendar
+    # surface structurally negative.
+    RSVP_ACCEPT = "rsvp_accept"
+    RSVP_TENTATIVE = "rsvp_tentative"
 
 
 class _Unset:

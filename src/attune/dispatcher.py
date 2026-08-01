@@ -252,14 +252,18 @@ def _fetch_with_retry(fetch: Callable[[], Any], retries: int = FETCH_RETRIES) ->
 
 def _auto_rung(result: dict[str, Any]) -> int | None:
     """The rung the gate auto-applied at, or None if the run interrupted
-    for a human (or the result carries no gate event — fakes/back-compat:
-    treated as interrupted, the conservative reading)."""
-    for event in result.get("audit_events", []):
-        if (
-            event.get("event") == "autonomy_gate"
-            and event.get("routed_to") == "auto_apply"
-        ):
-            return event.get("max_rung")
+    for a human (or the result carries no gate decision — fakes/back-compat:
+    treated as interrupted, the conservative reading).
+
+    Build prompt 30, task 3: reads the gate's routing decision as a typed
+    state value (``routed_to``/``gate_max_rung``, set by
+    ``draft_approve.gate``) instead of string-matching over
+    ``audit_events`` for an ``"autonomy_gate"`` event with
+    ``routed_to == "auto_apply"``. A result carrying neither key (a fake
+    graph in a test that never ran the real gate node) falls through to
+    the same conservative ``None`` as before."""
+    if result.get("routed_to") == "auto_apply":
+        return result.get("gate_max_rung")
     return None
 
 
@@ -1506,7 +1510,13 @@ def _offer_reschedule_proposal(
         ):
             return None
 
-    slots = propose_free_slots(connector, own_event)
+    # Build prompt 30, task 6.3: check every attendee's own free/busy, not
+    # just the organizer's primary calendar — a slot free for the
+    # organizer but busy for an attendee isn't actually bookable. Degrades
+    # to the pre-prompt-30 primary-calendar-only search when the connector
+    # doesn't support the freebusy query (see propose_free_slots's own
+    # docstring).
+    slots = propose_free_slots(connector, own_event, attendees=own_event.attendees)
     if not slots:
         return None
     start, end = slots[0]
@@ -1724,7 +1734,9 @@ def _offer_resolution_hold(
     no free slot (notify-only fallback).
     """
     event = conflict.event
-    slots = propose_free_slots(connector, event)
+    # Build prompt 30, task 6.3: cross-attendee find-time — see the
+    # sibling reschedule-offer call site's comment.
+    slots = propose_free_slots(connector, event, attendees=event.attendees)
     if not slots:
         return None
     start, end = slots[0]

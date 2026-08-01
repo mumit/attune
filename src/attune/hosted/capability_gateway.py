@@ -12,11 +12,11 @@ import json
 import re
 from contextlib import closing
 from dataclasses import dataclass
-from enum import IntEnum
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 from uuid import UUID
 
+from ..orchestrator.autonomy import RiskTier
 from .repositories import ConnectionFactory
 from .tenant import TenantContext, tenant_transaction
 
@@ -25,15 +25,14 @@ _DOMAIN = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 _PROVIDER = re.compile(r"^[a-z][a-z0-9_-]{0,79}$")
 MAX_PROPOSAL_BYTES = 16_384
 
-
-class RiskTier(IntEnum):
-    """Product risk tiers from the hosted security architecture."""
-
-    R0 = 0
-    R1 = 1
-    R2 = 2
-    R3 = 3
-    R4 = 4
+# Build prompt 30, task 5: RiskTier's canonical home is now
+# orchestrator.autonomy, next to Rung and max_rung_for_risk_tier — this
+# module re-exports it (rather than defining its own copy) so every
+# existing ``from .capability_gateway import RiskTier`` /
+# ``from attune.hosted.capability_gateway import RiskTier`` call site keeps
+# working unmodified. Product risk tiers from the hosted security
+# architecture (security-architecture.md §8.2) — see the docstring on the
+# canonical definition for the full R0-R4 table and its Rung mapping.
 
 
 class CapabilityDenied(Exception):

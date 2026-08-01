@@ -28,9 +28,8 @@ from .orchestrator import (
     DecisionLedger,
     PermissionMatrix,
     SqliteDecisionLedger,
-    archive_draft_fn,
+    build_capability_registry,
     build_draft_approve_graph,
-    calendar_action_draft_fn,
 )
 
 
@@ -123,6 +122,14 @@ def build_app(
     importance_profile: Any = None,
     label_apply_fn: Any = None,
     calendar_action_apply_fn: Any = None,
+    # Build prompt 30, task 6: the generic label/mark-read/RSVP
+    # capabilities' apply functions — same override-or-no-op pattern as
+    # apply_fn/label_apply_fn/calendar_action_apply_fn above.
+    add_label_apply_fn: Any = None,
+    remove_label_apply_fn: Any = None,
+    mark_read_apply_fn: Any = None,
+    accept_invite_apply_fn: Any = None,
+    tentative_invite_apply_fn: Any = None,
     ledger: "DecisionLedger | None" = None,
     playbook: Any = None,
 ) -> AppContext:
@@ -249,50 +256,37 @@ def build_app(
             )
             resolved_playbook = None
 
+    # Build prompt 30: one capability registry, one compiled graph. Every
+    # registered capability's propose/apply is named once here rather than
+    # split across three separately-compiled graphs distinguished only by
+    # which draft_fn/apply_fn was closed over at compile time — see
+    # ``orchestrator.capabilities`` module docstring. ``apply_fn``/
+    # ``label_apply_fn``/``calendar_action_apply_fn`` keep their existing
+    # names and defaults (production: pre-bound to a connector by
+    # ``runtime.build_runtime`` before this function is ever called; tests:
+    # raw overrides, or absent for the no-op default) — nothing about their
+    # resolution changes, only that they now back ONE graph's generic
+    # dispatch instead of three fixed ones.
+    capability_registry = build_capability_registry(
+        apply_fn=apply_fn,
+        label_apply_fn=label_apply_fn,
+        calendar_action_apply_fn=calendar_action_apply_fn,
+        add_label_apply_fn=add_label_apply_fn,
+        remove_label_apply_fn=remove_label_apply_fn,
+        mark_read_apply_fn=mark_read_apply_fn,
+        accept_invite_apply_fn=accept_invite_apply_fn,
+        tentative_invite_apply_fn=tentative_invite_apply_fn,
+    )
     graph = build_draft_approve_graph(
         client=resolved_client,
         store=resolved_store,
         matrix=resolved_matrix,
         checkpointer=resolved_checkpointer,
-        apply_fn=apply_fn,
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
         min_score=settings.memory_min_score,
         playbook=resolved_playbook,
-    )
-    # The archive-proposal graph (Phase 3 stage 1, G9): same collaborators,
-    # a deterministic draft_fn (no model call — see archive_draft_fn) and a
-    # label-specific apply_fn. Sharing ``resolved_checkpointer`` is safe —
-    # LangGraph keys checkpoints by thread_id, and label proposals use their
-    # own "archive:..." namespace (dispatcher._offer_archive_proposal), so
-    # the two graphs never collide over the same checkpoint row.
-    label_graph = build_draft_approve_graph(
-        client=resolved_client,
-        store=resolved_store,
-        matrix=resolved_matrix,
-        checkpointer=resolved_checkpointer,
-        draft_fn=archive_draft_fn,
-        apply_fn=label_apply_fn,
-        matrix_provider=resolved_provider,
-        importance_profile=resolved_importance_profile,
-        min_score=settings.memory_min_score,
-        playbook=resolved_playbook,
-    )
-    # The decline-invite/reschedule proposal graph (Phase 3 stage 2): same
-    # collaborators and disjoint thread-id namespaces ("decline:..."/
-    # "calendar:reschedule:...") as every other graph sharing
-    # ``resolved_checkpointer``, so nothing about them can collide.
-    calendar_action_graph = build_draft_approve_graph(
-        client=resolved_client,
-        store=resolved_store,
-        matrix=resolved_matrix,
-        checkpointer=resolved_checkpointer,
-        draft_fn=calendar_action_draft_fn,
-        apply_fn=calendar_action_apply_fn,
-        matrix_provider=resolved_provider,
-        importance_profile=resolved_importance_profile,
-        min_score=settings.memory_min_score,
-        playbook=resolved_playbook,
+        registry=capability_registry,
     )
 
     from .orchestrator import default_matrix as _default_matrix
@@ -304,8 +298,15 @@ def build_app(
         settings=settings,
         audit_log=resolved_audit_log,
         ledger=resolved_ledger,
-        label_graph=label_graph,
-        calendar_action_graph=calendar_action_graph,
+        # Build prompt 30: label_graph/calendar_action_graph are now THE
+        # SAME compiled graph object as `graph` — dispatcher.py's existing
+        # per-attribute call sites (app_ctx.label_graph.invoke(...),
+        # app_ctx.calendar_action_graph.invoke(...)) keep working
+        # unmodified, and runtime.py's resume path no longer needs to
+        # select between them by thread_id prefix (there's nothing left to
+        # select — see runtime._resolve_resume).
+        label_graph=graph,
+        calendar_action_graph=graph,
         matrix=resolved_matrix or _default_matrix(),
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
