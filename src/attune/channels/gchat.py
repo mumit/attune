@@ -188,7 +188,11 @@ class GoogleChatChannel:
         )
         from ..orchestrator import apply_confirmation
 
-        return {"text": apply_confirmation(interaction.decision, result)}
+        return {
+            "text": apply_confirmation(
+                interaction.decision, result, thread_id=interaction.thread_id
+            )
+        }
 
     # --- internals ---------------------------------------------------------
 

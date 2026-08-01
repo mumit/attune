@@ -17,6 +17,8 @@ a 600-line manual runbook. The CLI is the human front door:
                      (build prompt 27)
     attune playbook  see, correct, and audit the git-backed playbook
                      (build prompt 29)
+    attune undo      undo a previously applied effect, within its undo
+                     window (build prompt 31)
 
 Stdlib ``argparse`` — a CLI with five subcommands doesn't justify a click/
 typer dependency. Heavy imports happen inside subcommands so
@@ -266,6 +268,12 @@ def build_parser() -> argparse.ArgumentParser:
     pb_revert.set_defaults(func=_cmd_playbook_revert)
     p_playbook.set_defaults(func=_cmd_playbook_help, parser=p_playbook)
 
+    p_undo = sub.add_parser(
+        "undo", help="undo a previously applied effect within its undo window"
+    )
+    p_undo.add_argument("effect_id", help="the effect/thread id named in the post-apply confirmation")
+    p_undo.set_defaults(func=_cmd_undo)
+
     p_slack = sub.add_parser(
         "slack", help="Slack app helpers (manifest generation)"
     )
@@ -500,6 +508,12 @@ def _cmd_playbook_revert(args: Any) -> int:
 def _cmd_playbook_help(args: Any) -> int:
     args.parser.print_help()
     return 1
+
+
+def _cmd_undo(args: Any) -> int:
+    from .undo_cmd import run_undo
+
+    return run_undo(args.effect_id)
 
 
 def _cmd_slack_manifest(args: Any) -> int:

@@ -75,6 +75,19 @@ class SourceChangedError(Exception):
     approval must not act on it (review finding #6)."""
 
 
+# Build prompt 31, task 2: the undo window — how long after an apply the
+# principal may still call ``attune undo <thread_id>``. Documented, not
+# configurable (see docs/decisions.md for the 1h justification): a
+# post-apply Undo affordance is only honest while the world is unlikely to
+# have moved on much (a reply drafted, a hold created); the freshness check
+# inside each compensate function is the real backstop once it has.
+# ``orchestrator.undo`` imports this rather than the reverse, so
+# ``apply_confirmation`` below can name the window without a circular
+# import back onto ``orchestrator.undo`` (which itself needs
+# ``SourceChangedError`` from this module).
+UNDO_WINDOW_HOURS = 1
+
+
 def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
     """Whether ``fn`` (a possibly test-injected ``draft_fn``) declares
     ``name`` as a keyword parameter -- mirrors ``dispatcher._accepts_keyword``
@@ -462,6 +475,7 @@ def build_draft_approve_graph(
                 ],
             }
         apply_impl = apply_fn
+        capability = None
         if registry is not None:
             capability = registry.get(state.get("action"))
             if capability is not None:
@@ -492,7 +506,23 @@ def build_draft_approve_graph(
                     _audit("apply_skipped", reason="nothing_to_materialize")
                 ],
             }
-        return {"applied_ref": ref, "audit_events": [_audit("applied", ref=ref)]}
+        # Build prompt 31: whether this applied effect can be undone —
+        # read off the registry's own compensate/irreversible fields, so
+        # apply_confirmation can offer (or correctly withhold, for
+        # SEND_REPLY) an undo affordance without the registry itself
+        # needing to be threaded through every channel. False when there
+        # is no registry at all (dev/tests without one) — undecidable
+        # without it, so the conservative default is "no undo offered."
+        undo_available = bool(
+            capability is not None
+            and capability.compensate is not None
+            and not capability.irreversible
+        )
+        return {
+            "applied_ref": ref,
+            "undo_available": undo_available,
+            "audit_events": [_audit("applied", ref=ref)],
+        }
 
     def capture(state: DraftApproveState) -> dict[str, Any]:
         """Write the learning signal from what the human did (design 2.2).
@@ -654,6 +684,25 @@ def resume_workflow(
     ``ledger`` above.
     """
     from langgraph.types import Command
+
+    # Build prompt 31, task 3: check the registry's OWN record before ever
+    # touching the graph. An expired card's workflow was already cancelled
+    # (checkpointer.delete_thread — see pending.sweep_expired) — resuming
+    # it would either error against a missing checkpoint or, worse, start
+    # a brand-new run from whatever LangGraph does with an absent thread_id.
+    # An honest refusal here is what the acceptance criterion asks for: "ask
+    # me again," never a silent resume.
+    if pending is not None and hasattr(pending, "get_entry"):
+        from .pending import STATUS_EXPIRED
+
+        entry = pending.get_entry(thread_id)
+        if entry is not None and entry.status == STATUS_EXPIRED:
+            return {
+                "decision": decision,
+                "apply_error": "expired",
+                "approval_expired": True,
+                "domain": entry.domain,
+            }
 
     if pending is not None and hasattr(pending, "claim"):
         claimed = pending.claim(thread_id, actor=actor)
@@ -996,7 +1045,9 @@ def _noop_apply_fn(state: dict[str, Any]) -> str | None:
     return None
 
 
-def apply_confirmation(decision: str, result: Any = None) -> str:
+def apply_confirmation(
+    decision: str, result: Any = None, *, thread_id: "str | None" = None
+) -> str:
     """The honest post-decision confirmation, shared by every channel.
 
     ``result`` is whatever ``resume_workflow`` (or, for a graduation/
@@ -1006,10 +1057,30 @@ def apply_confirmation(decision: str, result: Any = None) -> str:
     reply is announced as sent (never claimed for anything that wasn't
     actually granted+enabled — rule 4), and an autonomy card's resolution
     (granted/rejected/refused) gets its own honest rendering.
+
+    ``thread_id`` (build prompt 31): the post-apply Undo affordance. Every
+    call site already has this value in scope (it's the same id used to
+    resume the workflow); passed through here — rather than requiring the
+    registry itself to reach every channel — so the confirmation text can
+    name the exact ``attune undo <thread_id>`` command. Rendered only when
+    the ``apply`` node reported ``state["undo_available"]`` (build prompt
+    30's registry says this capability has a real compensate function and
+    isn't ``irreversible``) — SEND_REPLY, and every other irreversible
+    action, never gets this text, anywhere.
     """
     state = result if isinstance(result, dict) else {}
     if state.get("card_kind") == "autonomy":
         return _autonomy_card_confirmation(decision, state)
+
+    # Build prompt 31, task 3: checked before anything else that reads
+    # ``decision``/``applied_ref`` — an expired card produced NEITHER (see
+    # resume_workflow's registry-first check), so this must win over every
+    # other branch below, including the plain "Rejected"/"Approved" text.
+    if state.get("approval_expired"):
+        return (
+            "⌛ This proposal expired — its window for approval has passed. "
+            "Ask me again if it's still relevant."
+        )
 
     is_send = state.get("action") == Action.SEND_REPLY.value
 
@@ -1034,12 +1105,18 @@ def apply_confirmation(decision: str, result: Any = None) -> str:
             f"{thing} failed ({state['apply_error']})."
         )
     if state.get("applied_ref"):
+        undo_hint = ""
+        if thread_id and state.get("undo_available"):
+            undo_hint = (
+                f"\nUndo available for {UNDO_WINDOW_HOURS}h: "
+                f"`attune undo {thread_id}`"
+            )
         if is_send:
             return f"{prefix} — reply sent."
         return (
-            f"{prefix} — tentative hold created on your calendar."
+            f"{prefix} — tentative hold created on your calendar.{undo_hint}"
             if is_calendar
-            else f"{prefix} — draft created in Gmail."
+            else f"{prefix} — draft created in Gmail.{undo_hint}"
         )
     return f"{prefix}."
 

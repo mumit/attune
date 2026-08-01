@@ -17,13 +17,20 @@ one place that says so, and a shape a NEW capability can fill in without
 touching the graph, the dispatcher's gate logic, or runtime.py's resume
 path at all.
 
-``compensate``/``irreversible``: build prompt 31 (reversibility and
-batching) is the build prompt tasked with adding real compensating actions
-(re-add INBOX, restore the prior event time, delete a sent-in-error draft).
-Until that lands, every capability registered here is honestly
-``compensate=None, irreversible=True`` — nothing here can undo its own
-effect yet, and this constraint (never register a capability without one or
-the other) is what keeps that gap visible instead of silently assumed away.
+``compensate``/``irreversible`` (build prompt 31, task 1): five capabilities
+now carry a real compensating action — DRAFT_REPLY (delete the created
+draft), LABEL (re-add INBOX, remove the applied label), CREATE_HOLD (delete
+the created event), DECLINE_INVITE (reset responseStatus to needsAction),
+RESCHEDULE (restore the prior start/end, captured pre-patch). SEND_REPLY
+stays ``irreversible=True`` unconditionally — a sent reply is irreversible
+by construction, and a follow-up "please ignore that" email is not an undo
+(see docs/decisions.md). Every OTHER capability registered here (FOLLOW_UP,
+ADD_LABEL, REMOVE_LABEL, MARK_READ, RSVP_ACCEPT, RSVP_TENTATIVE) is still
+honestly ``compensate=None, irreversible=True`` — out of build prompt 31's
+scope — and the constraint (never register a capability without one or the
+other) keeps that gap visible instead of silently assumed away.
+:mod:`orchestrator.undo` is what actually invokes ``compensate`` — this
+module only declares it.
 
 ``render_card``/``rank``/``max_per_run`` are populated for capabilities
 whose card text and ranking are already simple, self-contained functions of
@@ -143,6 +150,121 @@ def _make_rsvp_apply_fn(
         return event_ref
 
     return apply
+
+
+def _noop_compensate_fn(state: dict) -> None:
+    """Default compensate: nothing to undo (dev/tests without a connector)."""
+
+
+def make_draft_reply_compensate_fn(connector: Any) -> "Callable[[dict], None]":
+    """Build the production ``compensate`` for DRAFT_REPLY (build prompt
+    31, task 1): delete the created draft via ``connector.delete_draft``.
+    No separate freshness check beyond the delete call itself — deleting an
+    already-deleted/nonexistent draft surfaces as an honest failure the
+    caller records (``orchestrator.undo.undo_effect``), the same posture
+    every other apply/compensate failure in this codebase already holds."""
+
+    def compensate(state: dict) -> None:
+        draft_id = state.get("applied_ref")
+        if not draft_id:
+            return
+        connector.delete_draft(draft_id)
+
+    return compensate
+
+
+def make_create_hold_compensate_fn(connector: Any) -> "Callable[[dict], None]":
+    """Build the production ``compensate`` for CREATE_HOLD (build prompt
+    31, task 1): delete the created event via ``connector.delete_event`` —
+    the hold's own event id is already known (``applied_ref``)."""
+
+    def compensate(state: dict) -> None:
+        event_id = state.get("applied_ref")
+        if not event_id:
+            return
+        connector.delete_event(event_id)
+
+    return compensate
+
+
+def make_label_compensate_fn(connector: Any) -> "Callable[[dict], None]":
+    """Build the production ``compensate`` for LABEL (build prompt 31, task
+    1): re-add INBOX, remove the applied label. Freshness check: the
+    thread must still carry the label and lack INBOX — exactly what apply
+    set it to — or the world has moved (e.g. a human already manually
+    restored it) and undo refuses rather than layering a second, possibly
+    wrong effect on top."""
+
+    def compensate(state: dict) -> None:
+        thread_ref = state.get("incoming_ref")
+        label_name = state.get("label_name")
+        if not thread_ref or not label_name:
+            return
+        thread = connector.get_thread(thread_ref)
+        if "INBOX" in thread.labels or label_name not in thread.labels:
+            raise SourceChangedError(
+                f"thread {thread_ref} no longer matches the applied LABEL "
+                "effect -- already changed since apply"
+            )
+        connector.add_label(thread_id=thread_ref, label="INBOX")
+        connector.remove_label(thread_ref, label=label_name)
+
+    return compensate
+
+
+def make_decline_invite_compensate_fn(connector: Any) -> "Callable[[dict], None]":
+    """Build the production ``compensate`` for DECLINE_INVITE (build
+    prompt 31, task 1): reset the principal's own responseStatus to
+    needsAction. Freshness check: the event must still show "declined" —
+    the value apply set it to — or refuse."""
+
+    def compensate(state: dict) -> None:
+        event_ref = state.get("incoming_ref")
+        if not event_ref:
+            return
+        current = connector.get_event(event_ref)
+        if current.response_status != "declined":
+            raise SourceChangedError(
+                f"event {event_ref} is no longer 'declined' "
+                f"(now {current.response_status!r}) -- already changed "
+                "since apply"
+            )
+        connector.reset_invite_response(event_ref)
+
+    return compensate
+
+
+def make_reschedule_compensate_fn(connector: Any) -> "Callable[[dict], None]":
+    """Build the production ``compensate`` for RESCHEDULE (build prompt
+    31, task 1): restore the prior start/end captured into state BEFORE
+    the patch (``dispatcher._offer_reschedule_proposal``) — never
+    re-derived after the fact, since by undo time the event's start IS the
+    moved-to time, not the original. Freshness check: the event must
+    still be at the moved-to time apply set it to, or refuse."""
+
+    def compensate(state: dict) -> None:
+        from datetime import datetime
+
+        event_ref = state.get("incoming_ref")
+        prior_start = state.get("reschedule_prior_start")
+        prior_end = state.get("reschedule_prior_end")
+        moved_to_start = state.get("reschedule_start")
+        if not event_ref or not prior_start or not prior_end:
+            return
+        current = connector.get_event(event_ref)
+        if moved_to_start and current.start.isoformat() != moved_to_start:
+            raise SourceChangedError(
+                f"event {event_ref} start changed to "
+                f"{current.start.isoformat()} since the reschedule apply "
+                "-- already changed since apply"
+            )
+        connector.reschedule_event(
+            event_ref,
+            new_start=datetime.fromisoformat(prior_start),
+            new_end=datetime.fromisoformat(prior_end),
+        )
+
+    return compensate
 
 
 def make_accept_invite_apply_fn(connector: Any) -> "Callable[[dict], str | None]":
@@ -299,6 +421,18 @@ def build_capability_registry(
     mark_read_apply_fn: "Callable[[dict], str | None] | None" = None,
     accept_invite_apply_fn: "Callable[[dict], str | None] | None" = None,
     tentative_invite_apply_fn: "Callable[[dict], str | None] | None" = None,
+    # Build prompt 31, task 1: compensating actions for the five
+    # capabilities that get a real undo path. Same override-or-no-op
+    # pattern as every apply_fn parameter above; production
+    # (``runtime.build_runtime``) binds each ``make_*_compensate_fn
+    # (connector)``. SEND_REPLY has no such parameter — it stays
+    # ``irreversible=True`` unconditionally (see that Capability's own
+    # registration below).
+    draft_reply_compensate_fn: "Callable[[dict], None] | None" = None,
+    label_compensate_fn: "Callable[[dict], None] | None" = None,
+    create_hold_compensate_fn: "Callable[[dict], None] | None" = None,
+    decline_invite_compensate_fn: "Callable[[dict], None] | None" = None,
+    reschedule_compensate_fn: "Callable[[dict], None] | None" = None,
 ) -> CapabilityRegistry:
     """The production registry (build prompt 30, task 1). Mirrors
     ``app.build_app``'s existing three apply-fn parameters exactly — each
@@ -320,6 +454,11 @@ def build_capability_registry(
     mark_read_apply = mark_read_apply_fn or _noop_apply_fn
     accept_invite_apply = accept_invite_apply_fn or _noop_apply_fn
     tentative_invite_apply = tentative_invite_apply_fn or _noop_apply_fn
+    draft_reply_compensate = draft_reply_compensate_fn or _noop_compensate_fn
+    label_compensate = label_compensate_fn or _noop_compensate_fn
+    create_hold_compensate = create_hold_compensate_fn or _noop_compensate_fn
+    decline_invite_compensate = decline_invite_compensate_fn or _noop_compensate_fn
+    reschedule_compensate = reschedule_compensate_fn or _noop_compensate_fn
 
     return CapabilityRegistry((
         Capability(
@@ -330,7 +469,12 @@ def build_capability_registry(
             apply=shared_apply,
             freshness_check=_check_freshness_mail,
             confirmation_text=apply_confirmation,
-            irreversible=True,
+            # Build prompt 31, task 1: the compensating action for a
+            # created-but-never-sent draft is deleting it — see
+            # make_draft_reply_compensate_fn. This is what makes DRAFT_REPLY
+            # honestly reversible (contrast SEND_REPLY below, which stays
+            # irreversible=True unconditionally).
+            compensate=draft_reply_compensate,
             thread_namespace="gmail:",
         ),
         Capability(
@@ -347,6 +491,11 @@ def build_capability_registry(
             enabled_flag="mail_send_enabled",
             freshness_check=_check_freshness_mail,
             confirmation_text=apply_confirmation,
+            # Build prompt 31: SEND_REPLY stays irreversible=True
+            # UNCONDITIONALLY — a sent reply is irreversible by
+            # construction, and a follow-up "please ignore that" email is
+            # not an undo. Do not fake it with a compensate function (see
+            # docs/decisions.md).
             irreversible=True,
             thread_namespace="gmail:",
         ),
@@ -360,7 +509,9 @@ def build_capability_registry(
             enabled_flag="mail_labels_enabled",
             freshness_check=_check_freshness_mail,
             confirmation_text=apply_confirmation,
-            irreversible=True,
+            # Build prompt 31, task 1: re-add INBOX, remove the applied
+            # label — see make_label_compensate_fn.
+            compensate=label_compensate,
             render_card=lambda state: (
                 f"Archive proposal — triaged noise: {state.get('subject')}"
             ),
@@ -376,7 +527,10 @@ def build_capability_registry(
             # state["domain"] == "calendar" internally.
             apply=shared_apply,
             confirmation_text=apply_confirmation,
-            irreversible=True,
+            # Build prompt 31, task 1: delete the created event — see
+            # make_create_hold_compensate_fn. The hold's own event id is
+            # already known (applied_ref).
+            compensate=create_hold_compensate,
             thread_namespace="calendar:",
         ),
         Capability(
@@ -389,7 +543,10 @@ def build_capability_registry(
             enabled_flag="calendar_writes_enabled",
             freshness_check=_check_freshness_calendar_event,
             confirmation_text=apply_confirmation,
-            irreversible=True,
+            # Build prompt 31, task 1: reset the principal's own
+            # responseStatus to needsAction — see
+            # make_decline_invite_compensate_fn.
+            compensate=decline_invite_compensate,
             render_card=lambda state: f"Decline invite proposal: {state.get('subject')}",
             thread_namespace="decline:",
         ),
@@ -403,7 +560,11 @@ def build_capability_registry(
             enabled_flag="calendar_writes_enabled",
             freshness_check=_check_freshness_calendar_event,
             confirmation_text=apply_confirmation,
-            irreversible=True,
+            # Build prompt 31, task 1: restore the prior start/end,
+            # captured into state BEFORE the patch (dispatcher.
+            # _offer_reschedule_proposal) — see
+            # make_reschedule_compensate_fn.
+            compensate=reschedule_compensate,
             thread_namespace="calendar:reschedule:",
         ),
         Capability(

@@ -2178,7 +2178,7 @@ def test_symmetric_conflict_pair_gets_one_card():
             return registered.get(ref)
 
         def register(self, *, lg_tid, source_ref, domain, posted_at, sender=None,
-                     subject=None, priority=None):
+                     subject=None, priority=None, action=None):
             registered[source_ref] = object()
 
     handle_calendar_notification(
@@ -2724,6 +2724,41 @@ def test_reschedule_offered_when_principal_organizes_own_event():
     assert "reschedule_start" in state and "reschedule_end" in state
     assert "Move 'My meeting'" in state["incoming_summary"]
     assert posted[0].startswith("Scheduling conflict — proposed reschedule")
+
+
+def test_reschedule_proposal_captures_prior_start_end_before_any_patch():
+    """Build prompt 31, task 1: RESCHEDULE's compensate function restores
+    the event's prior start/end — which must be captured into workflow
+    state at PROPOSE time, before apply ever patches the event, never
+    re-derived afterwards (by then the event's own start/end IS the
+    moved-to time). ``reschedule_prior_start``/``reschedule_prior_end``
+    must equal the event's own start/end as they were when the card was
+    built — distinct from ``reschedule_start``/``reschedule_end``, which
+    carry the NEW (moved-to) slot."""
+    e1 = _cal_event(
+        "e1", 60, duration_min=30, summary="My meeting", organizer_is_self=True,
+    )
+    e2 = _cal_event("e2", 75, duration_min=30, summary="Their meeting")
+    connector = _CalendarWriteCapableConnector({"e1": e1, "e2": e2}, nearby=[e1, e2])
+    calendar_graph = _FakeCalendarActionGraph()
+    app = _fake_app_ctx(graph=_FakeGraph(), calendar_action_graph=calendar_graph)
+
+    handle_calendar_notification(
+        app, _INVITE_NOTIFICATION,
+        calendar_service=_single_event_notification("e1"),
+        calendar_sync_state=_FakeCalendarSyncState({"primary": {"sync_token": "old"}}),
+        connector=connector,
+        notify=lambda text: None,
+        user_id="me@example.com",
+        post_approval=lambda *a, **kw: None,
+        calendar_writes_enabled=True,
+    )
+
+    state = calendar_graph.calls[0]["state"]
+    assert state["reschedule_prior_start"] == e1.start.isoformat()
+    assert state["reschedule_prior_end"] == e1.end.isoformat()
+    # The new (moved-to) slot is a DIFFERENT value from the prior one.
+    assert state["reschedule_start"] != state["reschedule_prior_start"]
 
 
 def test_hold_offer_stays_fallback_when_principal_organizes_neither_event():

@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 from attune.memory.base import MemoryStore
 from attune.orchestrator import JsonPendingApprovals, sweep_ignored
+from attune.orchestrator.draft_approve import resume_workflow
+from attune.orchestrator.pending import STATUS_EXPIRED, STATUS_IGNORED, sweep_expired
 
 
 class FakeStore(MemoryStore):
@@ -351,3 +353,105 @@ def test_resolved_entry_never_swept(tmp_path):
     swept = sweep_ignored(reg, store, user_id="u1", now=T0 + timedelta(days=30))
     assert swept == 0
     assert store.added == []
+
+
+# ---------------------------------------------------------------------------
+# sweep_expired (build prompt 31, task 3) — the approval TTL
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_expired_marks_status_and_cancels_workflow(tmp_path):
+    reg = _registry(tmp_path)
+    audit = FakeAuditLog()
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+
+    cancelled: list[str] = []
+    swept = sweep_expired(
+        reg, now=T0 + timedelta(days=8), audit_log=audit, user_id="u1",
+        cancel_workflow=cancelled.append,
+    )
+
+    assert swept == 1
+    assert cancelled == ["gmail:t1:100"]
+    entry = reg.get_entry("gmail:t1:100")
+    assert entry.status == STATUS_EXPIRED
+    assert audit.recorded[0]["events"][0]["event"] == "approval_expired"
+
+
+def test_sweep_expired_leaves_fresh_entries_alone(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+
+    swept = sweep_expired(reg, now=T0 + timedelta(days=6))
+
+    assert swept == 0
+    assert reg.get_entry("gmail:t1:100").status != STATUS_EXPIRED
+
+
+def test_sweep_expired_catches_an_already_ignored_entry():
+    """A card the 48h ignore-sweep already touched must still be caught
+    once it separately crosses the much longer 7-day expiry line —
+    ``sweep_expired`` reads BOTH pending and ignored entries, since
+    ``registry.pending()`` alone would never see an ignored one again."""
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = JsonPendingApprovals(f"{tmp}/pending.json")
+        reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+        sweep_ignored(reg, FakeStore(), user_id="u1", now=T0 + timedelta(hours=49))
+        assert reg.get_entry("gmail:t1:100").status == STATUS_IGNORED
+
+        swept = sweep_expired(reg, now=T0 + timedelta(days=8))
+
+        assert swept == 1
+        assert reg.get_entry("gmail:t1:100").status == STATUS_EXPIRED
+
+
+def test_sweep_expired_distinguishable_from_ignored_in_the_audit_trail(tmp_path):
+    """STATUS_EXPIRED and STATUS_IGNORED must produce different audit
+    events (and therefore different learning signals downstream in
+    ``grants.track_records``) — an expiry is a fact about elapsed time,
+    never a judgment about the proposal."""
+    reg = _registry(tmp_path)
+    audit = FakeAuditLog()
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+    reg.register(lg_tid="gmail:t2:100", source_ref="t2", domain="mail", posted_at=T0)
+
+    sweep_ignored(reg, FakeStore(), user_id="u1", now=T0 + timedelta(hours=49), audit_log=audit)
+    sweep_expired(reg, now=T0 + timedelta(days=8), audit_log=audit, user_id="u1")
+
+    events = {e["events"][0]["event"] for e in audit.recorded}
+    assert events == {"approval_ignored", "approval_expired"}
+    assert reg.get_entry("gmail:t1:100").status == STATUS_EXPIRED
+    assert reg.get_entry("gmail:t2:100").status == STATUS_EXPIRED
+
+
+def test_expired_card_resume_returns_honest_refusal_without_touching_graph():
+    """A click on an expired card must return an honest refusal instead of
+    resuming — and never even reach the graph (proven here by a graph
+    stub that raises if invoked at all)."""
+
+    class _ExplodingGraph:
+        def invoke(self, *a, **kw):
+            raise AssertionError("an expired card's workflow must never be resumed")
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        reg = JsonPendingApprovals(f"{tmp}/pending.json")
+        reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+        sweep_expired(reg, now=T0 + timedelta(days=8))
+
+        result = resume_workflow(_ExplodingGraph(), "gmail:t1:100", "approved", pending=reg)
+
+    assert result["approval_expired"] is True
+    assert result["apply_error"] == "expired"
+
+
+def test_sweep_expired_default_ttl_is_seven_days(tmp_path):
+    reg = _registry(tmp_path)
+    reg.register(lg_tid="gmail:t1:100", source_ref="t1", domain="mail", posted_at=T0)
+
+    # Just under 7 days: not yet expired.
+    assert sweep_expired(reg, now=T0 + timedelta(days=6, hours=23)) == 0
+    # Just over 7 days: expired.
+    assert sweep_expired(reg, now=T0 + timedelta(days=7, hours=1)) == 1

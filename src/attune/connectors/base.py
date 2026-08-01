@@ -232,6 +232,15 @@ class WorkspaceConnector(ABC):
     ) -> DraftRef:
         """Create a draft for human review. The primary, safe write path."""
 
+    def delete_draft(self, draft_id: str) -> None:
+        """Delete a previously created draft (build prompt 31) — the
+        compensating action for DRAFT_REPLY/FOLLOW_UP: undoing a created-
+        but-never-sent draft is simply removing it. Same scope tier as
+        :meth:`create_draft` (``gmail.compose`` already covers
+        ``drafts.delete``) — no additional opt-in flag, mirroring
+        ``create_draft``'s own ungated posture. Optional to implement."""
+        raise NotImplementedError
+
     def send_reply(self, *, draft_id: str) -> None:
         """Send a previously-created draft.
 
@@ -366,6 +375,14 @@ class WorkspaceConnector(ABC):
         Optional to implement — see :meth:`supports_freebusy`."""
         raise NotImplementedError
 
+    def delete_event(self, event_id: str) -> None:
+        """Delete a calendar event this connector created (build prompt 31)
+        — the compensating action for CREATE_HOLD: undoing a created
+        tentative hold is simply removing it. Same scope tier as
+        :meth:`create_hold` — no additional opt-in flag, mirroring
+        ``create_hold``'s own ungated posture. Optional to implement."""
+        raise NotImplementedError
+
     def supports_calendar_writes(self) -> bool:
         """Capability probe for :meth:`decline_invite`/:meth:`reschedule_event`
         (Phase 3 stage 2), mirroring :meth:`supports_labeling`. False by
@@ -424,6 +441,18 @@ class WorkspaceConnector(ABC):
         raise CalendarWriteNotPermitted(
             "This connector cannot mark calendar invites tentative. Direct "
             "OAuth requires a calendar write scope AND "
+            "ATTUNE_CALENDAR_WRITES_ENABLED; MCP has no such capability in "
+            "contract v1."
+        )
+
+    def reset_invite_response(self, event_id: str) -> None:
+        """Reset the PRINCIPAL's own attendee responseStatus back to
+        ``"needsAction"`` (build prompt 31) — the compensating action for
+        DECLINE_INVITE. Same double-gate discipline as
+        :meth:`decline_invite`."""
+        raise CalendarWriteNotPermitted(
+            "This connector cannot reset an invite response. Direct OAuth "
+            "requires a calendar write scope AND "
             "ATTUNE_CALENDAR_WRITES_ENABLED; MCP has no such capability in "
             "contract v1."
         )

@@ -25,6 +25,13 @@ ACTION_REJECT = "attune_reject"
 # (mirrored in ingestion/chat_interactions.py and deploy/republisher/,
 # kept in sync by tests).
 ACTION_EDIT_SUBMIT = "attune_edit_submit"
+# Build prompt 31, task 4: the batch card's single aggregate BUTTON —
+# NEVER an aggregate EFFECT. Its value is the comma-joined thread_ids of
+# every item in the group; the handler (channels/slack.py) expands it into
+# N individual ``resume_workflow`` calls via
+# ``orchestrator.batch.resolve_batch_approve_all`` — see that module's
+# docstring for why this must never become one audited effect.
+ACTION_APPROVE_ALL = "attune_approve_all"
 
 # Slack modal internals: where the edited text lives in the view_submission
 # payload (view.state.values[<block_id>][<action_id>].value).
@@ -126,6 +133,78 @@ def approval_blocks(
             ],
         }
     )
+    return blocks
+
+
+def batch_approval_blocks(
+    *, domain: str, action: str, entries: "list[tuple[str, str, str | None]]"
+) -> list[dict[str, Any]]:
+    """Render a grouped batch card (build prompt 31, task 4): one line per
+    item — subject/counterparty rendered individually and never truncated
+    (the constraint: an approve-all over a truncated list is forbidden) —
+    plus per-item Approve/Reject buttons (reusing ``ACTION_APPROVE``/
+    ``ACTION_REJECT``, so the existing single-item handlers need no
+    changes) and one "Approve all" button whose value is every item's
+    thread_id, comma-joined.
+
+    ``entries`` is ``(thread_id, subject, counterparty)`` triples, subject
+    always non-empty (falls back to the thread_id itself upstream —
+    ``orchestrator.batch.render_batch_card``'s text-rendering counterpart
+    makes the same choice).
+    """
+    lines = [f"*{len(entries)} pending {action} proposals on {domain}*"]
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": lines[0]}},
+    ]
+    for thread_id, subject, counterpart in entries:
+        who = f" — {counterpart}" if counterpart else ""
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"• {subject}{who}"},
+            "block_id": f"attune_batch_item:{thread_id}",
+        })
+        blocks.append({
+            "type": "actions",
+            "block_id": f"attune_batch_actions:{thread_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Accept"},
+                    "style": "primary",
+                    "action_id": ACTION_APPROVE,
+                    "value": thread_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Ignore"},
+                    "style": "danger",
+                    "action_id": ACTION_REJECT,
+                    "value": thread_id,
+                },
+            ],
+        })
+    blocks.append({
+        "type": "actions",
+        "block_id": "attune_batch_approve_all",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": f"Accept all {len(entries)}"},
+                "style": "primary",
+                "action_id": ACTION_APPROVE_ALL,
+                "value": ",".join(tid for tid, _, _ in entries),
+                "confirm": {
+                    "title": {"type": "plain_text", "text": "Accept all?"},
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"This accepts all {len(entries)} proposals shown above.",
+                    },
+                    "confirm": {"type": "plain_text", "text": "Accept all"},
+                    "deny": {"type": "plain_text", "text": "Cancel"},
+                },
+            },
+        ],
+    })
     return blocks
 
 

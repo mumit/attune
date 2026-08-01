@@ -169,6 +169,12 @@ class Settings:
     eval_labels_dir: str = "./evals/labels"
 
     approval_ignore_hours: int = 48
+    # Build prompt 31, task 3: the approval TTL — how long a card may sit
+    # PENDING/IGNORED before its workflow is cancelled outright (distinct
+    # from approval_ignore_hours above, which only marks a signal; this
+    # actually kills the checkpoint). See orchestrator.pending.DEFAULT_EXPIRY
+    # and docs/decisions.md for the 7-day justification.
+    approval_expiry_days: int = 7
     converse_window_turns: int = 10
     converse_ttl_minutes: int = 120
     timezone: str = "UTC"
@@ -365,6 +371,7 @@ class Settings:
             eval_agreement_path=e.get("ATTUNE_EVAL_AGREEMENT_PATH") or "./evals/agreement.json",
             eval_labels_dir=e.get("ATTUNE_EVAL_LABELS_DIR") or "./evals/labels",
             approval_ignore_hours=int(e.get("ATTUNE_APPROVAL_IGNORE_HOURS", "48")),
+            approval_expiry_days=int(e.get("ATTUNE_APPROVAL_EXPIRY_DAYS", "7")),
             converse_window_turns=int(e.get("ATTUNE_CONVERSE_WINDOW_TURNS", "10")),
             converse_ttl_minutes=int(e.get("ATTUNE_CONVERSE_TTL_MINUTES", "120")),
             timezone=e.get("ATTUNE_TIMEZONE", "UTC"),

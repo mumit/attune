@@ -87,6 +87,13 @@ class AppContext:
     # best-effort, never blocks the rest of build_app (see build_app's
     # docstring).
     playbook: Any = None
+    # Build prompt 31: the capability registry ``build_app`` assembled for
+    # ``graph`` — exposed here (rather than only closed over inside the
+    # compiled graph) so a separate process invocation (``attune undo``,
+    # ``cli/undo_cmd.py``) can resolve a capability's ``compensate``
+    # function against the SAME connector-bound registry the graph itself
+    # used to apply the effect, without re-deriving it.
+    registry: Any = None
     _db_conn: Any = field(default=None, repr=False)
 
     def current_matrix(self) -> PermissionMatrix:
@@ -130,6 +137,14 @@ def build_app(
     mark_read_apply_fn: Any = None,
     accept_invite_apply_fn: Any = None,
     tentative_invite_apply_fn: Any = None,
+    # Build prompt 31, task 1: the compensating actions for the five
+    # capabilities that get a real undo path — same override-or-no-op
+    # pattern as every apply_fn parameter above.
+    draft_reply_compensate_fn: Any = None,
+    label_compensate_fn: Any = None,
+    create_hold_compensate_fn: Any = None,
+    decline_invite_compensate_fn: Any = None,
+    reschedule_compensate_fn: Any = None,
     ledger: "DecisionLedger | None" = None,
     playbook: Any = None,
 ) -> AppContext:
@@ -276,6 +291,11 @@ def build_app(
         mark_read_apply_fn=mark_read_apply_fn,
         accept_invite_apply_fn=accept_invite_apply_fn,
         tentative_invite_apply_fn=tentative_invite_apply_fn,
+        draft_reply_compensate_fn=draft_reply_compensate_fn,
+        label_compensate_fn=label_compensate_fn,
+        create_hold_compensate_fn=create_hold_compensate_fn,
+        decline_invite_compensate_fn=decline_invite_compensate_fn,
+        reschedule_compensate_fn=reschedule_compensate_fn,
     )
     graph = build_draft_approve_graph(
         client=resolved_client,
@@ -307,6 +327,7 @@ def build_app(
         # select — see runtime._resolve_resume).
         label_graph=graph,
         calendar_action_graph=graph,
+        registry=capability_registry,
         matrix=resolved_matrix or _default_matrix(),
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,

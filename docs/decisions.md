@@ -4259,3 +4259,191 @@ created a Gmail draft instead of archiving).
   in `test_runtime.py` and the four gate-simulating fakes in
   `test_dispatcher.py` were replaced/updated, both because they pinned or
   simulated internals this prompt explicitly changed).
+
+## 2026-07-31 — Reversibility, expiry, and batch review (Phase P5, build prompt 31)
+
+Closes `docs/plan-2026-h2.md` P5's second prompt. Three gaps, all growing
+worse as autonomy rises: `grep -rn "undo" src/` returned zero matches; an
+IGNORED card's workflow stayed paused in the checkpointer forever, so a
+click six months later still resumed, protected only by the apply-time
+freshness check; and there was no aggregate handler for a stream of
+same-capability proposals, the named failure mode of approval gates being
+that "the control breaks when approval stops being a real decision and
+becomes a reflex."
+
+- **Five real compensating actions; SEND_REPLY stays honestly
+  irreversible.** Build prompt 30 left every capability
+  `compensate=None, irreversible=True` — a deliberate placeholder, not a
+  bug, per that prompt's own decision entry. This prompt fills in five:
+  `DRAFT_REPLY`/`FOLLOW_UP` (delete the created draft —
+  `make_draft_reply_compensate_fn`), `LABEL` (re-add `INBOX`, remove the
+  applied label), `CREATE_HOLD` (delete the created event — its id is
+  already `applied_ref`), `DECLINE_INVITE` (reset the principal's own
+  `responseStatus` to `needsAction`), and `RESCHEDULE` (restore the prior
+  start/end). `SEND_REPLY` keeps `irreversible=True` unconditionally — a
+  sent reply is irreversible by construction, and a follow-up "please
+  ignore that" email is not an undo; faking one would be dishonest about
+  what actually happened, the same discipline `apply_confirmation` already
+  holds for every other claim. Each compensating action embeds its OWN
+  freshness check (mirroring how every `apply_fn` already does): before
+  restoring, it re-fetches the current thread/event and refuses
+  (`SourceChangedError`) if the world no longer matches what apply set it
+  to — e.g. `LABEL`'s compensate refuses if the human already manually
+  restored `INBOX`, rather than layering a second, possibly wrong effect
+  on top.
+- **RESCHEDULE's prior time is captured at PROPOSE time, not re-derived at
+  undo time.** By the time a compensating action would run, the event's
+  own start/end IS the moved-to time — the original is gone unless
+  something captured it earlier. `dispatcher._offer_reschedule_proposal`
+  now writes `reschedule_prior_start`/`reschedule_prior_end` (the
+  organizer's own event, as it was, before ever building the proposal
+  card) into graph state alongside the existing `reschedule_start`/
+  `reschedule_end` (the NEW, moved-to slot) — both ride through the
+  checkpoint unchanged until `make_reschedule_compensate_fn` reads them
+  back at undo time. New connector methods this needed:
+  `delete_draft`/`delete_event`/`reset_invite_response`, each at the SAME
+  scope tier as the write path it undoes (no new opt-in flag — deleting
+  something the connector itself just created needs no more authority than
+  creating it did).
+- **Undo is a first-class, audited effect (`orchestrator/undo.py`), never
+  a bypass.** `undo_effect(thread_id, ...)` — the same `thread_id` doubles
+  as the decision ledger's `proposal_id` — checks, in order: a ledger row
+  exists; it was actually applied (`applied_ok`); it hasn't already been
+  undone (idempotent — a repeated `attune undo` is a no-op error, never a
+  second effect); it's within `UNDO_WINDOW` (1 hour — see below) of
+  `decided_at`; and the capability is registered with a real `compensate`
+  and isn't `irreversible`. Only then does it fetch the full checkpointed
+  workflow state (`graph.get_state(...)`, durable via `SqliteSaver` — this
+  is what lets `attune undo`, a separate process invocation, see the exact
+  state `apply` saw) and call `compensate(state)`. Success writes an
+  `undone` audit event and calls `ledger.mark_undone`; a `SourceChangedError`
+  or any other exception from `compensate` writes `undo_failed` and raises
+  `UndoError` — the same "honesty over crash" posture `draft_approve.apply`
+  already holds. `attune undo <effect-id>` (`cli/undo_cmd.py`) is a thin
+  wrapper: it resolves a REAL `runtime.build_runtime()` (never a bare
+  `build_app()`), because `compensate` must run against the SAME
+  connector-bound capability registry the original apply used — a no-op
+  registry would silently pretend to undo. `AppContext` gained a
+  `registry` field so this is exposed without re-deriving it.
+  `apply_confirmation` gained an optional `thread_id` parameter and a new
+  `state["undo_available"]` field (set by the `apply` graph node from
+  `registry.get(action)`'s `compensate`/`irreversible`) so the post-apply
+  confirmation can name the exact `attune undo <thread_id>` command — and,
+  for SEND_REPLY (and any other irreversible action), never renders it,
+  anywhere, satisfying the acceptance criterion directly.
+- **The undo window is 1 hour, hard-coded (`draft_approve.
+  UNDO_WINDOW_HOURS`), deliberately NOT configurable.** Undo's honesty
+  guarantee — "the world hasn't moved much since apply" — decays fast:
+  each compensate function's own freshness check is the real backstop once
+  it has, but a long window invites exactly the failure mode reversibility
+  is supposed to prevent (undoing something whose consequences have
+  already propagated — a human read the archived thread's absence from
+  their inbox, treated a declined meeting as declined). An hour covers "I
+  clicked the wrong button" and "actually, don't file that" — the
+  realistic window for a same-session correction — without pretending to
+  cover "I changed my mind a day later," which is a new decision, not an
+  undo. This is deliberately much shorter than the 7-day approval TTL
+  below: approving and undoing are different operations with different
+  honesty windows — approval waits on a human noticing a card; undo waits
+  on a human noticing a mistake they just made.
+- **Undo is the strongest single-occurrence demotion trigger.**
+  `grants.suggest_demotions` already treated a rejection against an
+  auto-applied effect as a single-occurrence trigger (stronger than an
+  ordinary rejection streak, which needs `DEMOTION_MIN_REJECTIONS`). This
+  prompt adds `undone` as a third, equally-weighted single-occurrence
+  trigger: `_decisions_by_key`/`_recent_decisions` now fold `"undone"`
+  audit events into each decision tuple, and ANY undo in the demotion
+  window suggests dropping the grant back to PROPOSE — a human explicitly
+  reversing an applied effect is at least as strong a signal as a
+  rejection the system never even got to auto-apply.
+- **`STATUS_EXPIRED`, distinct from `STATUS_IGNORED`, and the sweep now has
+  teeth.** `pending.py` gains `sweep_expired`, independent of
+  `sweep_ignored`: past `DEFAULT_EXPIRY` (7 days — see below), an entry in
+  EITHER `STATUS_PENDING` or `STATUS_IGNORED` (via a new `registry.entries`
+  method — `registry.pending()` alone would never see an already-ignored
+  entry again) is marked `STATUS_EXPIRED` AND its underlying LangGraph
+  checkpoint is actually deleted (`checkpointer.delete_thread`, threaded
+  through as `cancel_workflow` — `Runtime.sweep_pending_expired` resolves
+  it from `app.graph.checkpointer`). This is the fix for "a 'cancelled'
+  flag that leaves a resumable checkpoint" named directly in the build
+  prompt: a label alone has no teeth without actually releasing the
+  checkpoint. `draft_approve.resume_workflow` checks the registry's OWN
+  record FIRST, before ever calling `graph.invoke` — an expired thread_id
+  gets `apply_confirmation`'s honest "⌛ This proposal expired ... ask me
+  again" text, never a resume attempt against a (possibly already-deleted)
+  checkpoint. EXPIRED and IGNORED write different audit events
+  (`approval_expired` vs. `approval_ignored`) so `grants.track_records` —
+  and any future learning mechanism reading the ledger — can't conflate
+  "the principal saw this and did nothing" (a proposal-quality signal)
+  with "so much time passed the workflow died" (a fact about elapsed time,
+  never a judgment about the proposal).
+- **7 days, not hosted's 15 minutes, and here is why.** Hosted's
+  `APPROVAL_LIFETIME`/`DISPATCH_INTENT_LIFETIME`
+  (`hosted/capability_admission.py`) are request/response-cycle lifetimes —
+  a dispatched job either gets approved within the window or the whole
+  ceremony re-runs. A local approval card is not that: it is a person's own
+  Slack/Chat channel, and the entire point of "propose, wait" autonomy is
+  that a human may not be looking at their phone the moment a card posts.
+  7 days covers a full workweek plus the weekend on either side (a card
+  posted Friday evening is still live Monday morning; one posted mid-week
+  survives a weekend away) while staying a real, human-legible ceiling —
+  "this expired, ask me again" after a week reads as honest, where
+  resuming a six-month-old click (the status quo this prompt fixes) does
+  not. `ATTUNE_APPROVAL_EXPIRY_DAYS` (default `7`) is configurable per
+  deployment for principals with unusual review cadences;
+  `orchestrator.pending.DEFAULT_EXPIRY` is the code-level default the same
+  value backs.
+- **Batch cards expand into N individually-audited resumes — never one
+  aggregate effect.** `orchestrator/batch.py`'s `group_pending_by_capability`
+  groups currently-pending entries by `(domain, action)` — a new `action`
+  field on `PendingApproval`/`register()`, populated at all five
+  `dispatcher.py` call sites that post proposals, since batching by
+  capability needs to know what capability each card even is. Groups of
+  fewer than 2 render as today's ordinary single card (a "batch of one" is
+  not a batch); an entry with no recorded `action` (a pre-build-prompt-31
+  card) never joins a group, since an unknown capability can't be safely
+  batched. `render_batch_card`/Slack's `batch_approval_blocks` name every
+  item individually with its subject and counterparty — an approve-all
+  over a truncated list is forbidden, and neither renderer ever elides an
+  entry to keep a card short. `resolve_batch_approve_all` — the "approve
+  all" handler — is a thin loop calling `draft_approve.resume_workflow`
+  once per thread_id: the EXACT SAME function every single-item Approve
+  button already calls, so each item keeps its own `pending.claim` (a
+  double-click, or a race with someone answering one item individually
+  first, safely applies nothing further for that item — `claim` returns
+  `False` and `resume_workflow` short-circuits before ever invoking the
+  graph), its own freshness check (inside `apply`), its own ledger row,
+  and its own audit event. There is no code path in this module that
+  writes one row for a whole batch. Vocabulary: **accept / edit / respond
+  / ignore** — LangChain's Agent Inbox vocabulary, now the category's
+  shared language.
+- **Scope boundary, not an oversight.** Live Slack wiring (`ACTION_APPROVE_ALL`,
+  `batch_approval_blocks`, `SlackChannel.post_batch_approval`,
+  `Runtime.post_batch_digest`) ships; Google Chat's batch card does not —
+  it needs the same `orchestrator.batch` core (per Rule 3, "Build once"),
+  only the per-channel Cards v2 rendering differs, and that rendering is
+  the deferred remainder, not a design gap.
+- **Verification.** New `tests/test_reversibility.py` (19 tests): one
+  compensating action per capability plus its freshness-refusal case;
+  RESCHEDULE's prior time restoring exactly what
+  `test_reschedule_proposal_captures_prior_start_end_before_any_patch`
+  (new, `test_dispatcher.py`) proves was captured pre-patch; SEND_REPLY
+  reporting `irreversible=True`/`compensate=None`, `apply_confirmation`
+  never rendering an undo hint for it, and `undo_effect` refusing it
+  outright; `undo_effect` succeeding, refusing outside the window,
+  refusing when already undone, refusing when never applied, and refusing
+  an unknown id; a single `undone` audit event producing exactly one
+  demotion suggestion (and a clean approval alone producing none). New
+  `tests/test_pending.py` additions (9 tests): `sweep_expired` marking
+  status and cancelling the workflow, leaving fresh entries alone, catching
+  an already-ignored entry once it separately crosses the expiry line,
+  EXPIRED/IGNORED producing distinguishable audit events, an expired
+  card's resume returning the honest refusal via a graph stub that raises
+  if `invoke` is ever called, and the 7-day default boundary. New
+  `tests/test_batch.py` (9 tests): grouping (never mixing capabilities,
+  never batching a single item, excluding actionless/non-pending entries),
+  rendering (every item named, nothing truncated), and "approve all" over
+  5 items producing 5 audited applies/ledger rows/freshness checks with a
+  repeated click applying nothing further. New `tests/test_undo_cmd.py`
+  (3 tests) for the CLI wrapper. Full suite: 2194 passed, 57 skipped, zero
+  regressions.

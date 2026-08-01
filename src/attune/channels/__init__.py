@@ -8,10 +8,12 @@ render and collect, they do not decide.
 
 from .blocks import (
     ACTION_APPROVE,
+    ACTION_APPROVE_ALL,
     ACTION_EDIT,
     ACTION_EDIT_SUBMIT,
     ACTION_REJECT,
     approval_blocks,
+    batch_approval_blocks,
     brief_blocks,
     edit_modal_view,
     extract_draft_from_blocks,
@@ -40,8 +42,10 @@ __all__ = [
     "edit_dialog",
     "extract_draft_from_card_event",
     "ACTION_APPROVE",
+    "ACTION_APPROVE_ALL",
     "ACTION_EDIT",
     "ACTION_EDIT_SUBMIT",
     "ACTION_REJECT",
     "EDIT_DIALOG_FIELD",
+    "batch_approval_blocks",
 ]

@@ -214,6 +214,8 @@ class DecisionLedger(Protocol):
 
     def mark_undone(self, proposal_id: str, *, at: datetime | None = None) -> None: ...
 
+    def get(self, proposal_id: str) -> LedgerRow | None: ...
+
     def rows(
         self,
         *,
@@ -573,11 +575,10 @@ class SqliteDecisionLedger:
             )
 
     def mark_undone(self, proposal_id: str, *, at: datetime | None = None) -> None:
-        """Undo doesn't exist yet as a capability (prompt 31 builds it), but
-        the column and this setter land now — undo is the cleanest strong
-        negative signal the product will ever produce, and it should demote
-        a grant when it appears (see ``grants.suggest_demotions``, a future
-        wiring point once prompt 31 lands)."""
+        """Called by ``orchestrator.undo.undo_effect`` (build prompt 31) once
+        a compensating action succeeds — undo is the cleanest strong
+        negative signal the product produces, and it demotes a grant when
+        it appears (see ``grants.suggest_demotions``'s ``undone`` trigger)."""
         if not self._exists():
             return
         at = at or datetime.now(timezone.utc)
@@ -587,6 +588,22 @@ class SqliteDecisionLedger:
                 "WHERE proposal_id = ?",
                 (_iso(at), proposal_id),
             )
+
+    def get(self, proposal_id: str) -> LedgerRow | None:
+        """One row by its ``proposal_id`` (== the workflow's ``thread_id``)
+        — build prompt 31's undo path looks a decision up by the same id a
+        human names in ``attune undo <effect-id>``, rather than scanning
+        every row via :meth:`rows`."""
+        if not self._exists():
+            return None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"SELECT {', '.join(_COLUMNS)} FROM decision_ledger "
+                f"WHERE proposal_id = ?",
+                (proposal_id,),
+            )
+            record = cursor.fetchone()
+            return _row_from_sqlite(record) if record is not None else None
 
     def rows(
         self,

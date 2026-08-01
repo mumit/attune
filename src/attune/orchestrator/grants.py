@@ -682,7 +682,7 @@ def _scope_cli_flags(scope: GrantScope | None) -> str:
 
 def _decisions_by_key(
     audit_log: Any,
-) -> dict[tuple[Action, Domain], list[tuple[str, str, str]]]:
+) -> dict[tuple[Action, Domain], list[tuple[str, str, str, bool]]]:
     """Every recorded human decision, grouped by (action, domain) and sorted
     oldest-first — one full audit-log fold, reused across every granted
     scope in :func:`suggest_demotions` instead of re-querying (and
@@ -691,14 +691,17 @@ def _decisions_by_key(
     Reuses ``track_records``' event vocabulary (``autonomy_gate`` ties
     action/domain + ``routed_to`` to a thread_id; ``human_decision``/
     ``approval_ignored`` supply the decision). Each row is
-    ``(ts, decision, routed_to)`` — ``routed_to`` is "approve" or
+    ``(ts, decision, routed_to, undone)`` — ``routed_to`` is "approve" or
     "auto_apply" per the gate's own audit event, letting
     :func:`suggest_demotions` tell an ordinary approval-card rejection
     apart from a rejection recorded against an auto-applied effect (a
-    materially stronger signal).
+    materially stronger signal); ``undone`` is whether an ``undone`` event
+    (``orchestrator.undo.undo_effect``, build prompt 31) was later recorded
+    against the same thread_id — the single strongest signal of the three.
     """
     gate: dict[str, tuple[Action, Domain, str, str]] = {}
     outcome: dict[str, str] = {}
+    undone: set[str] = set()
     for entry in audit_log.query():
         if entry.event == "autonomy_gate":
             try:
@@ -711,33 +714,39 @@ def _decisions_by_key(
             outcome[entry.thread_id] = entry.fields.get("decision", "")
         elif entry.event == "approval_ignored":
             outcome.setdefault(entry.thread_id, "ignored")
+        elif entry.event == "undone":
+            undone.add(entry.thread_id)
 
-    by_key: dict[tuple[Action, Domain], list[tuple[str, str, str]]] = {}
+    by_key: dict[tuple[Action, Domain], list[tuple[str, str, str, bool]]] = {}
     for tid, (a, d, routed_to, ts) in gate.items():
         decision = outcome.get(tid)
         if decision not in ("approved", "edited", "rejected", "ignored"):
             continue  # still pending, or auto_applied with no later decision
-        by_key.setdefault((a, d), []).append((ts, decision, routed_to))
+        by_key.setdefault((a, d), []).append(
+            (ts, decision, routed_to, tid in undone)
+        )
     for rows in by_key.values():
         rows.sort(key=lambda r: r[0])
     return by_key
 
 
 def _recent_decisions(
-    by_key: dict[tuple[Action, Domain], list[tuple[str, str, str]]],
+    by_key: dict[tuple[Action, Domain], list[tuple[str, str, str, bool]]],
     action: Action,
     domain: Domain,
     *,
     limit: int,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, bool]]:
     """The last ``limit`` decisions for (action, domain) out of ``by_key``
     (see :func:`_decisions_by_key`), oldest-first trimmed to the most
     recent ``limit`` — windows by COUNT, not calendar time (see
     :data:`DEMOTION_WINDOW_DECISIONS`). Each returned entry is
-    ``(decision, routed_to)``.
+    ``(decision, routed_to, undone)``.
     """
     rows = by_key.get((action, domain), [])
-    return [(decision, routed_to) for _, decision, routed_to in rows[-limit:]]
+    return [
+        (decision, routed_to, undone) for _, decision, routed_to, undone in rows[-limit:]
+    ]
 
 
 def suggest_demotions(
@@ -764,7 +773,11 @@ def suggest_demotions(
     this combination today, since an auto-applied run never reaches
     ``human_decision`` at all, but the check is deliberately literal and
     defensive so a future affordance — e.g. "flag this auto-acted effect as
-    wrong" — is already covered, see docs/decisions.md).
+    wrong" — is already covered, see docs/decisions.md), OR any single
+    ``undone`` occurrence (build prompt 31) — a human explicitly reversing
+    an applied effect is the strongest negative signal the product
+    produces, given the SAME single-occurrence weight
+    ``routed_to == "auto_apply"`` already gets.
     """
     suggestions: list[DemotionSuggestion] = []
     by_key = _decisions_by_key(audit_log)
@@ -775,12 +788,13 @@ def suggest_demotions(
             recent = _recent_decisions(
                 by_key, action, domain, limit=window_decisions
             )
-            rejected = sum(1 for decision, _ in recent if decision == "rejected")
+            rejected = sum(1 for decision, _, _ in recent if decision == "rejected")
             auto_rejected = any(
                 decision == "rejected" and routed_to == "auto_apply"
-                for decision, routed_to in recent
+                for decision, routed_to, _ in recent
             )
-            if rejected >= min_rejections or auto_rejected:
+            undone_occurred = any(undone for _, _, undone in recent)
+            if rejected >= min_rejections or auto_rejected or undone_occurred:
                 suggestions.append(DemotionSuggestion(
                     action=action, domain=domain, from_rung=sg.rung,
                     scope=sg.scope, rejected=rejected, window=len(recent),

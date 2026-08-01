@@ -183,6 +183,13 @@ class DirectOAuthConnector(WorkspaceConnector):
             thread_id=result.get("message", {}).get("threadId") or thread_id,
         )
 
+    def delete_draft(self, draft_id: str) -> None:
+        """Delete a draft via ``drafts.delete`` (build prompt 31) — the
+        undo path for DRAFT_REPLY/FOLLOW_UP. No double gate: the same
+        ``gmail.compose`` scope ``create_draft`` already requires covers
+        deleting a draft the connector itself created."""
+        self._gmail().users().drafts().delete(userId=_USER, id=draft_id).execute()
+
     def send_reply(self, *, draft_id: str) -> None:
         # Even with the service wired, refuse unless send was explicitly enabled.
         if not self._send_enabled:
@@ -370,6 +377,15 @@ class DirectOAuthConnector(WorkspaceConnector):
         )
         return result.get("id", "")
 
+    def delete_event(self, event_id: str) -> None:
+        """Delete a calendar event via ``events.delete`` (build prompt 31)
+        — the undo path for CREATE_HOLD. No double gate: the same calendar
+        scope ``create_hold`` already uses covers deleting an event this
+        connector itself created."""
+        self._calendar().events().delete(
+            calendarId="primary", eventId=event_id
+        ).execute()
+
     def supports_calendar_writes(self) -> bool:
         """Structural capability, independent of whether it's turned on —
         the direct-OAuth backend CAN decline/reschedule (unlike MCP
@@ -402,6 +418,12 @@ class DirectOAuthConnector(WorkspaceConnector):
         (build prompt 30, task 6.2) — same mechanics via
         :meth:`_respond_to_invite`. Same double-gate discipline."""
         self._respond_to_invite(event_id, "tentative")
+
+    def reset_invite_response(self, event_id: str) -> None:
+        """Reset the principal's own responseStatus to "needsAction" (build
+        prompt 31) — the undo path for DECLINE_INVITE, same mechanics via
+        :meth:`_respond_to_invite`. Same double-gate discipline."""
+        self._respond_to_invite(event_id, "needsAction")
 
     def _respond_to_invite(self, event_id: str, response_status: str) -> None:
         """Shared RSVP mechanics for :meth:`decline_invite`/

@@ -93,14 +93,20 @@ from .orchestrator import (
     make_add_label_apply_fn,
     make_calendar_action_apply_fn,
     make_connector_apply_fn,
+    make_create_hold_compensate_fn,
+    make_decline_invite_compensate_fn,
+    make_draft_reply_compensate_fn,
     make_label_apply_fn,
+    make_label_compensate_fn,
     make_mark_read_apply_fn,
     make_remove_label_apply_fn,
+    make_reschedule_compensate_fn,
     make_tentative_invite_apply_fn,
     resolve_autonomy_card,
     resume_workflow,
     suggest_demotions,
     suggest_graduations,
+    sweep_expired,
     sweep_ignored,
 )
 from .ingestion.calendar_sync import SyncState
@@ -867,6 +873,45 @@ class Runtime:
             importance_profile=self.app.importance_profile,
         )
 
+    def post_batch_digest(self) -> "list[Any]":
+        """Post one grouped batch card per (domain, action) capability
+        currently holding several pending proposals (build prompt 31, task
+        4) — the counter-measure to "a stream of individually-trivial
+        decisions" turning approval into a reflex. Safe to call any time;
+        each group is derived fresh from ``self.pending.pending()``, so a
+        repeated call simply re-renders the same still-pending items (no
+        duplicate state to accumulate, unlike the autonomy digest's
+        cooldown bookkeeping — a batch card carries no independent
+        authority of its own, only per-item Accept/Ignore/Approve-all
+        buttons that resume the SAME workflows a single card would have).
+
+        Returns every :class:`~orchestrator.batch.BatchGroup` found (for
+        tests/logging), regardless of whether a channel was configured to
+        actually post them.
+        """
+        if self.pending is None:
+            return []
+        from .orchestrator import group_pending_by_capability
+
+        groups = group_pending_by_capability(self.pending.pending())
+        if not groups:
+            return []
+
+        for group in groups:
+            entries = [
+                (e.lg_tid, e.subject or e.source_ref, e.sender)
+                for e in group.entries
+            ]
+            if (
+                self.settings.approval_channel == "slack"
+                and self.slack is not None and self.slack_say is not None
+            ):
+                self.slack.post_batch_approval(
+                    self.slack_say, domain=group.domain, action=group.action,
+                    entries=entries,
+                )
+        return groups
+
     def post_autonomy_digest(self) -> list:
         """Weekly: post track-record graduation AND demotion suggestions as
         digest text (information only — same as before Phase 4 stage 2),
@@ -1041,6 +1086,9 @@ class Runtime:
             scheduler.add(
                 Job("sweep_pending", every(hours=6), self.sweep_pending_ignored)
             )
+            scheduler.add(
+                Job("sweep_pending_expiry", every(hours=6), self.sweep_pending_expired)
+            )
         if self.retry_queue is not None:
             scheduler.add(
                 Job("source_retries", every(minutes=5), self.drain_source_retries)
@@ -1090,6 +1138,32 @@ class Runtime:
             now=now,
             audit_log=self.app.audit_log,
             importance_profile=self.app.importance_profile,
+        )
+
+    def sweep_pending_expired(self, *, now: Any = None) -> int:
+        """Cancel workflows whose cards have sat unanswered past the
+        approval TTL (build prompt 31, task 3). Called on a schedule,
+        independently of :meth:`sweep_pending_ignored` — a much longer
+        window (default 7 days vs. 48h), and this one actually releases
+        the underlying LangGraph checkpoint rather than only recording a
+        signal. Safe to call any time; each entry is swept at most once."""
+        if self.pending is None:
+            return 0
+        from datetime import timedelta
+
+        checkpointer = getattr(self.app.graph, "checkpointer", None)
+
+        def _cancel(thread_id: str) -> None:
+            if checkpointer is not None and hasattr(checkpointer, "delete_thread"):
+                checkpointer.delete_thread(thread_id)
+
+        return sweep_expired(
+            self.pending,
+            max_age=timedelta(days=self.settings.approval_expiry_days),
+            now=now,
+            audit_log=self.app.audit_log,
+            user_id=self.settings.user_id,
+            cancel_workflow=_cancel,
         )
 
     # --- watch/subscription renewal (testable, called on a daily schedule) --
@@ -1684,6 +1758,14 @@ def build_runtime(
         mark_read_apply_fn=make_mark_read_apply_fn(resolved_connector),
         accept_invite_apply_fn=make_accept_invite_apply_fn(resolved_connector),
         tentative_invite_apply_fn=make_tentative_invite_apply_fn(resolved_connector),
+        # Build prompt 31, task 1: same pre-bound-to-connector wiring as
+        # every apply_fn above — the compensating actions undo actually
+        # invokes (orchestrator.undo.undo_effect).
+        draft_reply_compensate_fn=make_draft_reply_compensate_fn(resolved_connector),
+        label_compensate_fn=make_label_compensate_fn(resolved_connector),
+        create_hold_compensate_fn=make_create_hold_compensate_fn(resolved_connector),
+        decline_invite_compensate_fn=make_decline_invite_compensate_fn(resolved_connector),
+        reschedule_compensate_fn=make_reschedule_compensate_fn(resolved_connector),
     )
 
     resolved_pending = pending or JsonPendingApprovals(settings.pending_state_path)

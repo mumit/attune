@@ -109,6 +109,15 @@ class DraftApproveState(TypedDict, total=False):
     # showed.
     reschedule_start: Optional[str]
     reschedule_end: Optional[str]
+    # RESCHEDULE undo (build prompt 31, task 1): the event's start/end AS
+    # THEY WERE BEFORE the patch, captured at PROPOSE time (dispatcher.
+    # _offer_reschedule_proposal) -- never re-derived after the fact, since
+    # by the time a compensating action would run, the event's own start/
+    # end IS the moved-to time, not the original. ``reschedule_start``/
+    # ``reschedule_end`` above are the NEW (moved-to) time; these are the
+    # OLD one RESCHEDULE's compensate function restores.
+    reschedule_prior_start: Optional[str]
+    reschedule_prior_end: Optional[str]
     # Freshness precondition (prompt 21): what the source looked like when
     # this was proposed — mail: the thread's last_message_at ISO; calendar:
     # the conflicted event's start ISO. Apply refuses when it changed.
@@ -133,6 +142,13 @@ class DraftApproveState(TypedDict, total=False):
     # when routed_to == "auto_apply" — the same value the audit event's
     # max_rung field already carried, now also readable without a scan.
     gate_max_rung: Optional[int]
+
+    # Build prompt 31: whether the applied effect can be undone — set by
+    # the ``apply`` node from ``registry.get(action)``'s ``compensate``/
+    # ``irreversible`` fields, so ``apply_confirmation`` can offer (or
+    # correctly withhold, for SEND_REPLY) an undo affordance without
+    # needing the registry itself threaded through every channel.
+    undo_available: Optional[bool]
 
     # --- accumulator: append-only, survives resume ---
     audit_events: Annotated[list[dict[str, Any]], operator.add]

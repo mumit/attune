@@ -22,10 +22,12 @@ from typing import Any, Callable
 
 from .blocks import (
     ACTION_APPROVE,
+    ACTION_APPROVE_ALL,
     ACTION_EDIT,
     ACTION_EDIT_SUBMIT,
     ACTION_REJECT,
     approval_blocks,
+    batch_approval_blocks,
     brief_blocks,
     edit_modal_view,
     extract_draft_from_blocks,
@@ -116,6 +118,19 @@ class SlackChannel:
             text="A draft needs your approval",
         )
 
+    def post_batch_approval(
+        self, say: Callable[..., Any], *, domain: str, action: str,
+        entries: "list[tuple[str, str, str | None]]",
+    ) -> None:
+        """Post one grouped batch card for several pending proposals of the
+        SAME capability (build prompt 31, task 4) — see
+        ``orchestrator.batch.group_pending_by_capability``, which decides
+        WHEN this is called instead of ``post_approval`` per item."""
+        say(
+            blocks=batch_approval_blocks(domain=domain, action=action, entries=entries),
+            text=f"{len(entries)} pending {action} proposals need your review",
+        )
+
     def start(self) -> None:  # pragma: no cover - requires live Slack
         """Run the Socket Mode handler (blocks)."""
         app = self._ensure_app()
@@ -165,7 +180,8 @@ class SlackChannel:
             from ..orchestrator import apply_confirmation
 
             respond(
-                text=apply_confirmation("approved", result), replace_original=True
+                text=apply_confirmation("approved", result, thread_id=thread_id),
+                replace_original=True,
             )
 
         @app.action(ACTION_REJECT)
@@ -180,7 +196,35 @@ class SlackChannel:
             from ..orchestrator import apply_confirmation
 
             respond(
-                text=apply_confirmation("rejected", result), replace_original=True
+                text=apply_confirmation("rejected", result, thread_id=thread_id),
+                replace_original=True,
+            )
+
+        @app.action(ACTION_APPROVE_ALL)
+        def _approve_all(ack, body, respond):  # noqa: ANN001
+            ack()
+            actor = _actor(body)
+            if not self._authorized(actor, "approve_all"):
+                respond(text=_REFUSAL.format(actor=actor), replace_original=False)
+                return
+            from ..orchestrator.batch import resolve_batch_approve_all
+
+            thread_ids = [
+                tid for tid in body["actions"][0]["value"].split(",") if tid
+            ]
+            results = resolve_batch_approve_all(
+                thread_ids,
+                resume=lambda tid: self._resume(tid, "approved", None, actor=actor),
+            )
+            from ..orchestrator import apply_confirmation
+
+            lines = [
+                apply_confirmation("approved", result, thread_id=tid)
+                for tid, result in zip(thread_ids, results)
+            ]
+            respond(
+                text=f"Accepted {len(thread_ids)} proposals:\n" + "\n".join(lines),
+                replace_original=True,
             )
 
         @app.action(ACTION_EDIT)
@@ -218,7 +262,8 @@ class SlackChannel:
 
             if channel_id:
                 client.chat_postMessage(
-                    channel=channel_id, text=apply_confirmation("edited", result)
+                    channel=channel_id,
+                    text=apply_confirmation("edited", result, thread_id=thread_id),
                 )
 
         @app.event("message")

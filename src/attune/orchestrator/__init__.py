@@ -15,6 +15,13 @@ from .attention import (
     AttentionStore,
     JsonAttentionStore,
 )
+from .batch import (
+    MIN_BATCH_SIZE,
+    BatchGroup,
+    group_pending_by_capability,
+    render_batch_card,
+    resolve_batch_approve_all,
+)
 from .autonomy import (
     Action,
     Domain,
@@ -33,8 +40,13 @@ from .capabilities import (
     capability_gates_pass,
     make_accept_invite_apply_fn,
     make_add_label_apply_fn,
+    make_create_hold_compensate_fn,
+    make_decline_invite_compensate_fn,
+    make_draft_reply_compensate_fn,
+    make_label_compensate_fn,
     make_mark_read_apply_fn,
     make_remove_label_apply_fn,
+    make_reschedule_compensate_fn,
     make_tentative_invite_apply_fn,
 )
 from .correlation import (
@@ -115,15 +127,27 @@ from .ledger import (
     window_rows,
 )
 from .pending import (
+    DEFAULT_EXPIRY,
+    STATUS_EXPIRED,
+    STATUS_IGNORED,
+    STATUS_PENDING,
+    STATUS_RESOLVED,
     JsonPendingApprovals,
     PendingApproval,
     PendingApprovals,
+    sweep_expired,
     sweep_ignored,
 )
 from .triage import Priority, TriageResult, triage_thread
 from .scheduling import ConflictResult, detect_conflict
+from .undo import UNDO_WINDOW, UndoError, UndoResult, undo_effect
 
 __all__ = [
+    "MIN_BATCH_SIZE",
+    "BatchGroup",
+    "group_pending_by_capability",
+    "render_batch_card",
+    "resolve_batch_approve_all",
     "Action",
     "Domain",
     "Rung",
@@ -139,8 +163,13 @@ __all__ = [
     "capability_gates_pass",
     "make_accept_invite_apply_fn",
     "make_add_label_apply_fn",
+    "make_create_hold_compensate_fn",
+    "make_decline_invite_compensate_fn",
+    "make_draft_reply_compensate_fn",
+    "make_label_compensate_fn",
     "make_mark_read_apply_fn",
     "make_remove_label_apply_fn",
+    "make_reschedule_compensate_fn",
     "make_tentative_invite_apply_fn",
     "DraftApproveState",
     "apply_confirmation",
@@ -182,6 +211,12 @@ __all__ = [
     "PendingApproval",
     "PendingApprovals",
     "sweep_ignored",
+    "sweep_expired",
+    "STATUS_PENDING",
+    "STATUS_RESOLVED",
+    "STATUS_IGNORED",
+    "STATUS_EXPIRED",
+    "DEFAULT_EXPIRY",
     "ImportanceProfile",
     "ImportanceTier",
     "JsonImportanceProfile",
@@ -219,4 +254,8 @@ __all__ = [
     "render_bullet_attribution_table",
     "render_metrics_table",
     "window_rows",
+    "UNDO_WINDOW",
+    "UndoError",
+    "UndoResult",
+    "undo_effect",
 ]

@@ -731,6 +731,7 @@ def submit_gmail_thread(
             lg_tid=lg_tid, source_ref=gmail_tid, domain="mail",
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
             subject=thread.subject, priority=triage.priority.value,
+            action=action,
         )
     return lg_tid
 
@@ -877,6 +878,7 @@ def _offer_archive_proposal(
             lg_tid=lg_tid, source_ref=thread.thread_id, domain="mail",
             posted_at=datetime.now(timezone.utc), sender=thread.from_addr,
             subject=thread.subject, priority=triage.priority.value,
+            action="label",
         )
     return lg_tid
 
@@ -1437,7 +1439,7 @@ def _offer_decline_proposal(
         pending.register(
             lg_tid=lg_tid, source_ref=event.event_id, domain="calendar",
             posted_at=datetime.now(timezone.utc), sender=None,
-            subject=event.summary,
+            subject=event.summary, action="decline_invite",
         )
     return lg_tid
 
@@ -1534,6 +1536,13 @@ def _offer_reschedule_proposal(
         "subject": own_event.summary,
         "reschedule_start": start.isoformat(),
         "reschedule_end": end.isoformat(),
+        # Build prompt 31, task 1: the event's start/end AS THEY ARE NOW,
+        # captured here at PROPOSE time — BEFORE apply ever patches the
+        # event — so RESCHEDULE's compensate function can restore exactly
+        # this, never re-deriving it after the fact (by undo time the
+        # event's own start/end IS the moved-to time, not the original).
+        "reschedule_prior_start": own_event.start.isoformat(),
+        "reschedule_prior_end": own_event.end.isoformat(),
         "source_snapshot": own_event.start.isoformat(),
         "user_id": user_id,
         "action": Action.RESCHEDULE.value,
@@ -1575,7 +1584,7 @@ def _offer_reschedule_proposal(
         pending.register(
             lg_tid=lg_tid, source_ref=own_event.event_id, domain="calendar",
             posted_at=datetime.now(timezone.utc), sender=None,
-            subject=own_event.summary,
+            subject=own_event.summary, action="reschedule",
         )
     return lg_tid
 
@@ -1820,7 +1829,7 @@ def _offer_resolution_hold(
         pending.register(
             lg_tid=lg_tid, source_ref=event.event_id, domain="calendar",
             posted_at=datetime.now(timezone.utc), sender=None,
-            subject=event.summary,
+            subject=event.summary, action="create_hold",
         )
     return lg_tid
 
@@ -1891,7 +1900,11 @@ def handle_chat_interaction(
 
     # The confirmation states what actually happened (a Gmail draft created,
     # or an apply failure) — never a claimed success the graph didn't produce.
-    post_text(apply_confirmation(interaction.decision, result))
+    post_text(
+        apply_confirmation(
+            interaction.decision, result, thread_id=interaction.thread_id
+        )
+    )
 
     if audit_log is not None:
         # The workflow's own domain (mail/calendar) — the CHANNEL was chat,

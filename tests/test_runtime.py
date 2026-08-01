@@ -1336,8 +1336,8 @@ def test_build_scheduler_assembles_expected_jobs():
     names = [j.name for j in runtime.build_scheduler().jobs]
     # default mode is poll -> no renew_watches job
     assert names == [
-        "daily_brief", "sweep_pending", "source_retries", "consolidate",
-        "autonomy_digest",
+        "daily_brief", "sweep_pending", "sweep_pending_expiry", "source_retries",
+        "consolidate", "autonomy_digest",
     ]
 
     # push mode gets the daily renewal job
@@ -1345,8 +1345,8 @@ def test_build_scheduler_assembles_expected_jobs():
     push.settings = _settings(ATTUNE_INGESTION_MODE="push")
     names = [j.name for j in push.build_scheduler().jobs]
     assert names == [
-        "daily_brief", "renew_watches", "sweep_pending", "source_retries",
-        "consolidate", "autonomy_digest",
+        "daily_brief", "renew_watches", "sweep_pending", "sweep_pending_expiry",
+        "source_retries", "consolidate", "autonomy_digest",
     ]
 
     # A real user address + nudge state -> the daily nudge job appears.
@@ -1367,6 +1367,7 @@ def test_build_scheduler_assembles_expected_jobs():
     no_pending.pending = None
     names = [j.name for j in no_pending.build_scheduler().jobs]
     assert "sweep_pending" not in names
+    assert "sweep_pending_expiry" not in names
 
 
 def test_scheduler_brief_job_uses_configured_time_and_tz():
