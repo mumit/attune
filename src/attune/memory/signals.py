@@ -253,3 +253,77 @@ def capture_action_signal(
                 exc_info=True,
             )
     return result
+
+
+def capture_reflection_evidence(
+    store: MemoryStore,
+    *,
+    user_id: str,
+    domain: str,
+    decision: str,
+    proposal_id: str,
+    proposed: str | None = None,
+    sent: str | None = None,
+    sender: str | None = None,
+    subject: str | None = None,
+) -> list[Any]:
+    """Record content-MINIMAL evidence for the playbook reflector (build
+    prompt 29): a decided ``edited``/``rejected`` proposal, tagged with a
+    coarse, closed-vocabulary register category rather than any free text.
+
+    This is the structural half of prompt 29's untrusted-content firewall:
+    the stored ``category`` is always one of
+    :func:`~playbook.reflector.classify_register`'s three values, computed
+    over the ASSISTANT'S OWN ``proposed`` draft (never the inbound message
+    body — that text never reaches this function at all, see every call
+    site: ``orchestrator.draft_approve.resume_workflow`` passes
+    ``result["proposed_draft"]``/``result["final_text"]``, both
+    assistant-authored or human-edited-and-approved text). The playbook
+    reflector's :func:`~playbook.reflector.propose_bullets` later reads only
+    this record's ``metadata`` — never ``text`` — so even if this function's
+    own diff/register computation somehow retained a fragment of untrusted
+    content, it can never reach a bullet's rendered text.
+
+    ``proposal_id`` (the decision ledger's ``proposal_id`` == the LangGraph
+    thread id) is what lets a bullet's ``provenance`` point back at the
+    exact ledger rows that produced it — the acceptance criterion this
+    function exists for. A no-op (returns ``[]``) for any decision other
+    than ``"edited"``/``"rejected"``, or when the text this decision needs
+    is missing (an edit needs both ``proposed`` and ``sent``; a rejection
+    needs ``proposed``) — mirrors :func:`capture_correction`'s own
+    no-op-on-insufficient-input posture.
+    """
+    from ..playbook.reflector import classify_register
+
+    if decision not in ("edited", "rejected"):
+        return []
+    if decision == "edited" and (not proposed or not sent):
+        return []
+    if decision == "rejected" and not proposed:
+        return []
+
+    category = classify_register(proposed)
+    meta: dict[str, Any] = {
+        "signal": "reflection_evidence",
+        "domain": domain,
+        "decision": decision,
+        "proposal_id": proposal_id,
+        "category": category,
+    }
+    if sender:
+        meta["sender"] = sender
+    if subject:
+        meta["subject"] = subject
+
+    text = f"[reflection_evidence:{decision}] {domain}: register={category}"
+    tail: list[str] = []
+    if sender:
+        tail.append(f"sender {_fence_field(sender)}")
+    if subject:
+        tail.append(f"subject {_fence_field(subject)}")
+    if tail:
+        text += " · " + " · ".join(tail)
+    if decision == "edited":
+        text += "\n" + _short_diff(proposed or "", sent or "")
+
+    return store.add(text, user_id=user_id, metadata=meta, infer=False)

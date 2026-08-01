@@ -85,6 +85,7 @@ from .importance import (
 )
 from .ledger import (
     EDIT_SECTIONS,
+    BulletAttribution,
     ContextAttribution,
     DecisionLedger,
     EditMetrics,
@@ -92,10 +93,12 @@ from .ledger import (
     MetricsSlice,
     SqliteDecisionLedger,
     classify_edit_sections,
+    compute_bullet_attribution,
     compute_edit_metrics,
     compute_metrics_slice,
     record_decision,
     record_proposal,
+    render_bullet_attribution_table,
     render_metrics_table,
     window_rows,
 )
@@ -178,6 +181,7 @@ __all__ = [
     "from_calendar_event",
     "from_mail_thread",
     "EDIT_SECTIONS",
+    "BulletAttribution",
     "ContextAttribution",
     "DecisionLedger",
     "EditMetrics",
@@ -185,10 +189,12 @@ __all__ = [
     "MetricsSlice",
     "SqliteDecisionLedger",
     "classify_edit_sections",
+    "compute_bullet_attribution",
     "compute_edit_metrics",
     "compute_metrics_slice",
     "record_decision",
     "record_proposal",
+    "render_bullet_attribution_table",
     "render_metrics_table",
     "window_rows",
 ]

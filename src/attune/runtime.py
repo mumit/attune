@@ -681,7 +681,13 @@ class Runtime:
         """Nightly memory-consolidation pass (design 2.2). The base substrate
         implementation is currently a no-op report; this gives it its cadence
         so the real pass (roadmap prompt 13) lands with a caller already in
-        place. The report is audited either way."""
+        place. The report is audited either way.
+
+        Build prompt 29: the playbook reflector rides the SAME nightly job
+        rather than adding a second scheduled pass (task 4's own
+        instruction) — see :meth:`_run_playbook_reflection`, called last so
+        a playbook failure never blocks memory consolidation above it.
+        """
         consolidate = self.app.store.consolidate
         try:
             params = inspect.signature(consolidate).parameters.values()
@@ -711,7 +717,68 @@ class Runtime:
             domain="ops",
             user_id=self.settings.user_id,
         )
+        self._run_playbook_reflection()
         return report
+
+    def _run_playbook_reflection(self) -> None:
+        """The nightly reflector's per-bullet accounting, retirement/decay,
+        and capped new-bullet proposal (build prompt 29, task 4). Best-effort
+        — a playbook failure must never break the memory-consolidation pass
+        it rides alongside, the same posture every other collaborator in
+        this method already holds."""
+        if self.app.playbook is None:
+            return
+        try:
+            from .playbook.reflector import run_nightly_reflection
+
+            now = datetime.now(timezone.utc)
+            last_run = self.app.playbook.load_reflection_cursor()
+
+            ledger_rows: list[Any] = []
+            if self.app.ledger is not None:
+                ledger_rows = [
+                    row for row in self.app.ledger.rows()
+                    if row.decided_at is not None
+                    and (last_run is None or row.decided_at > last_run)
+                ]
+
+            evidence: list[Any] = []
+            try:
+                records = self.app.store.get_all(
+                    user_id=self.settings.user_id, limit=500,
+                )
+                evidence = [
+                    r for r in records
+                    if (getattr(r, "metadata", None) or {}).get("signal")
+                    == "reflection_evidence"
+                ]
+            except Exception:  # noqa: BLE001 — best-effort, see docstring
+                logging.getLogger(__name__).warning(
+                    "playbook reflection-evidence fetch failed", exc_info=True,
+                )
+
+            report = run_nightly_reflection(
+                self.app.playbook, ledger_rows=ledger_rows, evidence=evidence,
+                now=now,
+            )
+            self.app.playbook.save_reflection_cursor(now)
+            self.app.audit_log.record(
+                thread_id="ops:playbook_reflection",
+                workflow="ops",
+                events=[{
+                    "event": "playbook_reflection_ran",
+                    "ts": now.isoformat(),
+                    "accounted": report.accounted,
+                    "retired": len(report.retired),
+                    "proposed": len(report.proposed),
+                }],
+                domain="ops",
+                user_id=self.settings.user_id,
+            )
+        except Exception:  # noqa: BLE001 — best-effort, see docstring
+            logging.getLogger(__name__).warning(
+                "playbook reflection failed", exc_info=True,
+            )
 
     def record_manual_engagement(self, *, now: Any = None) -> int:
         """Daily: the manual-reply half of the LOW-absorbing-state fix
@@ -1522,6 +1589,10 @@ def _resolve_resume(
         user_id=settings.user_id,
         actor=actor,
         ledger=app.ledger,
+        # Build prompt 29: lets an edited/rejected decision capture
+        # playbook-reflection evidence — see resume_workflow's docstring
+        # for why this is the one place it belongs.
+        store=app.store,
     )
 
 

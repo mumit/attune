@@ -63,6 +63,7 @@ import logging
 import os
 import re
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -768,6 +769,13 @@ def _row_from_propose_result(
     drafted_event = next(
         (e for e in events if e.get("event") == "drafted"), None
     ) or {}
+    # Build prompt 29: the playbook repo's HEAD commit at retrieve time,
+    # stamped by the ``retrieved`` audit event when a playbook collaborator
+    # is wired (draft_approve.py's ``retrieve`` node) -- same "Build once"
+    # pattern as prompt_version/token usage above.
+    retrieved_event = next(
+        (e for e in events if e.get("event") == "retrieved"), None
+    ) or {}
     return LedgerRow(
         proposal_id=thread_id,
         thread_id=thread_id,
@@ -779,8 +787,16 @@ def _row_from_propose_result(
         scope_matched=bool(gate_event.get("scope_matched", False)),
         model_id=model_id,
         prompt_version=drafted_event.get("prompt_version"),
+        playbook_commit=retrieved_event.get("playbook_commit"),
         context_attribution=ContextAttribution(
             memory_ids=tuple(result.get("retrieved_memory_ids") or ()),
+            # Build prompt 29: the playbook bullets actually shown for this
+            # proposal — the nightly reflector's per-bullet accounting pass
+            # reads exactly this field back off decided rows (see
+            # playbook.reflector.record_ledger_outcomes). Empty when no
+            # playbook collaborator is wired, the same forward-compatible
+            # default this field already had.
+            playbook_bullet_ids=tuple(result.get("playbook_bullet_ids") or ()),
         ),
         triage_priority=scope_context.get("priority"),
         base_priority=result.get("base_priority"),
@@ -1017,6 +1033,96 @@ def render_metrics_table(
             subset = [r for r in scoped if r.sender_importance_tier == tier]
             lines.append(_row_line(compute_metrics_slice(subset, label=tier)))
 
+    attributions = compute_bullet_attribution(scoped)
+    if attributions:
+        lines.append("")
+        lines.append(render_bullet_attribution_table(attributions))
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Playbook bullet attribution (build prompt 29's acceptance criterion: "a
+# measurable edit-burden delta on the eval golden set attributable to named
+# bullets"). Pure function over rows already carrying
+# ``context_attribution.playbook_bullet_ids`` — populated by
+# ``draft_approve.py``'s ``retrieve`` node when a playbook is wired.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BulletAttribution:
+    """One bullet's measured effect: mean edit burden on SENT proposals
+    where it was in context, versus SENT proposals in the SAME domain where
+    it wasn't. ``delta`` negative means the bullet is associated with a
+    LOWER edit burden (helping); positive means higher (hurting) — the same
+    sign convention the reflector's ``harmed``/``helped`` counters already
+    use, just continuous instead of a per-decision tally."""
+
+    bullet_id: str
+    domain: str
+    n_with: int
+    edit_burden_with: float | None
+    n_without: int
+    edit_burden_without: float | None
+
+    @property
+    def delta(self) -> float | None:
+        if self.edit_burden_with is None or self.edit_burden_without is None:
+            return None
+        return self.edit_burden_with - self.edit_burden_without
+
+
+def compute_bullet_attribution(rows: Sequence[LedgerRow]) -> list[BulletAttribution]:
+    """One :class:`BulletAttribution` per distinct bullet id named in any
+    SENT (approved/edited) row's ``context_attribution.playbook_bullet_ids``
+    — "without" is every OTHER sent row in the same domain, so the
+    comparison never crosses domains a bullet was never eligible to appear
+    in."""
+    sent = [r for r in rows if r.decision in ("approved", "edited")]
+    by_domain: dict[str, list[LedgerRow]] = defaultdict(list)
+    for r in sent:
+        by_domain[r.domain].append(r)
+
+    bullet_domains: dict[str, str] = {}
+    for r in sent:
+        for bid in r.context_attribution.playbook_bullet_ids:
+            bullet_domains.setdefault(bid, r.domain)
+
+    results: list[BulletAttribution] = []
+    for bullet_id in sorted(bullet_domains):
+        domain = bullet_domains[bullet_id]
+        domain_rows = by_domain[domain]
+        with_rows = [
+            r for r in domain_rows if bullet_id in r.context_attribution.playbook_bullet_ids
+        ]
+        without_rows = [
+            r for r in domain_rows if bullet_id not in r.context_attribution.playbook_bullet_ids
+        ]
+        results.append(BulletAttribution(
+            bullet_id=bullet_id,
+            domain=domain,
+            n_with=len(with_rows),
+            edit_burden_with=_mean([r.edit_distance_normalized or 0.0 for r in with_rows]) if with_rows else None,
+            n_without=len(without_rows),
+            edit_burden_without=_mean([r.edit_distance_normalized or 0.0 for r in without_rows]) if without_rows else None,
+        ))
+    return results
+
+
+def render_bullet_attribution_table(attributions: Sequence[BulletAttribution]) -> str:
+    lines = ["playbook bullet attribution (edit burden, with vs. without):"]
+    header = (
+        f"{'bullet_id':<24} {'domain':<10} {'n_with':>6} {'eb_with':>8} "
+        f"{'n_without':>9} {'eb_without':>10} {'delta':>7}"
+    )
+    lines.append(header)
+    for a in attributions:
+        lines.append(
+            f"{a.bullet_id:<24} {a.domain:<10} {a.n_with:>6} "
+            f"{_fmt(a.edit_burden_with):>8} {a.n_without:>9} "
+            f"{_fmt(a.edit_burden_without):>10} {_fmt(a.delta):>7}"
+        )
     return "\n".join(lines)
 
 

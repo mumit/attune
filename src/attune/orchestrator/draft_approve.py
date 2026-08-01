@@ -117,6 +117,7 @@ def build_draft_approve_graph(
     importance_profile: Any = None,
     min_score: float | None = None,
     capabilities: ModelCapabilities | None = None,
+    playbook: Any = None,
 ):
     """Compile the draft-and-approve graph.
 
@@ -152,6 +153,18 @@ def build_draft_approve_graph(
             default) resolves fresh from ``Settings.from_env()`` inside
             ``_default_draft_fn`` itself, the same lazy pattern
             ``llm.model_for`` already uses.
+        playbook: build prompt 29's optional
+            ``playbook.bullets.GitPlaybookStore``. When present, the
+            ``retrieve`` node loads that domain's bounded, cached-prefix
+            bullet slice (``playbook.render_slice``) into
+            ``state["playbook_bullet_ids"]`` — feeding
+            ``context_attribution.playbook_bullet_ids`` (build prompt 26)
+            so the nightly reflector can credit/blame a specific bullet —
+            and the ``draft`` node passes the rendered text to ``draft_fn``
+            when it declares a ``playbook_text`` keyword
+            (:func:`_default_draft_fn` does). Absent (the default), every
+            playbook-shaped field in state stays empty and this graph's
+            behavior is byte-identical to before prompt 29.
     """
     try:
         from langgraph.graph import END, START, StateGraph
@@ -203,11 +216,39 @@ def build_draft_approve_graph(
         # future per-bullet accounting pass (prompt 29) can zip them back
         # together if it ever needs to.
         memory_ids = [m.id for m in mems]
+
+        # Build prompt 29: the domain's bounded, cached-prefix playbook
+        # slice — a bullet actually shown here is what earns it
+        # helped/harmed accounting on the nightly reflection pass (see
+        # playbook.reflector.record_ledger_outcomes, which reads exactly
+        # this field back off the ledger row's context_attribution).
+        # Absent a playbook collaborator (the default), every field here
+        # stays empty and behavior is unchanged.
+        playbook_bullet_ids: tuple[str, ...] = ()
+        audit_fields: dict[str, Any] = {"count": len(snippets)}
+        if playbook is not None:
+            try:
+                _, playbook_bullet_ids = playbook.render_slice(state["domain"])
+                if playbook_bullet_ids:
+                    playbook.touch_last_used(playbook_bullet_ids)
+                commit = playbook.current_commit()
+                if commit:
+                    audit_fields["playbook_commit"] = commit
+            except Exception:  # noqa: BLE001 — best-effort, see module
+                # docstring: "a playbook read failure degrades to no
+                # playbook, never an error on a path a human is waiting on."
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "playbook render_slice failed for domain=%s",
+                    state["domain"], exc_info=True,
+                )
         return {
             "retrieved_memories": snippets,
             "retrieved_memory_ids": memory_ids,
+            "playbook_bullet_ids": list(playbook_bullet_ids),
             "iteration_count": state.get("iteration_count", 0) + 1,
-            "audit_events": [_audit("retrieved", count=len(snippets))],
+            "audit_events": [_audit("retrieved", **audit_fields)],
         }
 
     def draft(state: DraftApproveState) -> dict[str, Any]:
@@ -228,6 +269,15 @@ def build_draft_approve_graph(
         usage_box: list[Any] = []
         if _accepts_kwarg(draft_fn, "usage_sink"):
             extra_kwargs["usage_sink"] = usage_box.append
+        # Build prompt 29: the playbook slice the retrieve node already
+        # loaded (state["playbook_bullet_ids"] names exactly the bullets
+        # rendered here) — only passed when draft_fn declares it, the same
+        # gating _accepts_kwarg already applies to capabilities/usage_sink,
+        # so archive_draft_fn/calendar_action_draft_fn (no **kwargs catch-all)
+        # are unaffected.
+        if playbook is not None and state.get("playbook_bullet_ids") and _accepts_kwarg(draft_fn, "playbook_text"):
+            slice_text, _ids = playbook.render_slice(state["domain"])
+            extra_kwargs["playbook_text"] = slice_text
         text = draft_fn(
             client,
             state["incoming_summary"],
@@ -511,6 +561,7 @@ def resume_workflow(
     user_id: str | None = None,
     actor: str | None = None,
     ledger: Any = None,
+    store: Any = None,
 ) -> Any:
     """Resume a paused draft-approve workflow with a human decision.
 
@@ -538,6 +589,19 @@ def resume_workflow(
     fields (decision, edit metrics, applied_ok, ...) become known at once,
     regardless of which dispatcher call site proposed it. Best-effort, same
     posture as ``audit_log`` above.
+
+    ``store`` (build prompt 29), when supplied, captures playbook-reflection
+    evidence for an ``edited``/``rejected`` decision via
+    ``memory.signals.capture_reflection_evidence`` — this is the ONLY call
+    site in the codebase that does, and it is deliberately here rather than
+    in the graph's own ``capture`` node: ``resume_workflow`` is the one
+    place ``thread_id`` (== the decision ledger's ``proposal_id``, the
+    provenance a future bullet points back at) and the decided ``result``
+    state are both in scope at once. Auto-applied decisions never reach
+    this function (only "edited"/"rejected" ever need evidence, and
+    auto_apply's decision is always "approved"), so no wiring elsewhere is
+    needed to cover that path. Best-effort, same posture as ``audit_log``/
+    ``ledger`` above.
     """
     from langgraph.types import Command
 
@@ -587,6 +651,31 @@ def resume_workflow(
         from .ledger import record_decision
 
         record_decision(ledger, thread_id=thread_id, result=result, actor=actor)
+
+    if store is not None and isinstance(result, dict):
+        decision_val = result.get("decision")
+        if decision_val in ("edited", "rejected"):
+            try:
+                from ..memory.signals import capture_reflection_evidence
+
+                capture_reflection_evidence(
+                    store,
+                    user_id=user_id or "me",
+                    domain=result.get("domain") or "mail",
+                    decision=decision_val,
+                    proposal_id=thread_id,
+                    proposed=result.get("proposed_draft"),
+                    sent=result.get("final_text"),
+                    sender=result.get("sender"),
+                    subject=result.get("subject"),
+                )
+            except Exception:  # noqa: BLE001 — best-effort, see docstring
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "playbook reflection-evidence capture failed for %s",
+                    thread_id, exc_info=True,
+                )
 
     return result
 
@@ -945,12 +1034,19 @@ def _default_draft_fn(
     *,
     capabilities: ModelCapabilities | None = None,
     usage_sink: Callable[[Any], None] | None = None,
+    playbook_text: str = "",
 ) -> str:
     """Default drafting: one Chat Completions call routed to the DRAFT model.
 
     Memories are injected as guidance. The incoming content is presented as
     UNTRUSTED — the provenance discipline from the design's security section is
     enforced right at the prompt boundary.
+
+    ``playbook_text`` (build prompt 29): the domain's bounded playbook
+    slice, rendered by the ``draft`` node only when non-empty — a bullet
+    can shape tone/ordering/phrasing (what the module docstring calls "what
+    to notice"); it grants no authority (see ``playbook/bullets.py`` — this
+    text never reaches ``PermissionMatrix``).
 
     ``capabilities``/``usage_sink`` are new, keyword-only, additive
     parameters (build prompt 28): ``capabilities`` resolves fresh from
@@ -969,6 +1065,10 @@ def _default_draft_fn(
         # trusted ground truth — same provenance discipline as triage's
         # PAST REACTIONS block.
         volatile += "\n\n" + UNTRUSTED_FIELD_NOTE
+    if playbook_text:
+        # Build prompt 29: shapes tone/ordering/phrasing only — it grants
+        # no authority (see playbook/bullets.py's module docstring).
+        volatile += "\n\nPlaybook guidance:\n" + playbook_text
     resp = call_with_retry(
         lambda: create_chat_completion(
             client,

@@ -15,6 +15,8 @@ a 600-line manual runbook. The CLI is the human front door:
     attune metrics   the north-star metric + coverage (build prompt 26)
     attune eval      pairwise judging, triage/injection regression, CI gate
                      (build prompt 27)
+    attune playbook  see, correct, and audit the git-backed playbook
+                     (build prompt 29)
 
 Stdlib ``argparse`` — a CLI with five subcommands doesn't justify a click/
 typer dependency. Heavy imports happen inside subcommands so
@@ -242,6 +244,28 @@ def build_parser() -> argparse.ArgumentParser:
     e_label.set_defaults(func=_cmd_eval_label)
     p_eval.set_defaults(func=_cmd_eval_help, parser=p_eval)
 
+    p_playbook = sub.add_parser(
+        "playbook", help="see, correct, and audit the git-backed playbook"
+    )
+    playbook_sub = p_playbook.add_subparsers(dest="playbook_command")
+    pb_show = playbook_sub.add_parser("show", help="list bullets (one domain, or all)")
+    pb_show.add_argument("domain", nargs="?", default=None, help="mail, calendar, voice, or scheduling")
+    pb_show.set_defaults(func=_cmd_playbook_show)
+    pb_history = playbook_sub.add_parser("history", help="git history for one bullet")
+    pb_history.add_argument("bullet_id")
+    pb_history.set_defaults(func=_cmd_playbook_history)
+    pb_retire = playbook_sub.add_parser("retire", help="retire a bullet (kept for audit, excluded from prompts)")
+    pb_retire.add_argument("bullet_id")
+    pb_retire.add_argument("--reason", default="retired by the principal")
+    pb_retire.set_defaults(func=_cmd_playbook_retire)
+    pb_pin = playbook_sub.add_parser("pin", help="exempt a bullet from decay and harmed>helped retirement")
+    pb_pin.add_argument("bullet_id")
+    pb_pin.set_defaults(func=_cmd_playbook_pin)
+    pb_revert = playbook_sub.add_parser("revert", help="git revert one playbook commit")
+    pb_revert.add_argument("commit")
+    pb_revert.set_defaults(func=_cmd_playbook_revert)
+    p_playbook.set_defaults(func=_cmd_playbook_help, parser=p_playbook)
+
     p_slack = sub.add_parser(
         "slack", help="Slack app helpers (manifest generation)"
     )
@@ -439,6 +463,41 @@ def _cmd_eval_label(args: Any) -> int:
 
 
 def _cmd_eval_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
+
+
+def _cmd_playbook_show(args: Any) -> int:
+    from .playbook_cmd import run_playbook_show
+
+    return run_playbook_show(args.domain)
+
+
+def _cmd_playbook_history(args: Any) -> int:
+    from .playbook_cmd import run_playbook_history
+
+    return run_playbook_history(args.bullet_id)
+
+
+def _cmd_playbook_retire(args: Any) -> int:
+    from .playbook_cmd import run_playbook_retire
+
+    return run_playbook_retire(args.bullet_id, reason=args.reason)
+
+
+def _cmd_playbook_pin(args: Any) -> int:
+    from .playbook_cmd import run_playbook_pin
+
+    return run_playbook_pin(args.bullet_id)
+
+
+def _cmd_playbook_revert(args: Any) -> int:
+    from .playbook_cmd import run_playbook_revert
+
+    return run_playbook_revert(args.commit)
+
+
+def _cmd_playbook_help(args: Any) -> int:
     args.parser.print_help()
     return 1
 

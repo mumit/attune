@@ -80,6 +80,14 @@ class AppContext:
     # importance profile, wired the same way the memory store and audit log
     # are — injected here so the graph's capture node can dual-write.
     importance_profile: Any = None
+    # Build prompt 29: the git-backed playbook (``playbook.bullets.
+    # GitPlaybookStore``). Wired the same way importance_profile is —
+    # injected here so the draft-approve graphs' retrieve node can load a
+    # domain's bullet slice and resume_workflow/the nightly reflector can
+    # write to it. None when construction fails (no git available, e.g.) —
+    # best-effort, never blocks the rest of build_app (see build_app's
+    # docstring).
+    playbook: Any = None
     _db_conn: Any = field(default=None, repr=False)
 
     def current_matrix(self) -> PermissionMatrix:
@@ -116,6 +124,7 @@ def build_app(
     label_apply_fn: Any = None,
     calendar_action_apply_fn: Any = None,
     ledger: "DecisionLedger | None" = None,
+    playbook: Any = None,
 ) -> AppContext:
     """Assemble the runtime from config and optional overrides.
 
@@ -157,6 +166,14 @@ def build_app(
                      (build prompt 26) — the decision ledger; analytic
                      state, not the trust root (``audit_log`` above stays
                      authoritative). Wired the same way ``audit_log`` is.
+
+    - *playbook*     via ``playbook.bullets.GitPlaybookStore(settings.playbook_dir)``
+                     (build prompt 29) — the git-backed playbook. Best-effort:
+                     a construction failure (no git installed, an
+                     unwritable directory) is logged and leaves
+                     ``AppContext.playbook`` at ``None`` rather than
+                     failing ``build_app`` — a playbook outage must never
+                     block the rest of the runtime from starting.
 
     Pass fakes for all five in tests to keep the suite offline::
 
@@ -217,6 +234,21 @@ def build_app(
             settings.importance_profile_path
         )
 
+    resolved_playbook = playbook
+    if resolved_playbook is None:
+        try:
+            from .playbook.bullets import GitPlaybookStore
+
+            resolved_playbook = GitPlaybookStore(settings.playbook_dir)
+        except Exception:  # noqa: BLE001 — best-effort, see docstring
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "playbook store construction failed; continuing without one",
+                exc_info=True,
+            )
+            resolved_playbook = None
+
     graph = build_draft_approve_graph(
         client=resolved_client,
         store=resolved_store,
@@ -226,6 +258,7 @@ def build_app(
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
         min_score=settings.memory_min_score,
+        playbook=resolved_playbook,
     )
     # The archive-proposal graph (Phase 3 stage 1, G9): same collaborators,
     # a deterministic draft_fn (no model call — see archive_draft_fn) and a
@@ -243,6 +276,7 @@ def build_app(
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
         min_score=settings.memory_min_score,
+        playbook=resolved_playbook,
     )
     # The decline-invite/reschedule proposal graph (Phase 3 stage 2): same
     # collaborators and disjoint thread-id namespaces ("decline:..."/
@@ -258,6 +292,7 @@ def build_app(
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
         min_score=settings.memory_min_score,
+        playbook=resolved_playbook,
     )
 
     from .orchestrator import default_matrix as _default_matrix
@@ -274,5 +309,6 @@ def build_app(
         matrix=resolved_matrix or _default_matrix(),
         matrix_provider=resolved_provider,
         importance_profile=resolved_importance_profile,
+        playbook=resolved_playbook,
         _db_conn=db_conn,
     )

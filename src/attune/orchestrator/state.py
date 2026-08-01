@@ -82,6 +82,14 @@ class DraftApproveState(TypedDict, total=False):
                                      # point of the decision ledger: without these
                                      # ids, no learning mechanism can ever credit
                                      # or blame a specific memory record).
+    playbook_bullet_ids: list[str]   # build prompt 29: the ids of every playbook
+                                     # bullet actually shown to the model for
+                                     # this domain's slice — feeds
+                                     # context_attribution.playbook_bullet_ids
+                                     # (ledger.py) so the nightly reflector can
+                                     # credit/blame a specific learned rule.
+                                     # Absent (no playbook collaborator wired)
+                                     # is exactly today's behavior — empty.
     proposed_draft: Optional[str]    # what the assistant proposes
     final_text: Optional[str]        # what the human approved/edited (if any)
     decision: Optional[Decision]

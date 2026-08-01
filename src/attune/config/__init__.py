@@ -152,6 +152,11 @@ class Settings:
     # retry_queue_db_path above.
     ledger_db_path: str = "./decision_ledger.db"
 
+    # Build prompt 29: the git-backed playbook directory (one Markdown file
+    # per domain, its own git repository) — instance state like every other
+    # `_path`-derived field above, not a checked-in project fixture.
+    playbook_dir: str = "./playbook"
+
     # Build prompt 27: the eval harness. Unlike the per-instance runtime
     # state above, these point at checked-in project fixtures (the golden
     # case set, the triage/injection corpora) rather than
@@ -353,6 +358,7 @@ class Settings:
             nudge_state_path=_path("ATTUNE_NUDGE_STATE_PATH", "nudge_state.json"),
             retry_queue_db_path=_path("ATTUNE_RETRY_QUEUE_DB_PATH", "source_retries.db"),
             ledger_db_path=_path("ATTUNE_LEDGER_DB_PATH", "decision_ledger.db"),
+            playbook_dir=_path("ATTUNE_PLAYBOOK_DIR", "playbook"),
             eval_cases_dir=e.get("ATTUNE_EVAL_CASES_DIR") or "./evals/cases",
             eval_triage_cases_path=e.get("ATTUNE_EVAL_TRIAGE_CASES_PATH") or "./evals/triage_cases.json",
             eval_injection_corpus_path=e.get("ATTUNE_EVAL_INJECTION_CORPUS_PATH") or "./evals/injection_corpus.json",
