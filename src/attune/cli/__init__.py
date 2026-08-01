@@ -12,6 +12,7 @@ a 600-line manual runbook. The CLI is the human front door:
     attune run       start the always-on process (doctor-gated)
     attune memory    (subcommand group — arrives with roadmap M4)
     attune autonomy  (subcommand group — arrives with roadmap M4)
+    attune metrics   the north-star metric + coverage (build prompt 26)
 
 Stdlib ``argparse`` — a CLI with five subcommands doesn't justify a click/
 typer dependency. Heavy imports happen inside subcommands so
@@ -193,6 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
     a_record.set_defaults(func=_cmd_autonomy_record)
     p_autonomy.set_defaults(func=_cmd_autonomy_help, parser=p_autonomy)
 
+    p_metrics = sub.add_parser(
+        "metrics",
+        help="the north-star metric (edit burden) with its coverage denominator",
+    )
+    p_metrics.add_argument(
+        "--window-days", type=int, default=14,
+        help="rolling window in days (default: 14)",
+    )
+    p_metrics.set_defaults(func=_cmd_metrics)
+
     p_slack = sub.add_parser(
         "slack", help="Slack app helpers (manifest generation)"
     )
@@ -363,6 +374,12 @@ def _cmd_autonomy_record(args: Any) -> int:
 def _cmd_autonomy_help(args: Any) -> int:
     args.parser.print_help()
     return 1
+
+
+def _cmd_metrics(args: Any) -> int:
+    from .metrics_cmd import run_metrics
+
+    return run_metrics(window_days=args.window_days)
 
 
 def _cmd_slack_manifest(args: Any) -> int:

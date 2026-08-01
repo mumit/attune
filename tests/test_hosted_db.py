@@ -92,6 +92,7 @@ from attune.hosted.intelligence import (
     PostgresAttentionStore,
     PostgresImportanceProfile,
 )
+from attune.hosted.ledger import PostgresDecisionLedger
 from attune.orchestrator.attention import RETENTION_DAYS, AttentionItem
 from attune.orchestrator.importance import (
     DECAY_DAYS,
@@ -162,7 +163,7 @@ def test_packaged_migrations_are_ordered_and_checksum_pinned():
     )
     sql_by_name = {migration.name: migration.sql for migration in migrations}
     assert migrations[0].name == "0001_tenant_boundary.sql"
-    assert migrations[-1].name == "0047_tenant_model_profiles.sql"
+    assert migrations[-1].name == "0048_decision_ledger.sql"
     download = sql_by_name["0037_customer_export_download.sql"]
     assert "GRANT attune_export_cleanup_coordinator TO %I" in download
     assert "REVOKE attune_export_cleanup_coordinator FROM %I" in download
@@ -536,6 +537,29 @@ def test_intelligence_repositories_reject_invalid_data_before_connecting():
         attention.add(_item(summary="x" * 2001))
     with pytest.raises(ValueError, match="non-negative integer"):
         attention.recent(limit=-1)
+
+
+def test_decision_ledger_rejects_invalid_data_before_connecting():
+    from attune.orchestrator.ledger import LedgerRow
+
+    def forbidden_connection():
+        raise AssertionError("invalid input must not reach the database")
+
+    context = TenantContext(TENANT_A)
+    ledger = PostgresDecisionLedger(forbidden_connection, context, PRINCIPAL_A)
+
+    def _row(**overrides):
+        fields = dict(
+            proposal_id="p1", thread_id="gmail:t1:100", domain="mail",
+            action="draft_reply", proposed_at=datetime.now(timezone.utc),
+        )
+        fields.update(overrides)
+        return LedgerRow(**fields)
+
+    with pytest.raises(ValueError, match="between 1 and 320"):
+        ledger.propose(_row(proposal_id=""))
+    with pytest.raises(ValueError, match="between 1 and 40"):
+        ledger.propose(_row(domain="x" * 41))
 
 
 @pytest.fixture(scope="module")

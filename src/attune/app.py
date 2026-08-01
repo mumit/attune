@@ -25,7 +25,9 @@ from .llm import make_client
 from .memory.base import MemoryStore
 from .memory.mem0_store import Mem0Store, build_mem0_config
 from .orchestrator import (
+    DecisionLedger,
     PermissionMatrix,
+    SqliteDecisionLedger,
     archive_draft_fn,
     build_draft_approve_graph,
     calendar_action_draft_fn,
@@ -47,6 +49,11 @@ class AppContext:
     store: MemoryStore
     settings: Settings
     audit_log: AuditLog
+    # Build prompt 26: the decision ledger (analytic state, not the trust
+    # root — audit_log above stays authoritative for authority decisions).
+    # Wired the same way audit_log is: injected here so the dispatcher and
+    # resume_workflow can write propose/decision-time rows.
+    ledger: "DecisionLedger | None" = None
     # Phase 3 stage 1 (docs/future-state.md, G9): the archive-proposal graph.
     # Same collaborators (client/store/matrix/checkpointer/importance_profile)
     # as ``graph``, compiled separately because its draft_fn (deterministic,
@@ -108,6 +115,7 @@ def build_app(
     importance_profile: Any = None,
     label_apply_fn: Any = None,
     calendar_action_apply_fn: Any = None,
+    ledger: "DecisionLedger | None" = None,
 ) -> AppContext:
     """Assemble the runtime from config and optional overrides.
 
@@ -144,6 +152,11 @@ def build_app(
                      ``orchestrator.make_calendar_action_apply_fn(connector)``.
                      Absent, apply is a no-op — matches ``apply_fn``'s own
                      default.
+
+    - *ledger*       via ``SqliteDecisionLedger(settings.ledger_db_path)``
+                     (build prompt 26) — the decision ledger; analytic
+                     state, not the trust root (``audit_log`` above stays
+                     authoritative). Wired the same way ``audit_log`` is.
 
     Pass fakes for all five in tests to keep the suite offline::
 
@@ -192,6 +205,9 @@ def build_app(
         build_mem0_config(settings=settings), client=resolved_client
     )
     resolved_audit_log: AuditLog = audit_log or JsonlAuditLog(settings.audit_log_path)
+    resolved_ledger: "DecisionLedger" = ledger or SqliteDecisionLedger(
+        settings.ledger_db_path
+    )
 
     resolved_importance_profile = importance_profile
     if resolved_importance_profile is None:
@@ -252,6 +268,7 @@ def build_app(
         store=resolved_store,
         settings=settings,
         audit_log=resolved_audit_log,
+        ledger=resolved_ledger,
         label_graph=label_graph,
         calendar_action_graph=calendar_action_graph,
         matrix=resolved_matrix or _default_matrix(),

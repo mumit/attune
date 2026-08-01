@@ -145,6 +145,12 @@ class Settings:
     importance_profile_path: str = "./importance_profile.json"
     nudge_state_path: str = "./nudge_state.json"
     retry_queue_db_path: str = "./source_retries.db"
+    # Build prompt 26: the decision ledger. A SQLite database (per
+    # docs/plan-2026-h2.md P2's instruction to land this in "the SQLite
+    # database that is already a dependency," not another JSON file — this
+    # table gets aggregated by `attune metrics`), same discipline as
+    # retry_queue_db_path above.
+    ledger_db_path: str = "./decision_ledger.db"
 
     approval_ignore_hours: int = 48
     converse_window_turns: int = 10
@@ -318,6 +324,7 @@ class Settings:
             importance_profile_path=_path("ATTUNE_IMPORTANCE_PATH", "importance_profile.json"),
             nudge_state_path=_path("ATTUNE_NUDGE_STATE_PATH", "nudge_state.json"),
             retry_queue_db_path=_path("ATTUNE_RETRY_QUEUE_DB_PATH", "source_retries.db"),
+            ledger_db_path=_path("ATTUNE_LEDGER_DB_PATH", "decision_ledger.db"),
             approval_ignore_hours=int(e.get("ATTUNE_APPROVAL_IGNORE_HOURS", "48")),
             converse_window_turns=int(e.get("ATTUNE_CONVERSE_WINDOW_TURNS", "10")),
             converse_ttl_minutes=int(e.get("ATTUNE_CONVERSE_TTL_MINUTES", "120")),

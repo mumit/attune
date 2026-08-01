@@ -356,6 +356,120 @@ def test_suggest_graduations_ignores_scoped_grants(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Build prompt 26: the standing "scoped grants can never be earned" bug fix
+# ---------------------------------------------------------------------------
+
+
+def _audit_file_with_scoped_decisions(tmp_path, decisions, *, priority="routine", tier=None):
+    """Like _audit_file_with_decisions, but the autonomy_gate event carries a
+    real scope_context — what a real mail dispatch (triage always sets a
+    priority) actually writes, unlike the bare fixture above."""
+    log = JsonlAuditLog(str(tmp_path / "audit.jsonl"))
+    for i, decision in enumerate(decisions):
+        tid = f"gmail:t{i}:100"
+        log.record(
+            thread_id=tid, workflow="draft_approve",
+            events=[{
+                "event": "autonomy_gate", "ts": NOW.isoformat(),
+                "action": "draft_reply", "domain": "mail",
+                "max_rung": 2, "routed_to": "approve",
+                "scope_context": {"priority": priority, "tier": tier, "matched_rung": 2},
+            }],
+            domain="mail", user_id="u1",
+        )
+        if decision is not None:
+            events = [{
+                "event": "human_decision", "ts": NOW.isoformat(), "decision": decision,
+            }]
+            if decision in ("approved", "edited"):
+                events.append({"event": "applied", "ts": NOW.isoformat()})
+            log.record(
+                thread_id=tid, workflow="draft_approve", events=events,
+                domain="mail", user_id="u1",
+            )
+    return log
+
+
+def test_scoped_grant_earns_graduation_via_scope_context(tmp_path):
+    """The fix: a track record accumulated under a REAL scope_context
+    (priority="routine") is now visible on its own terms and can earn a
+    SCOPED graduation suggestion — the standing bug this prompt fixes."""
+    log = _audit_file_with_scoped_decisions(tmp_path, ["approved"] * 12, priority="routine")
+
+    from attune.orchestrator.grants import track_records_by_scope
+
+    records = track_records_by_scope(log, now=NOW)
+    key = (Action.DRAFT_REPLY, Domain.MAIL, "routine", None)
+    assert records[key].total == 12 and records[key].approved == 12
+
+    suggestions = suggest_graduations(log, default_matrix(), now=NOW)
+    assert len(suggestions) == 1
+    s = suggestions[0]
+    assert s.scope == GrantScope(priorities=frozenset({"routine"}))
+    rendered = s.render()
+    assert "12/12" in rendered
+    assert "--priority routine" in rendered
+
+
+def test_graduation_withheld_when_coverage_fell(tmp_path):
+    """A track record that clears every other threshold is still withheld
+    when coverage (proposals ÷ eligible items) FELL over the window —
+    evidence of selection (proposing less), not competence."""
+    from attune.orchestrator.ledger import SqliteDecisionLedger
+
+    from attune.orchestrator.ledger import LedgerRow
+
+    log = _audit_file_with_scoped_decisions(tmp_path, ["approved"] * 12, priority="routine")
+    ledger = SqliteDecisionLedger(str(tmp_path / "ledger.db"))
+
+    first_half = NOW - timedelta(days=20)
+    second_half = NOW - timedelta(days=5)
+    # First half of the window: high coverage (6 proposals / 6 eligible).
+    for i in range(6):
+        pid = f"first-{i}"
+        ledger.propose(LedgerRow(
+            proposal_id=pid, thread_id=pid, domain="mail", action="draft_reply",
+            proposed_at=first_half, triage_priority="routine", sender_importance_tier=None,
+            eligible_item_count=6, batch_id="batch-first",
+        ))
+    # Second half: same 6 proposals but out of 30 eligible items -- coverage
+    # collapsed even though every proposal in the fixture above was approved.
+    for i in range(6):
+        pid = f"second-{i}"
+        ledger.propose(LedgerRow(
+            proposal_id=pid, thread_id=pid, domain="mail", action="draft_reply",
+            proposed_at=second_half, triage_priority="routine", sender_importance_tier=None,
+            eligible_item_count=30, batch_id="batch-second",
+        ))
+
+    suggestions = suggest_graduations(log, default_matrix(), now=NOW, ledger=ledger)
+    assert suggestions == []
+
+
+def test_graduation_still_suggested_when_coverage_held(tmp_path):
+    """Companion to the withheld case above: the guardrail doesn't just
+    always block — steady (or rising) coverage still earns the suggestion."""
+    from attune.orchestrator.ledger import LedgerRow, SqliteDecisionLedger
+
+    log = _audit_file_with_scoped_decisions(tmp_path, ["approved"] * 12, priority="routine")
+    ledger = SqliteDecisionLedger(str(tmp_path / "ledger.db"))
+
+    first_half = NOW - timedelta(days=20)
+    second_half = NOW - timedelta(days=5)
+    for half, ts in (("first", first_half), ("second", second_half)):
+        for i in range(6):
+            pid = f"{half}-{i}"
+            ledger.propose(LedgerRow(
+                proposal_id=pid, thread_id=pid, domain="mail", action="draft_reply",
+                proposed_at=ts, triage_priority="routine", sender_importance_tier=None,
+                eligible_item_count=6, batch_id=f"batch-{half}",
+            ))
+
+    suggestions = suggest_graduations(log, default_matrix(), now=NOW, ledger=ledger)
+    assert len(suggestions) == 1
+
+
+# ---------------------------------------------------------------------------
 # Demotion (Phase 4 item 5, docs/future-state.md) — graduation's mirror image
 # ---------------------------------------------------------------------------
 

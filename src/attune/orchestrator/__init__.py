@@ -72,6 +72,7 @@ from .grants import (
     suggest_demotions,
     suggest_graduations,
     track_records,
+    track_records_by_scope,
 )
 from .importance import (
     DECAY_DAYS,
@@ -81,6 +82,22 @@ from .importance import (
     JsonImportanceProfile,
     TierAssessment,
     assess_from_signals,
+)
+from .ledger import (
+    EDIT_SECTIONS,
+    ContextAttribution,
+    DecisionLedger,
+    EditMetrics,
+    LedgerRow,
+    MetricsSlice,
+    SqliteDecisionLedger,
+    classify_edit_sections,
+    compute_edit_metrics,
+    compute_metrics_slice,
+    record_decision,
+    record_proposal,
+    render_metrics_table,
+    window_rows,
 )
 from .pending import (
     JsonPendingApprovals,
@@ -126,6 +143,7 @@ __all__ = [
     "suggest_graduations",
     "suggest_demotions",
     "track_records",
+    "track_records_by_scope",
     "resolve_autonomy_card",
     "graduation_thread_id",
     "demotion_thread_id",
@@ -159,4 +177,18 @@ __all__ = [
     "from_attention_item",
     "from_calendar_event",
     "from_mail_thread",
+    "EDIT_SECTIONS",
+    "ContextAttribution",
+    "DecisionLedger",
+    "EditMetrics",
+    "LedgerRow",
+    "MetricsSlice",
+    "SqliteDecisionLedger",
+    "classify_edit_sections",
+    "compute_edit_metrics",
+    "compute_metrics_slice",
+    "record_decision",
+    "record_proposal",
+    "render_metrics_table",
+    "window_rows",
 ]

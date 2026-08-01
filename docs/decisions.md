@@ -2,6 +2,138 @@
 
 Newest first. This log records decisions that constrain current implementation.
 
+## 2026-07-31 — The decision ledger and the north-star metric (Phase P2, build prompt 26)
+
+Attune's audit log records *that* a human approved, edited, rejected, or
+ignored a proposal. It has never recorded **what was in context when the
+proposal was made** — which memory records, which model, which autonomy
+rung was granted versus actually used. Without that attribution, no
+learning mechanism (ACE-style per-bullet accounting, prompt 29; GEPA
+reflection over trajectories, prompt 36) can ever credit or blame a
+specific memory, prompt, or rule for a good or bad outcome. And no metric
+was computed anywhere in the codebase — there was no number that said
+whether the assistant was getting better.
+
+- **The decision ledger** (`orchestrator/ledger.py`): one row per proposal,
+  written at propose time (`record_proposal`) and completed at decision
+  time (`record_decision`, called from the single shared `resume_workflow`
+  path so every action type's decision-time fields land in one place).
+  Lands in **SQLite** (`SqliteDecisionLedger`, mirroring the existing
+  `SqliteRetryQueue` pattern — lazy init, WAL, owner-only permissions), not
+  another JSON file: this table gets aggregated by `attune metrics`, and
+  whole-file JSON reads are already a measured problem (P0). Explicitly
+  **analytic state, not the trust root** — the hash-chained audit log stays
+  authoritative for authority decisions; a ledger row is derived and may be
+  rebuilt from it, and every write site is best-effort (a ledger failure
+  must never break a decision path a human is waiting on).
+
+- **`context_attribution` is the point of this prompt.** The `retrieve`
+  node now threads `retrieved_memory_ids` (the exact `MemoryRecord.id` of
+  every snippet retrieved) into graph state, and `record_proposal` carries
+  them into the ledger row. Proven end to end
+  (`test_end_to_end_ledger_row_carries_exact_retrieved_memory_ids`): the
+  same ids a `FakeStore.search()` returned are exactly what the ledger row
+  reads back, before AND after the decision resolves.
+
+- **Edit measurement is deterministic and content-free.**
+  `compute_edit_metrics` promotes `signals.capture_correction`'s diff into
+  three numbers/labels: raw character distance (a plain Levenshtein DP —
+  bounded draft lengths make this cheap), normalized distance (0.0 =
+  verbatim, 1.0 = fully rewritten), and `edit_sections_changed`
+  (`classify_edit_sections`) — greeting/body/closing/tone, via
+  line-position and header heuristics over the draft's own text structure,
+  **never a model call** (this is a metric; it must not itself drift with
+  a model). `edit_semantic_similarity` is a deliberately-named deterministic
+  proxy (a word-level sequence-match ratio), not a real embedding/model-based
+  semantic score — building one is prompt 27's eval-harness territory. None
+  of this stores the draft or diff text itself; that stays where
+  `frame_memory_text`'s provenance rules already put it, in memory.
+
+- **North star: `mean(edit_distance_normalized | sent)`, coverage
+  mandatory alongside it.** `attune metrics` renders both, always together,
+  sliced by domain and by sender importance tier, over a 14-day rolling
+  window (configurable). **Coverage is never separable from edit burden.**
+  An assistant graded only on edit-burden-when-it-proposes can improve that
+  number by proposing only the easy, obviously-safe cases and staying
+  silent on everything hard — this is the RLUF failure mode
+  (`docs/landscape-2026.md` §5), quantified: reward-hacking through
+  selection, not competence. `coverage` is computed as proposals ÷ eligible
+  items, deduped by `batch_id` (every proposal from the same triage batch
+  shares one `eligible_item_count`, so summing per-row would double-count)
+  — the mail dispatch path (`handle_gmail_notification`/`submit_gmail_thread`)
+  is wired with a real batch id (the notification's Gmail `historyId`) and a
+  real eligible-item count (the triaged batch size); other proposal-creating
+  call sites (label/decline/reschedule/hold) are not yet wired to write a
+  ledger row at all — an intentionally scoped first cut, not a design
+  limitation, following the same "dormant until an executor is wired"
+  precedent `hosted/intelligence.py` already set for a different store.
+
+- **The scoped-grant graduation bug, found and fixed while building the
+  guardrail.** `suggest_graduations` pooled every decision for an
+  (action, domain) pair under one bare key and called
+  `matrix.max_rung(action, domain)` with NO priority/tier context — and
+  fail-closed scope matching means a SCOPED grant never matches missing
+  context. The practical effect: a scoped grant (e.g. `draft_reply`/`mail`
+  scoped to `priority=routine`) could never accumulate a track record
+  distinguishable from every other context on the pair, and could never be
+  suggested for graduation on its own evidence — "scoped grants can never
+  be earned." Fixed by `track_records_by_scope`, which re-keys by
+  `(action, domain, priority, tier)` read straight from the
+  `autonomy_gate` audit event's own `scope_context` field (already written,
+  never previously used for this), and by `suggest_graduations` now
+  calling `matrix.max_rung(action, domain, priority=priority, tier=tier)`
+  — the exact context each decision was gated under. Purely additive: a log
+  with no real scope context (every existing test fixture) collapses to
+  the old `(action, domain, None, None)` behavior byte-for-byte;
+  `test_scoped_grant_earns_graduation_via_scope_context` pins the fixed
+  behavior for a real one.
+
+- **The coverage guardrail on graduation itself.** `suggest_graduations`
+  takes an optional `ledger` parameter; when supplied, a track record that
+  clears every other bar is still withheld if coverage for that exact
+  (action, domain, priority, tier) slice **fell** from the first half of
+  the window to the second half (`_coverage_fell`) — a track record
+  accumulated while coverage was falling is not evidence of competence, it
+  is evidence of selection. Absent `ledger` (every pre-existing caller),
+  this check doesn't run — unchanged behavior; the guardrail is additive,
+  not a new required dependency. `test_graduation_withheld_when_coverage_fell`
+  and its companion `test_graduation_still_suggested_when_coverage_held`
+  pin both directions.
+
+- **Autonomy fields the ledger needed didn't exist on `PermissionMatrix`
+  yet.** Added `max_rung(..., ignore_urgent_cap=True)` — the rung a grant
+  nominally confers BEFORE the urgent-interrupt downgrade, never used for
+  routing, only for the ledger's `autonomy_rung_granted` field (contrasted
+  with the capped `autonomy_rung_used` to compute `escalation_rate`: "a
+  grant existed that would have allowed auto-apply, but this proposal
+  still reached a human"). And `scope_matched(...)` — whether a SCOPED
+  grant (not the unscoped one) matched this context at all, recorded
+  verbatim onto the ledger row.
+
+- **Hosted gets the same schema, not a second one.** `hosted/ledger.py`'s
+  `PostgresDecisionLedger` imports `LedgerRow`/`ContextAttribution`/
+  `compute_edit_metrics` from `orchestrator/ledger.py` — storage differs
+  (`sql/0048_decision_ledger.sql`, tenant-scoped, RLS-enforced), the
+  dataclasses and the aggregation math do not, following the
+  `hosted/intelligence.py` pattern exactly. One deliberate divergence from
+  that module's own precedent: `proposal_id`/`thread_id` and
+  `context_attribution`'s memory ids are stored as plain bounded text, not
+  keyed-HMAC hashes — they're already internal, tenant-scoped identifiers
+  this system generated, not externally-supplied low-entropy provider
+  references (the threat model `IntelligenceReferenceHasher` exists for).
+  Dormant: no executor wired yet, same posture `hosted/intelligence.py`
+  already ships with.
+
+- **Verification.** `tests/test_ledger.py` (28 tests): edit-metric
+  determinism, SQLite round-trips (propose idempotency, decision
+  completion, undo, filtering), exact aggregation math (coverage dedup,
+  median time-to-decision, edit burden), and the end-to-end
+  context-attribution test. `tests/test_grants.py`: three new tests for
+  the scoped-grant fix and the coverage guardrail (both directions).
+  `tests/test_hosted_db.py`: one new offline validation test plus the
+  updated migration-checksum pin. Full suite: 2005 passed, 57 skipped (was
+  1999 tracked + this change's new files; 34 new tests, zero regressions).
+
 ## 2026-07-31 — Reconnect the learning loop: discriminating signals, LOW-state recovery, bitemporal metadata (Phase P1, build prompt 25)
 
 **The semantic half of Attune's learning loop had never functioned.**

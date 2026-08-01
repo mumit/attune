@@ -69,9 +69,19 @@ class DraftApproveState(TypedDict, total=False):
     priority_adjusted: Optional[bool]  # whether the importance profile moved the
                                      # tier away from the model's own classification
                                      # (triage.TriageResult.adjusted)
+    base_priority: Optional[str]     # triage.TriageResult.base_priority — what the
+                                     # model itself classified, before any importance-
+                                     # profile adjustment (build prompt 26, the
+                                     # decision ledger's base_priority field).
 
     # --- working state (overwrite) ---
     retrieved_memories: list[str]    # preference/context snippets pulled pre-draft
+    retrieved_memory_ids: list[str]  # the MemoryRecord.id of each snippet above, in
+                                     # the same order (build prompt 26's
+                                     # context_attribution — this is the whole
+                                     # point of the decision ledger: without these
+                                     # ids, no learning mechanism can ever credit
+                                     # or blame a specific memory record).
     proposed_draft: Optional[str]    # what the assistant proposes
     final_text: Optional[str]        # what the human approved/edited (if any)
     decision: Optional[Decision]

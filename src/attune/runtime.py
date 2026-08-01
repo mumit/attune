@@ -298,6 +298,7 @@ class Runtime:
             retry_queue=self.retry_queue,
             mail_labels_enabled=self.settings.mail_labels_enabled,
             mail_send_enabled=self.settings.mail_send_enabled,
+            ledger=self.app.ledger,
         )
 
     def process_chat_event(self, event: dict[str, Any]) -> None:
@@ -1520,6 +1521,7 @@ def _resolve_resume(
         audit_log=app.audit_log,
         user_id=settings.user_id,
         actor=actor,
+        ledger=app.ledger,
     )
 
 

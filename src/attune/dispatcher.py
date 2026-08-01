@@ -103,6 +103,7 @@ from .orchestrator.attention import AttentionItem
 from .orchestrator.autonomy import Action, Domain, Rung
 from .orchestrator.draft_approve import apply_confirmation
 from .orchestrator.importance import ImportanceTier
+from .orchestrator.ledger import record_proposal
 from .orchestrator.scheduling import ConflictResult, detect_conflict, propose_free_slots
 from .orchestrator.triage import Priority, TriageResult, triage_thread
 
@@ -324,6 +325,7 @@ def handle_gmail_notification(
     retry_queue: Any = None,
     mail_labels_enabled: bool = False,
     mail_send_enabled: bool = False,
+    ledger: Any = None,
 ) -> list[str]:
     """Process a decoded Gmail Pub/Sub notification.
 
@@ -381,6 +383,17 @@ def handle_gmail_notification(
     Audited (without ``retry_queue`` present, overflow is still audited but
     cannot be enqueued — the same accepted limitation the fetch-failure
     path already has).
+
+    ``ledger`` (build prompt 26, ``orchestrator.ledger.DecisionLedger``),
+    when supplied, gets a propose-time decision-ledger row for each
+    draft_reply/follow_up/send_reply proposal, with ``eligible_item_count``
+    set to the size of this notification's own triaged batch
+    (``len(batch_thread_ids)``) and ``batch_id`` set to the notification's
+    ``historyId`` — every proposal from the same notification shares one
+    batch, which is what makes the coverage metric's denominator correct
+    (see ``orchestrator/ledger.py``'s module docstring). Absent, no ledger
+    row is written for this run (analytic state; never required for the
+    workflow itself to function).
     """
     triage_fn = triage_fn or _default_triage
     changes = process_notification(gmail_service, watch_state, notification)
@@ -474,6 +487,8 @@ def handle_gmail_notification(
                 connector=connector, mail_labels_enabled=mail_labels_enabled,
                 mail_send_enabled=mail_send_enabled,
                 label_offerable=label_offerable,
+                ledger=ledger, eligible_item_count=len(batch_thread_ids),
+                batch_id=changes.new_history_id,
             )
         except Exception as exc:  # noqa: BLE001 — cursor already advanced
             if retry_queue is None:
@@ -535,6 +550,9 @@ def submit_gmail_thread(
     mail_labels_enabled: bool = False,
     mail_send_enabled: bool = False,
     label_offerable: list | None = None,
+    ledger: Any = None,
+    eligible_item_count: int | None = None,
+    batch_id: str | None = None,
 ) -> str | None:
     """Process one already-fetched thread, including durable retry replays.
 
@@ -611,6 +629,7 @@ def submit_gmail_thread(
         "subject": thread.subject,
         "priority": triage.priority.value,
         "priority_adjusted": triage.adjusted,
+        "base_priority": triage.base_priority.value if triage.base_priority else None,
         "source_snapshot": (
             thread.last_message_at.isoformat()
             if getattr(thread, "last_message_at", None) is not None else None
@@ -632,6 +651,11 @@ def submit_gmail_thread(
             events=[triage_event] + list(result.get("audit_events", [])),
             domain="mail", user_id=user_id,
         )
+    record_proposal(
+        ledger, thread_id=lg_tid, domain="mail", action=action, result=result,
+        model_id=model_for(Task.DRAFT),
+        eligible_item_count=eligible_item_count, batch_id=batch_id,
+    )
     rung = _auto_rung(result)
     if rung is not None:
         notify_text = None

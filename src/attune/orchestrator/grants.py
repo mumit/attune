@@ -80,6 +80,7 @@ from .autonomy import (
     ScopedGrant,
 )
 from .importance import ImportanceTier
+from .ledger import compute_metrics_slice
 from .triage import Priority
 
 GRADUATION_MIN_DECISIONS = 10
@@ -394,14 +395,23 @@ class TrackRecord:
 class GraduationSuggestion:
     record: TrackRecord
     to_rung: Rung = Rung.ACT_NOTIFY
+    # Build prompt 26: the (priority, tier) context this record was earned
+    # under, as a grant scope — None (the common case: an action with no
+    # priority/tier context, e.g. LABEL/DECLINE_INVITE/RESCHEDULE/CREATE_HOLD)
+    # suggests the unscoped grant, exactly as before this field existed. Set
+    # when the underlying track record was accumulated under a specific
+    # signal context (see suggest_graduations' scoped bug fix below).
+    scope: GrantScope | None = None
 
     def render(self) -> str:
         r = self.record
+        flags = _scope_cli_flags(self.scope)
+        scope_note = f" (scoped to {render_scope(self.scope)})" if self.scope is not None else ""
         return (
             f"{r.approved}/{r.total} {r.action.value} proposals on "
-            f"{r.domain.value} approved unedited — consider graduating to "
-            f"{self.to_rung.name}: attune autonomy grant "
-            f"{r.action.value} {r.domain.value} {self.to_rung.name.lower()}"
+            f"{r.domain.value}{scope_note} approved unedited — consider "
+            f"graduating to {self.to_rung.name}: attune autonomy grant "
+            f"{r.action.value} {r.domain.value} {self.to_rung.name.lower()}{flags}"
         )
 
 
@@ -466,6 +476,106 @@ def track_records(
     return records
 
 
+def track_records_by_scope(
+    audit_log: Any,
+    *,
+    window_days: int = 30,
+    now: datetime | None = None,
+) -> dict[tuple[Action, Domain, "str | None", "str | None"], TrackRecord]:
+    """Like :func:`track_records`, but keyed by ``(action, domain, priority,
+    tier)`` — read straight from each ``autonomy_gate`` event's own
+    ``scope_context`` field (``draft_approve.gate`` always writes one).
+
+    This is the fix for the standing bug that **scoped grants can never be
+    earned**: :func:`track_records`/the old :func:`suggest_graduations`
+    pooled every decision for a pair under one bare ``(action, domain)``
+    key and checked ``matrix.max_rung(action, domain)`` with NO priority/
+    tier context — fail-closed scope matching means a SCOPED grant never
+    matches missing context, so it was invisible to that check regardless
+    of how the matrix was actually configured, and its own decisions were
+    pooled anonymously with every other context on the pair rather than
+    building a track record of their own. Keying by the exact (priority,
+    tier) context each decision was gated under makes a scoped grant's
+    evidence visible on its own terms.
+
+    A legacy audit entry with no ``scope_context`` (or any audit-log fixture
+    that never set one) falls back to ``(action, domain, None, None)`` —
+    purely additive: a log with no real scope context behaves exactly as
+    :func:`track_records` already did for that pair.
+    """
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(days=window_days)
+    entries = audit_log.query(since=since)
+
+    scope: dict[str, tuple[Action, Domain, str | None, str | None]] = {}
+    outcome: dict[str, str] = {}
+    execution: dict[str, str] = {}
+    for entry in entries:
+        if entry.event == "autonomy_gate":
+            try:
+                action = Action(entry.fields.get("action"))
+                domain = Domain(entry.fields.get("domain") or entry.domain)
+            except ValueError:
+                continue
+            ctx = entry.fields.get("scope_context") or {}
+            scope[entry.thread_id] = (action, domain, ctx.get("priority"), ctx.get("tier"))
+        elif entry.event == "human_decision":
+            outcome[entry.thread_id] = entry.fields.get("decision", "")
+        elif entry.event == "approval_ignored":
+            outcome.setdefault(entry.thread_id, "ignored")
+        elif entry.event == "applied":
+            execution[entry.thread_id] = "applied"
+        elif entry.event in ("apply_failed", "apply_skipped"):
+            execution.setdefault(entry.thread_id, "failed")
+
+    records: dict[tuple[Action, Domain, str | None, str | None], TrackRecord] = {}
+    for tid, key in scope.items():
+        decision = outcome.get(tid)
+        if decision not in ("approved", "edited", "rejected", "ignored"):
+            continue  # still pending, or auto_applied
+        record = records.setdefault(key, TrackRecord(action=key[0], domain=key[1]))
+        setattr(record, decision, getattr(record, decision) + 1)
+        if decision in ("approved", "edited"):
+            status = execution.get(tid)
+            if status == "applied":
+                record.applied += 1
+            else:
+                record.apply_failed += 1
+    return records
+
+
+def _coverage_fell(
+    ledger: Any,
+    *,
+    action: Action,
+    domain: Domain,
+    priority: "str | None",
+    tier: "str | None",
+    window_days: int,
+    now: datetime,
+) -> bool:
+    """True if this exact (action, domain, priority, tier) slice's coverage
+    (proposals ÷ eligible items) fell from the first half of the window to
+    the second half — evidence the track record was earned by proposing
+    LESS, not by getting better (the RLUF failure mode,
+    ``docs/plan-2026-h2.md`` P2). Absent enough ledger data to compute both
+    halves, this does not block — a coverage floor needs a trend to judge,
+    and an empty ledger must not silently veto every graduation forever."""
+    since = now - timedelta(days=window_days)
+    midpoint = now - timedelta(days=window_days / 2)
+    rows = [
+        r for r in ledger.rows(since=since, domain=domain.value, action=action.value)
+        if r.triage_priority == priority and r.sender_importance_tier == tier
+    ]
+    first_half = [r for r in rows if r.proposed_at < midpoint]
+    second_half = [r for r in rows if r.proposed_at >= midpoint]
+    first_coverage = compute_metrics_slice(first_half).coverage
+    second_coverage = compute_metrics_slice(second_half).coverage
+    if first_coverage is None or second_coverage is None:
+        return False
+    return second_coverage < first_coverage
+
+
 def suggest_graduations(
     audit_log: Any,
     matrix: PermissionMatrix,
@@ -474,19 +584,30 @@ def suggest_graduations(
     min_decisions: int = GRADUATION_MIN_DECISIONS,
     min_approval_rate: float = GRADUATION_MIN_APPROVAL_RATE,
     now: datetime | None = None,
+    ledger: Any = None,
 ) -> list[GraduationSuggestion]:
     """Suggestions — information only, never applied by code (rule 3).
 
-    Bar (per (action, domain), over the window): at least ``min_decisions``
-    human decisions, an unedited-approval rate at or above
-    ``min_approval_rate``, zero rejections, a successful apply for every
-    accepted proposal, and currently below ACT_NOTIFY.
+    Bar (per (action, domain, priority, tier) context, over the window): at
+    least ``min_decisions`` human decisions, an unedited-approval rate at or
+    above ``min_approval_rate``, zero rejections, a successful apply for
+    every accepted proposal, and this exact context currently below
+    ACT_NOTIFY (see :func:`track_records_by_scope` for why this is keyed by
+    context rather than the bare pair — the scoped-grant bug fix).
+
+    ``ledger`` (build prompt 26), when supplied, adds the coverage
+    guardrail: a track record accumulated while coverage was FALLING over
+    the window is withheld (:func:`_coverage_fell`) — evidence of
+    selection, not competence. Absent ``ledger`` (every pre-existing
+    caller), this check is skipped entirely, unchanged behavior.
     """
+    now = now or datetime.now(timezone.utc)
     suggestions: list[GraduationSuggestion] = []
-    for key, record in track_records(
+    for key, record in track_records_by_scope(
         audit_log, window_days=window_days, now=now
     ).items():
-        if matrix.max_rung(*key) >= Rung.ACT_NOTIFY:
+        action, domain, priority, tier = key
+        if matrix.max_rung(action, domain, priority=priority, tier=tier) >= Rung.ACT_NOTIFY:
             continue
         if record.total < min_decisions or record.rejected > 0:
             continue
@@ -495,7 +616,18 @@ def suggest_graduations(
             continue
         if record.approved / record.total < min_approval_rate:
             continue
-        suggestions.append(GraduationSuggestion(record=record))
+        if ledger is not None and _coverage_fell(
+            ledger, action=action, domain=domain, priority=priority, tier=tier,
+            window_days=window_days, now=now,
+        ):
+            continue
+        scope: GrantScope | None = None
+        if priority is not None or tier is not None:
+            scope = GrantScope(
+                priorities=frozenset({priority}) if priority is not None else None,
+                tiers=frozenset({tier}) if tier is not None else None,
+            )
+        suggestions.append(GraduationSuggestion(record=record, scope=scope))
     return suggestions
 
 

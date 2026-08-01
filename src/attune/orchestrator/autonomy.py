@@ -177,6 +177,7 @@ class PermissionMatrix:
         *,
         priority: "str | None" = None,
         tier: "str | None" = None,
+        ignore_urgent_cap: bool = False,
     ) -> Rung:
         """The highest rung any matching grant confers for this context.
 
@@ -184,14 +185,24 @@ class PermissionMatrix:
         only unscoped grants can match — fail-closed matching means a scoped
         predicate never matches missing context — so this is byte-identical
         to the pre-scoping behavior. The URGENT interrupt rule (module
-        docstring) is applied per matching grant before taking the max.
+        docstring) is applied per matching grant before taking the max,
+        unless ``ignore_urgent_cap`` is set.
+
+        ``ignore_urgent_cap`` (build prompt 26, the decision ledger): reports
+        the rung a grant nominally confers BEFORE the urgent-interrupt
+        downgrade — the ledger's ``autonomy_rung_granted`` field, contrasted
+        with the capped ``autonomy_rung_used`` (this method's default
+        behavior) to compute the escalation-rate metric ("a grant existed
+        that would have allowed auto-apply, but this proposal still reached
+        a human"). Never used for the actual gate/routing decision — only
+        for recording what the grant *would* have allowed.
         """
         best = Rung.READ_ONLY
         for sg in self.grants.get((action, domain), ()):
             if sg.scope is not None and not sg.scope.matches(priority, tier):
                 continue
             rung = sg.rung
-            if priority == "urgent" and rung > Rung.PROPOSE:
+            if not ignore_urgent_cap and priority == "urgent" and rung > Rung.PROPOSE:
                 urgent_scoped = (
                     sg.scope is not None
                     and sg.scope.priorities is not None
@@ -202,6 +213,23 @@ class PermissionMatrix:
             if rung > best:
                 best = rung
         return best
+
+    def scope_matched(
+        self,
+        action: Action,
+        domain: Domain,
+        *,
+        priority: "str | None" = None,
+        tier: "str | None" = None,
+    ) -> bool:
+        """True if a SCOPED grant (not the unscoped one) for (action, domain)
+        matches this context — i.e. autonomy here was earned/limited by a
+        signal-scoped grant rather than only an unscoped one. Recorded onto
+        every decision-ledger row (build prompt 26) as ``scope_matched``."""
+        return any(
+            sg.scope is not None and sg.scope.matches(priority, tier)
+            for sg in self.grants.get((action, domain), ())
+        )
 
     def allows(
         self,

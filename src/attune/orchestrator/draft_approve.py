@@ -163,8 +163,15 @@ def build_draft_approve_graph(
         snippets = [
             frame_memory_text(m.text, getattr(m, "metadata", None)) for m in mems
         ]
+        # Build prompt 26's context_attribution: the whole point of the
+        # decision ledger is knowing WHICH memory records were in context, not
+        # just how many. Carried in the same order as ``snippets`` so a
+        # future per-bullet accounting pass (prompt 29) can zip them back
+        # together if it ever needs to.
+        memory_ids = [m.id for m in mems]
         return {
             "retrieved_memories": snippets,
+            "retrieved_memory_ids": memory_ids,
             "iteration_count": state.get("iteration_count", 0) + 1,
             "audit_events": [_audit("retrieved", count=len(snippets))],
         }
@@ -209,15 +216,28 @@ def build_draft_approve_graph(
         priority = state.get("priority")
         sender = state.get("sender")
         tier: str | None = None
+        profile_reason: str | None = None
         if importance_profile is not None and sender:
             try:
-                tier = importance_profile.assess(sender).tier.value
+                assessment = importance_profile.assess(sender)
+                tier = assessment.tier.value
+                profile_reason = assessment.reason
             except Exception:  # noqa: BLE001 — an assessment failure must
                 # never surface as a crash here; it just means this context
                 # can't be enriched, and fail-closed scope matching already
                 # treats a missing tier as "no scoped grant applies."
                 tier = None
+                profile_reason = None
         matched_rung = current.max_rung(action, domain, priority=priority, tier=tier)
+        # Build prompt 26 (the decision ledger): the rung this grant would
+        # confer BEFORE the urgent-interrupt downgrade, contrasted with
+        # ``matched_rung`` (the capped, actually-used rung) to compute the
+        # ledger's escalation-rate metric. Never used for routing —
+        # ``matched_rung`` (below) still decides auto_apply vs. approve.
+        granted_rung = current.max_rung(
+            action, domain, priority=priority, tier=tier, ignore_urgent_cap=True
+        )
+        scope_matched = current.scope_matched(action, domain, priority=priority, tier=tier)
         autonomous_ok = Rung.ACT_NOTIFY <= matched_rung
         target = "auto_apply" if autonomous_ok else "approve"
         return Command(
@@ -235,6 +255,9 @@ def build_draft_approve_graph(
                             "tier": tier,
                             "matched_rung": int(matched_rung),
                         },
+                        autonomy_rung_granted=int(granted_rung),
+                        scope_matched=scope_matched,
+                        profile_reason=profile_reason,
                     )
                 ]
             },
@@ -427,6 +450,7 @@ def resume_workflow(
     audit_log: Any = None,
     user_id: str | None = None,
     actor: str | None = None,
+    ledger: Any = None,
 ) -> Any:
     """Resume a paused draft-approve workflow with a human decision.
 
@@ -447,6 +471,13 @@ def resume_workflow(
     domain comes from the result state — never hardcoded per channel — and
     ``actor`` (who clicked, prompt 17) is stamped onto ``human_decision``.
     Audit failures never break a resume (best-effort, logged).
+
+    ``ledger`` (build prompt 26, ``orchestrator.ledger.DecisionLedger``),
+    when supplied, completes the decision-ledger row here — the single
+    shared resume path is exactly where every action type's decision-time
+    fields (decision, edit metrics, applied_ok, ...) become known at once,
+    regardless of which dispatcher call site proposed it. Best-effort, same
+    posture as ``audit_log`` above.
     """
     from langgraph.types import Command
 
@@ -491,6 +522,12 @@ def resume_workflow(
                 logging.getLogger(__name__).warning(
                     "resume audit record failed for %s", thread_id, exc_info=True
                 )
+
+    if ledger is not None and isinstance(result, dict):
+        from .ledger import record_decision
+
+        record_decision(ledger, thread_id=thread_id, result=result, actor=actor)
+
     return result
 
 
