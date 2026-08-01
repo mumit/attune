@@ -151,12 +151,16 @@ class LedgerRow:
     autonomy_rung_used: int | None = None
     scope_matched: bool = False
 
-    # Model layer floor (prompt 28) hasn't landed yet: prompt_version and
-    # playbook_commit (prompt 29) are recorded as None until those prompts
-    # populate them for real.
+    # Model layer floor (prompt 28): model_id/prompt_version/token usage/
+    # cache_hit are now populated from the draft-approve graph's ``drafted``
+    # audit event (see _row_from_propose_result). playbook_commit
+    # (prompt 29) still isn't -- recorded as None until that prompt lands.
     model_id: str | None = None
-    prompt_version: str | None = None
+    prompt_version: int | None = None
     playbook_commit: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_hit: bool | None = None
 
     context_attribution: ContextAttribution = field(default_factory=ContextAttribution)
 
@@ -359,7 +363,7 @@ CREATE TABLE IF NOT EXISTS decision_ledger (
     autonomy_rung_used INTEGER,
     scope_matched INTEGER NOT NULL DEFAULT 0,
     model_id TEXT,
-    prompt_version TEXT,
+    prompt_version INTEGER,
     playbook_commit TEXT,
     context_attribution TEXT NOT NULL DEFAULT '{}',
     triage_priority TEXT,
@@ -379,7 +383,10 @@ CREATE TABLE IF NOT EXISTS decision_ledger (
     applied_ok INTEGER,
     apply_skip_reason TEXT,
     undone INTEGER NOT NULL DEFAULT 0,
-    undone_at TEXT
+    undone_at TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_hit INTEGER
 )
 """
 
@@ -392,6 +399,7 @@ _COLUMNS = (
     "decision", "decided_at", "actor_ref", "time_to_decision_seconds",
     "edit_char_distance", "edit_distance_normalized", "edit_semantic_similarity",
     "edit_sections_changed", "applied_ok", "apply_skip_reason", "undone", "undone_at",
+    "input_tokens", "output_tokens", "cache_hit",
 )
 
 
@@ -448,6 +456,24 @@ class SqliteDecisionLedger:
                 "CREATE INDEX IF NOT EXISTS decision_ledger_domain_action "
                 "ON decision_ledger (domain, action)"
             )
+            # Build prompt 28: a database created before token usage/cache
+            # tracking existed has ``CREATE TABLE IF NOT EXISTS`` skip these
+            # new columns entirely, so a lightweight in-place migration adds
+            # them here. Each is independently guarded: "duplicate column"
+            # (the fresh-database case, where _SCHEMA above already created
+            # it) is the one expected failure and is swallowed; anything
+            # else re-raises.
+            for column, sqltype in (
+                ("input_tokens", "INTEGER"), ("output_tokens", "INTEGER"),
+                ("cache_hit", "INTEGER"),
+            ):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE decision_ledger ADD COLUMN {column} {sqltype}"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
         # Security posture (finding F5 elsewhere in this codebase): owner-only
         # regardless of process umask, self-healing on every initialize.
         for suffix in ("", "-wal", "-shm"):
@@ -480,6 +506,7 @@ class SqliteDecisionLedger:
             _json_dumps(list(row.edit_sections_changed)),
             _as_int_or_none(row.applied_ok), row.apply_skip_reason,
             int(row.undone), _iso(row.undone_at),
+            row.input_tokens, row.output_tokens, _as_int_or_none(row.cache_hit),
         )
         placeholders = ", ".join("?" for _ in _COLUMNS)
         with self._connect() as conn:
@@ -647,6 +674,9 @@ def _row_from_sqlite(record: Sequence[Any]) -> LedgerRow:
         apply_skip_reason=values["apply_skip_reason"],
         undone=bool(values["undone"]),
         undone_at=_parse_iso(values["undone_at"]),
+        input_tokens=values["input_tokens"],
+        output_tokens=values["output_tokens"],
+        cache_hit=_as_bool_or_none(values["cache_hit"]),
     )
 
 
@@ -730,6 +760,14 @@ def _row_from_propose_result(
         (e for e in events if e.get("event") == "autonomy_gate"), None
     ) or {}
     scope_context = gate_event.get("scope_context") or {}
+    # Build prompt 28: prompt_version and token usage/cache-hit are already
+    # on the graph's own "drafted" audit event (draft_approve.py's ``draft``
+    # node) -- read from there, the same "Build once" pattern gate_event
+    # above already uses, rather than threading new parameters through
+    # every one of record_proposal's callers.
+    drafted_event = next(
+        (e for e in events if e.get("event") == "drafted"), None
+    ) or {}
     return LedgerRow(
         proposal_id=thread_id,
         thread_id=thread_id,
@@ -740,6 +778,7 @@ def _row_from_propose_result(
         autonomy_rung_used=gate_event.get("max_rung"),
         scope_matched=bool(gate_event.get("scope_matched", False)),
         model_id=model_id,
+        prompt_version=drafted_event.get("prompt_version"),
         context_attribution=ContextAttribution(
             memory_ids=tuple(result.get("retrieved_memory_ids") or ()),
         ),
@@ -749,6 +788,9 @@ def _row_from_propose_result(
         profile_reason=gate_event.get("profile_reason"),
         eligible_item_count=eligible_item_count,
         batch_id=batch_id,
+        input_tokens=drafted_event.get("input_tokens"),
+        output_tokens=drafted_event.get("output_tokens"),
+        cache_hit=drafted_event.get("cache_hit"),
     )
 
 
@@ -807,6 +849,13 @@ class MetricsSlice:
     coverage: float | None
     undo_rate: float | None
     escalation_rate: float | None
+    # Build prompt 28: token spend and cache-hit rate, over rows that
+    # recorded usage (the draft-approve graph's default draft_fn) -- None
+    # when no row in the slice ever recorded usage, so the table renders
+    # "—" rather than a misleading zero.
+    total_input_tokens: int | None
+    total_output_tokens: int | None
+    cache_hit_rate: float | None
 
 
 def _median(values: Sequence[float]) -> float | None:
@@ -876,6 +925,15 @@ def compute_metrics_slice(rows: Sequence[LedgerRow], *, label: str = "all") -> M
     )
     escalation_rate = escalations / grant_eligible if grant_eligible else None
 
+    metered = [r for r in rows if r.input_tokens is not None or r.output_tokens is not None]
+    total_input = sum(r.input_tokens or 0 for r in metered) if metered else None
+    total_output = sum(r.output_tokens or 0 for r in metered) if metered else None
+    cache_reported = [r for r in rows if r.cache_hit is not None]
+    cache_hit_rate = (
+        sum(1 for r in cache_reported if r.cache_hit) / len(cache_reported)
+        if cache_reported else None
+    )
+
     return MetricsSlice(
         label=label,
         proposals=len(rows),
@@ -886,6 +944,9 @@ def compute_metrics_slice(rows: Sequence[LedgerRow], *, label: str = "all") -> M
         coverage=coverage,
         undo_rate=undo_rate,
         escalation_rate=escalation_rate,
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+        cache_hit_rate=cache_hit_rate,
     )
 
 
@@ -922,7 +983,8 @@ def render_metrics_table(
 
     header = (
         f"{'slice':<20} {'proposals':>9} {'decided':>7} {'edit_burden':>11} "
-        f"{'clean%':>7} {'p50_ttd_s':>10} {'coverage':>8} {'undo%':>7} {'escal%':>7}"
+        f"{'clean%':>7} {'p50_ttd_s':>10} {'coverage':>8} {'undo%':>7} {'escal%':>7} "
+        f"{'in_tok':>8} {'out_tok':>8} {'cache%':>7}"
     )
     lines.append(header)
 
@@ -932,7 +994,9 @@ def render_metrics_table(
             f"{_fmt(m.edit_burden):>11} {_fmt_pct(m.clean_approval_rate):>7} "
             f"{_fmt(m.p50_time_to_decision_seconds):>10} "
             f"{_fmt_pct(m.coverage):>8} {_fmt_pct(m.undo_rate):>7} "
-            f"{_fmt_pct(m.escalation_rate):>7}"
+            f"{_fmt_pct(m.escalation_rate):>7} "
+            f"{_fmt_int(m.total_input_tokens):>8} {_fmt_int(m.total_output_tokens):>8} "
+            f"{_fmt_pct(m.cache_hit_rate):>7}"
         )
 
     lines.append(_row_line(compute_metrics_slice(scoped, label="(all)")))
@@ -962,3 +1026,7 @@ def _fmt(value: float | None) -> str:
 
 def _fmt_pct(value: float | None) -> str:
     return "—" if value is None else f"{value * 100:.0f}%"
+
+
+def _fmt_int(value: int | None) -> str:
+    return "—" if value is None else f"{value:,}"

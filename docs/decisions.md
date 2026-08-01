@@ -3812,3 +3812,136 @@ key before treating a file as an OAuth user credential.
   new test — the rewritten test plus one newly added). `docs/deployment.md`
   and `docs/configuration.md` corrected to stop implying a `"type"` field
   is required or expected.
+
+## 2026-07-31 — The model layer floor: prompt registry, capability probing, caching, structured output, tool calling (Phase P3, build prompt 28)
+
+Closes `docs/plan-2026-h2.md` P3. `llm.py` was 57 lines of bare
+`chat.completions.create`: zero `tools=`, zero `response_format`, zero
+`cache_control`, zero streaming, no `max_tokens`, no timeout, no retry, and
+`response.usage` was never read. The seven production prompts were inline
+string literals with no version identifier, so nothing tied a recorded
+model output to the prompt that produced it.
+
+- **"Provider-neutral" is read as graceful degradation, not a capability
+  floor.** `CLAUDE.md`'s boundary requires configuring gateways through the
+  official OpenAI SDK; it does not require refusing every feature a
+  gateway might not support. `llm.ModelCapabilities` (`supports_tools`,
+  `supports_structured_output`, `supports_prompt_cache`, plus the call-
+  hygiene knobs `max_tokens`/`timeout_seconds`/`max_retries`) is resolved
+  once from `Settings` — explicit configuration, defaulting to off — never
+  sniffed from an untrusted provider response, mirroring
+  `connectors/base.py`'s existing `supports_*()` probes. Every feature
+  below is used when the capability is declared and degrades to exactly
+  today's request shape when it isn't.
+- **Gate-off is byte-identical, not merely "should be."** Every new kwarg
+  (`response_format`, `tools`, `tool_choice`, `max_tokens`, `timeout`) is
+  built conditionally into a plain dict and merged in — never a literal
+  `None` passed to the SDK — the same precedent the tenant-model-profiles
+  entry established. `llm.call_with_retry` at the default `max_retries=0`
+  calls its function exactly once and re-raises immediately, identical to
+  every call site's behavior before it existed. A test asserts the exact
+  request dict produced at every capability's off state (`test_model_layer.py`).
+- **The prompt registry (`prompts.py`) splits stable from volatile without
+  changing a single byte of existing prompt content.** Every one of the
+  production system prompts — triage, draft, brief, memory consolidation,
+  the dispatcher's converse and live-source answers, the interaction
+  planner, and the two hosted Google Chat prompts — is now a named,
+  versioned `Prompt(name, version, stable_prefix)`, with the volatile
+  suffix (this thread, these memories, this playbook slice) still built by
+  the call site exactly as before. `render_system_message` concatenates
+  `stable_prefix + volatile_suffix` into one string when the gateway hasn't
+  declared cache support (byte-identical), or splits them into two content
+  parts with `cache_control` on the prefix only when it has. Two prompts
+  needed a real split, not just a rename, to keep their prefix genuinely
+  stable: the hosted converse prompt's per-call local datetime/timezone
+  moved out of the "stable" text into the volatile suffix (it changes every
+  second, so leaving it in the prefix would defeat caching entirely), and
+  the live-source prompt's `{source_kind}` placeholder stays a two-value
+  parametrized prefix (Gmail/Calendar), not a fully dynamic one.
+- **Prompt caching's TTL tradeoff, made explicit rather than picked
+  arbitrarily.** A longer cache TTL costs more on write and only pays back
+  when the predictable cache lifetime exceeds it; bursty traffic on a short
+  TTL repeatedly pays write cost without recovering it. This build ships
+  the mechanism (`cache_control: {"type": "ephemeral"}` on the stable
+  content part) and leaves TTL selection to the configured gateway's own
+  default rather than guessing a number without production traffic data to
+  size it against — a deliberate scope cut, revisit once cache hit/miss is
+  actually observed in `attune metrics`.
+- **Structured output replaces two-line/free-text parsing where a schema
+  already existed, with the text parse kept as the unconditional fallback.**
+  Triage's `_parse_triage_response` tries a JSON parse first
+  (`{"priority": ..., "reason": ...}`) and falls through to the original
+  `PRIORITY:`/`REASON:` line parse on any failure — a gateway that never
+  declares the capability never sends JSON, so the JSON attempt simply
+  fails and falls through unchanged. Consolidation's plan is already JSON
+  (`_parse_consolidation_plan`); declaring `response_format` just makes the
+  contract explicit to a gateway that supports it. Both keep their
+  existing fail-closed defaults untouched: a malformed triage response of
+  either shape still yields ROUTINE, and a malformed consolidation plan of
+  either shape still mutates nothing.
+- **Native tool calling replaces exactly one text-parsed decision — the
+  interaction planner's four-line `INTENT`/`GMAIL_QUERY`/`START`/`END`
+  contract — never an open tool loop.** `docs/design.md` forbids an
+  unrestricted tool loop; this ships a single forced call to one `emit_plan`
+  tool with the identical field set, parsed by the same
+  `_plan_from_fields` the text path uses (`_fields_from_text`/
+  `_fields_from_tool_call` both produce the same field shape). The three
+  deterministic keyword-fallback overrides in `plan_interaction` (an
+  imperative mutation always wins as WRITE; the model can't turn an
+  obvious read into GENERAL; BRIEF never overrides a clear CALENDAR
+  fallback) apply identically to both the tool-call and text-parse paths —
+  they are a safety control over the *parsed plan*, not a workaround for a
+  parsing format, and nothing about this build touches them.
+- **Token usage and cache hit/miss are threaded through without changing
+  any injectable seam's signature.** `draft_approve.py`'s `draft` node
+  detects whether the compiled `draft_fn` declares an optional
+  `capabilities`/`usage_sink` keyword via signature introspection
+  (`_accepts_kwarg`, mirroring `dispatcher._accepts_keyword`'s existing
+  pattern) and only passes them when it does — `_default_draft_fn` is the
+  only one that does today; the fixed, model-free `archive_draft_fn`/
+  `calendar_action_draft_fn` and every existing test-injected `draft_fn`
+  fake are unaffected. `prompt_version`, `input_tokens`, `output_tokens`,
+  and `cache_hit` land on the `drafted` audit event exactly like `model`
+  already did unconditionally, and `orchestrator.ledger._row_from_propose_result`
+  reads them off that event — the same "Build once" pattern
+  `gate_event`/`autonomy_gate` extraction already established — rather
+  than threading three new parameters through `record_proposal` and every
+  one of its callers. `LedgerRow` gained `input_tokens`/`output_tokens`/
+  `cache_hit` columns via an in-place `ALTER TABLE` migration guarded
+  against "duplicate column" (the fresh-database case, where `CREATE TABLE
+  IF NOT EXISTS` already created them). `attune metrics` renders total
+  input/output tokens and cache-hit rate per slice, `—` when a slice never
+  recorded usage (rather than a misleading zero). Triage and brief have no
+  ledger row of their own (triage writes only an audit event; brief is
+  read-only with no ledger surface at all): triage's `prompt_version`
+  lands on its `triaged`/`triaged_noise` audit events instead, and brief
+  gained a `Brief.prompt_version` field populated straight from the
+  registry, so "which prompt produced this" is answerable everywhere,
+  even where an existing recording surface didn't previously exist to hang
+  it on.
+- **The hosted gateway's missing `DRAFT` task was the literal reason the
+  hosted plane couldn't draft.** `hosted/model_gateway.py`'s `TASKS`
+  (previously `{classify, converse, embed}`) gains `draft`, with its own
+  bounded reply length (2,000 tokens — longer than classify's 256, shorter
+  than converse's fully open-ended 1,200 doesn't need to be reused for a
+  different task) via `_MAX_TOKENS_BY_TASK`. `model_gateway_app.py` reads
+  `ATTUNE_MODEL_DRAFT`/`ATTUNE_MODEL_PREMIUM_DRAFT` unconditionally, the
+  same posture `ATTUNE_MODEL_EMBED` already holds — an earlier entry
+  documents that omitting it there would crash the gateway on first boot
+  regardless of any feature gate, and the Terraform wiring (`main.tf`,
+  `variables.tf`) closes the identical gap for `draft` before it can repeat.
+  This restores the *capability*; it does not wire the hosted conversation
+  executor's draft command to a real model call (`_draft_create_propose`
+  still takes the caller's literal text) — that remains a later phase's
+  scope.
+- **Verification.** New `tests/test_model_layer.py` (26 tests) covers
+  capability resolution, prompt-cache content-array rendering, byte-
+  identical gate-off request shape for triage/draft/interaction/
+  consolidation, structured-output fail-closed parsing for both triage and
+  consolidation, `prompt_version` reaching the draft audit event + ledger
+  row and the brief, forced tool-call parsing (happy path and malformed-
+  arguments fallback), `call_with_retry`'s bound, and `attune metrics`'
+  token/cache-hit rendering. `tests/test_model_gateway.py` gained the
+  hosted-`draft`-acceptance and unknown-task-rejection tests plus updated
+  every profile fixture for the four-task vocabulary. Full suite: 2094
+  passed, 57 skipped, zero regressions.

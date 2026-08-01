@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
-TASKS = frozenset({"classify", "converse", "embed"})
-_CHAT_TASKS = frozenset({"classify", "converse"})
+TASKS = frozenset({"classify", "converse", "embed", "draft"})
+_CHAT_TASKS = frozenset({"classify", "converse", "draft"})
 ROLES = frozenset({"system", "user", "assistant"})
 MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$")
 MAX_MESSAGES = 8
@@ -19,6 +19,15 @@ MAX_RESPONSE_CHARS = 16_000
 MAX_GATEWAY_RESPONSE_BYTES = 100_000
 MAX_EMBED_CHARS = 8_000
 MAX_EMBED_DIMENSIONS = 4_096
+
+# Build prompt 28, task 7: each chat task's own bounded reply length -- the
+# same bounded-envelope discipline classify already had. "draft" is its own
+# entry (a generated draft reply is longer than a one-word classification
+# but doesn't need converse's fully open-ended budget) rather than reusing
+# converse's 1_200, so adjusting either bound later is a one-line change,
+# not a guess about which bound a given task happens to share. A task with
+# no entry here falls back to converse's 1_200 (see ``complete`` below).
+_MAX_TOKENS_BY_TASK: dict[str, int] = {"classify": 256, "draft": 2_000}
 
 # Per-tenant model profiles (docs/future-state.md Phase 6 "hosted
 # operations"; per-tenant model configuration). A tenant selects among
@@ -149,7 +158,7 @@ class HostedModelGateway:
         response = self._client.chat.completions.create(
             model=model,
             messages=normalized,
-            max_tokens=256 if task == "classify" else 1_200,
+            max_tokens=_MAX_TOKENS_BY_TASK.get(task, 1_200),
         )
         try:
             choices = response.choices

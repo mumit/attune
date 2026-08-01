@@ -473,11 +473,18 @@ resource "google_cloud_run_v2_service" "model_gateway" {
       }
       env {
         # model_gateway_app.py reads this unconditionally as part of the
-        # fixed standard_models map (classify/converse/embed) -- previously
-        # unwired here, which would have crashed the gateway on first boot
-        # regardless of any feature gate.
+        # fixed standard_models map (classify/converse/embed/draft) --
+        # previously unwired here, which would have crashed the gateway on
+        # first boot regardless of any feature gate.
         name  = "ATTUNE_MODEL_EMBED"
         value = var.model_embed
+      }
+      env {
+        # Build prompt 28, task 7: restores hosted drafting -- unwired here
+        # would repeat the exact ATTUNE_MODEL_EMBED first-boot crash noted
+        # above, since model_gateway_app.py reads this unconditionally too.
+        name  = "ATTUNE_MODEL_DRAFT"
+        value = var.model_draft
       }
       env {
         name  = "ATTUNE_EXPECTED_AUDIENCE"
@@ -524,6 +531,13 @@ resource "google_cloud_run_v2_service" "model_gateway" {
         content {
           name  = "ATTUNE_MODEL_PREMIUM_EMBED"
           value = var.model_premium_embed
+        }
+      }
+      dynamic "env" {
+        for_each = var.enable_tenant_model_profiles ? [1] : []
+        content {
+          name  = "ATTUNE_MODEL_PREMIUM_DRAFT"
+          value = var.model_premium_draft
         }
       }
 

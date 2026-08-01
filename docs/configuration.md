@@ -79,6 +79,12 @@ planned re-embedding/migration.
 | `ATTUNE_QDRANT_HOST` | `127.0.0.1` | Durable Qdrant server host used by both runtime and Doctor. Keep the default when Attune runs on the host; the Compose assistant overrides it with the service name `qdrant`. Embedded Qdrant is intentionally not an implicit fallback. |
 | `ATTUNE_QDRANT_PORT` | `6333` | Qdrant HTTP port used by both runtime and Doctor. Keep `6333` unless the private service uses another port. |
 | `ATTUNE_MEMORY_MIN_SCORE` | blank (no floor) | Relevance floor applied to every memory retrieval (drafting, triage, conversation, meeting prep). Records scoring below it never reach a prompt. |
+| `ATTUNE_MODEL_SUPPORTS_TOOLS` | `false` | Declare the configured gateway supports native tool calling (build prompt 28). Off keeps every request byte-identical to before; on lets the interaction planner use a forced tool call instead of a text parse. |
+| `ATTUNE_MODEL_SUPPORTS_STRUCTURED_OUTPUT` | `false` | Declare the configured gateway supports `response_format` JSON schemas. Off keeps triage/consolidation on their existing text/JSON parse; on requests a schema-constrained response, with the text parse retained as the fallback. |
+| `ATTUNE_MODEL_SUPPORTS_PROMPT_CACHE` | `false` | Declare the configured gateway supports prompt caching. Off sends one system-message string exactly as before; on splits each prompt's stable prefix into its own cacheable content block. |
+| `ATTUNE_MODEL_MAX_TOKENS` | blank (omitted) | Bound on generated tokens for local chat completions. Blank omits `max_tokens` from the request entirely (today's behavior). |
+| `ATTUNE_MODEL_TIMEOUT_SECONDS` | blank (omitted) | Per-call timeout for local chat completions. Blank omits `timeout` from the request entirely (today's behavior). |
+| `ATTUNE_MODEL_MAX_RETRIES` | `0` | Bounded retries with jittered backoff for a failed local chat completion. `0` never retries (today's behavior). |
 
 ## Principal and runtime
 

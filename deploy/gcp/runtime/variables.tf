@@ -250,6 +250,17 @@ variable "model_embed" {
   }
 }
 
+variable "model_draft" {
+  description = "Operator-fixed model route for bounded Gmail draft generation (build prompt 28, task 7). model_gateway_app.py reads ATTUNE_MODEL_DRAFT unconditionally (it is part of the fixed standard_models map alongside classify/converse/embed); unwired here would crash the gateway on first boot, the same failure mode ATTUNE_MODEL_EMBED had before it was wired."
+  type        = string
+  default     = "gpt-4.1"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_draft))
+    error_message = "model_draft must be a valid fixed model route."
+  }
+}
+
 variable "model_premium_classify" {
   description = "Operator-fixed premium classification model route; required only when enable_tenant_model_profiles is true (ATTUNE_MODEL_PREMIUM_CLASSIFY)."
   type        = string
@@ -280,6 +291,17 @@ variable "model_premium_embed" {
   validation {
     condition     = var.model_premium_embed == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_premium_embed))
     error_message = "model_premium_embed must be empty or a valid fixed model route."
+  }
+}
+
+variable "model_premium_draft" {
+  description = "Operator-fixed premium draft-generation model route; required only when enable_tenant_model_profiles is true (ATTUNE_MODEL_PREMIUM_DRAFT)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.model_premium_draft == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$", var.model_premium_draft))
+    error_message = "model_premium_draft must be empty or a valid fixed model route."
   }
 }
 

@@ -54,6 +54,7 @@ def gateway(text="answer", vector=(0.1, 0.2, 0.3), *, profiles=None, usage=None)
             "classify": "small-model",
             "converse": "large-model",
             "embed": "embed-model",
+            "draft": "draft-model",
         },
         profiles=profiles,
     ), completions, embeddings
@@ -80,6 +81,41 @@ def test_gateway_selects_only_fixed_task_route_and_budget():
     instance.complete(task="converse", messages=messages())
     assert completions.calls[-1]["model"] == "large-model"
     assert completions.calls[-1]["max_tokens"] == 1_200
+
+
+def test_gateway_accepts_draft_with_its_own_bounded_envelope():
+    """Build prompt 28, task 7: the hosted gateway can now draft -- its
+    absence was the literal reason it couldn't before. Its own bound (2_000)
+    is distinct from classify's (256) and converse's (1_200)."""
+    instance, completions, _ = gateway()
+    result = instance.complete(task="draft", messages=messages())
+    assert result.text == "answer"
+    assert completions.calls == [
+        {"model": "draft-model", "messages": messages(), "max_tokens": 2_000}
+    ]
+
+
+def test_gateway_rejects_an_unknown_task():
+    instance, completions, _ = gateway()
+    with pytest.raises(ValueError):
+        instance.complete(task="summarize", messages=messages())
+    assert completions.calls == []
+
+    with pytest.raises(ValueError):
+        validate_messages(task="summarize", messages=messages())
+
+
+def test_gateway_construction_requires_the_draft_route():
+    """A models map missing the (now four-task) fixed vocabulary -- e.g. the
+    pre-build-prompt-28 three-task shape -- must fail closed, not silently
+    drop drafting."""
+    with pytest.raises(ValueError, match="routes"):
+        HostedModelGateway(
+            SimpleNamespace(),
+            models={
+                "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+            },
+        )
 
 
 def test_gateway_embed_task_is_bounded_and_uses_fixed_model():
@@ -186,9 +222,11 @@ def test_gate_on_profile_map_resolves_the_matching_task_route():
     profiles = {
         "standard": {
             "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+            "draft": "draft-model",
         },
         "premium": {
             "classify": "small-premium", "converse": "large-premium", "embed": "embed-premium",
+            "draft": "draft-premium",
         },
     }
     instance, completions, embeddings = gateway(profiles=profiles)
@@ -204,9 +242,11 @@ def test_gate_on_unknown_profile_still_fails_closed():
     profiles = {
         "standard": {
             "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+            "draft": "draft-model",
         },
         "premium": {
             "classify": "small-premium", "converse": "large-premium", "embed": "embed-premium",
+            "draft": "draft-premium",
         },
     }
     instance, completions, _ = gateway(profiles=profiles)
@@ -219,9 +259,11 @@ def test_gate_on_rejects_a_malformed_profile_string():
     profiles = {
         "standard": {
             "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+            "draft": "draft-model",
         },
         "premium": {
             "classify": "small-premium", "converse": "large-premium", "embed": "embed-premium",
+            "draft": "draft-premium",
         },
     }
     instance, _, _ = gateway(profiles=profiles)
@@ -233,20 +275,27 @@ def test_profiles_construction_requires_the_standard_profile_to_match_fixed_rout
     with pytest.raises(ValueError, match="standard"):
         HostedModelGateway(
             SimpleNamespace(),
-            models={"classify": "small-model", "converse": "large-model", "embed": "embed-model"},
+            models={
+                "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+                "draft": "draft-model",
+            },
             profiles={
                 "standard": {
                     "classify": "different", "converse": "large-model", "embed": "embed-model",
+                    "draft": "draft-model",
                 },
             },
         )
     with pytest.raises(ValueError, match="standard"):
         HostedModelGateway(
             SimpleNamespace(),
-            models={"classify": "small-model", "converse": "large-model", "embed": "embed-model"},
+            models={
+                "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+                "draft": "draft-model",
+            },
             profiles={
                 "premium": {
-                    "classify": "a", "converse": "b", "embed": "c",
+                    "classify": "a", "converse": "b", "embed": "c", "draft": "d",
                 },
             },
         )
@@ -256,10 +305,14 @@ def test_profiles_construction_rejects_an_out_of_vocabulary_profile_name():
     with pytest.raises(ValueError, match="name"):
         HostedModelGateway(
             SimpleNamespace(),
-            models={"classify": "small-model", "converse": "large-model", "embed": "embed-model"},
+            models={
+                "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+                "draft": "draft-model",
+            },
             profiles={
                 "standard": {
                     "classify": "small-model", "converse": "large-model", "embed": "embed-model",
+                    "draft": "draft-model",
                 },
                 "enterprise": {"classify": "a", "converse": "b", "embed": "c"},
             },

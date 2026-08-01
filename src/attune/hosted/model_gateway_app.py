@@ -13,6 +13,11 @@ def create_production_app():
         "classify": os.environ["ATTUNE_MODEL_CLASSIFY"],
         "converse": os.environ["ATTUNE_MODEL_CONVERSE"],
         "embed": os.environ["ATTUNE_MODEL_EMBED"],
+        # Build prompt 28, task 7: restores the hosted gateway's ability to
+        # draft -- its absence here was the literal reason the hosted plane
+        # could never draft, even though the capability gateway
+        # (docs/capability-gateway.md) has been wired since Phase 5.
+        "draft": os.environ["ATTUNE_MODEL_DRAFT"],
     }
     profiles_enabled_value = os.environ.get(
         "ATTUNE_ENABLE_TENANT_MODEL_PROFILES", "false"
@@ -35,6 +40,7 @@ def create_production_app():
                 "classify": os.environ["ATTUNE_MODEL_PREMIUM_CLASSIFY"],
                 "converse": os.environ["ATTUNE_MODEL_PREMIUM_CONVERSE"],
                 "embed": os.environ["ATTUNE_MODEL_PREMIUM_EMBED"],
+                "draft": os.environ["ATTUNE_MODEL_PREMIUM_DRAFT"],
             },
         }
     gateway = HostedModelGateway(

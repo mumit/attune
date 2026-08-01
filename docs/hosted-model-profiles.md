@@ -2,7 +2,8 @@
 
 Hosted Attune lets the owner choose among a fixed set of OPERATOR-DEFINED
 model profiles (`standard`, `premium`) for their own tenant's classify,
-converse, and embed model calls, and lets them see the resulting usage. This
+converse, embed, and draft model calls, and lets them see the resulting
+usage. This
 closes `docs/future-state.md` Phase 6's "per-tenant model configuration and
 usage metering" bullet (hosted-review gaps #1/#2). Implemented and tested,
 not deployed.
@@ -67,7 +68,7 @@ the fixed config.
 
 ## Metering
 
-Every classify/converse/embed call the worker makes is optionally metered,
+Every classify/converse/embed/draft call the worker makes is optionally metered,
 behind its own independent gate, `ATTUNE_ENABLE_MODEL_USAGE_METERING`. The
 model gateway extracts token usage defensively from the upstream
 OpenAI-compatible provider's own response (a malformed or absent `usage`

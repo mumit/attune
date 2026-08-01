@@ -211,6 +211,23 @@ class Settings:
     inbound_rate_limit: int = 20
     triage_batch_limit: int = 25
 
+    # Build prompt 28 (docs/plan-2026-h2.md P3): capability probing for the
+    # model layer. Resolved from configuration (never sniffed from an
+    # untrusted provider response) -- see llm.ModelCapabilities. Every one
+    # of these defaults OFF, and OFF is byte-identical to the request shape
+    # this codebase sent before build prompt 28 (docs/decisions.md).
+    model_supports_tools: bool = False
+    model_supports_structured_output: bool = False
+    model_supports_prompt_cache: bool = False
+    # Call hygiene (none of this existed locally before build prompt 28).
+    # ``None``/``0`` are the gate-off defaults: no ``max_tokens``/``timeout``
+    # key is added to a request, and a failed call raises on the first
+    # attempt exactly as before -- only an explicit deployment opt-in changes
+    # the request shape or the retry behavior.
+    model_max_tokens: int | None = None
+    model_timeout_seconds: float | None = None
+    model_max_retries: int = 0
+
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -370,6 +387,22 @@ class Settings:
             ),
             inbound_rate_limit=int(e.get("ATTUNE_INBOUND_RATE_LIMIT", "20")),
             triage_batch_limit=int(e.get("ATTUNE_TRIAGE_BATCH_LIMIT", "25")),
+            model_supports_tools=_is_true(e.get("ATTUNE_MODEL_SUPPORTS_TOOLS")),
+            model_supports_structured_output=_is_true(
+                e.get("ATTUNE_MODEL_SUPPORTS_STRUCTURED_OUTPUT")
+            ),
+            model_supports_prompt_cache=_is_true(
+                e.get("ATTUNE_MODEL_SUPPORTS_PROMPT_CACHE")
+            ),
+            model_max_tokens=(
+                int(e["ATTUNE_MODEL_MAX_TOKENS"])
+                if e.get("ATTUNE_MODEL_MAX_TOKENS") else None
+            ),
+            model_timeout_seconds=(
+                float(e["ATTUNE_MODEL_TIMEOUT_SECONDS"])
+                if e.get("ATTUNE_MODEL_TIMEOUT_SECONDS") else None
+            ),
+            model_max_retries=int(e.get("ATTUNE_MODEL_MAX_RETRIES", "0")),
         )
 
     def validate(self) -> None:
