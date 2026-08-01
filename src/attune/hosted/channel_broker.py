@@ -7,12 +7,18 @@ import hashlib
 import hmac
 import re
 import secrets
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from .channel_broker_base import (
+    AuditWriter,
+    deliver_and_audit,
+    execute_claim_call,
+    swallow_complete_failure,
+    write_or_raise,
+)
 from .repositories import ConnectionFactory, _fixed_hash
 from .vault_crypto import EncryptedCredential, EnvelopeCipher
 
@@ -46,10 +52,6 @@ def decode_channel_reference_key(value: bytes) -> bytes:
     ):
         raise ValueError("channel reference HMAC secret is not canonical base64")
     return key
-
-
-class AuditWriter(Protocol):
-    def write(self, audit_intent_id: UUID) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -348,18 +350,7 @@ class PostgresChannelBrokerRepository:
         return CompletedGoogleChatBriefDelivery(*row)
 
     def _call(self, statement: str, values: tuple):
-        with closing(self._connect()) as connection:
-            try:
-                with closing(connection.cursor()) as cursor:
-                    cursor.execute(statement, values)
-                    row = cursor.fetchone()
-                if row is None:
-                    raise RuntimeError("channel broker returned no state")
-                connection.commit()
-                return row
-            except BaseException:
-                connection.rollback()
-                raise
+        return execute_claim_call(self._connect, statement, values)
 
 
 class ChannelReferenceHasher:
@@ -434,8 +425,10 @@ class GoogleChatLinkBroker:
             expires_at=current + timedelta(seconds=45),
         )
         try:
-            if not self._audit_writer.write(claim.pre_audit_intent_id):
-                raise RuntimeError("channel link pre-effect audit is unavailable")
+            write_or_raise(
+                self._audit_writer, claim.pre_audit_intent_id,
+                "channel link pre-effect audit is unavailable",
+            )
         except BaseException:
             try:
                 self._repository.release(
@@ -461,8 +454,10 @@ class GoogleChatLinkBroker:
             encrypted=encrypted,
             **refs,
         )
-        if not self._audit_writer.write(linked.outcome_audit_intent_id):
-            raise RuntimeError("channel link outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, linked.outcome_audit_intent_id,
+            "channel link outcome audit is unavailable",
+        )
         return linked
 
     def test_delivery(
@@ -479,32 +474,27 @@ class GoogleChatLinkBroker:
             claim_hash=claim_hash,
             expires_at=current + timedelta(seconds=45),
         )
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_failed(destination_id, claim_hash)
-            raise RuntimeError("channel delivery pre-effect audit is unavailable")
-        try:
-            route = self._cipher.decrypt(
-                claim.encrypted,
-                tenant_id=claim.tenant_id,
-                connector_id=destination_id,
-                provider="google_chat_route",
-                credential_version=1,
-            )
-            space = route.get("space")
-            if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
-                raise RuntimeError("stored channel route is invalid")
+
+        def send() -> None:
+            space = self._decrypt_space(claim.encrypted, claim.tenant_id, destination_id)
             self._sender.send_connection_test(
-                space=space,
-                request_id=UUID(bytes=claim_hash[:16], version=4),
+                space=space, request_id=UUID(bytes=claim_hash[:16], version=4),
             )
-        except BaseException:
-            self._complete_failed(destination_id, claim_hash)
-            raise
+
+        deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_failed(destination_id, claim_hash),
+            unavailable_message="channel delivery pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_delivery(
             destination_id=destination_id, claim_hash=claim_hash, succeeded=True
         )
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("channel delivery outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "channel delivery outcome audit is unavailable",
+        )
         return completed
 
     def accept_message(
@@ -527,8 +517,10 @@ class GoogleChatLinkBroker:
             message_ref_hash=self._reference_hasher.hash("message", message_ref),
             text=text,
         )
-        if not self._audit_writer.write(accepted.pre_audit_intent_id):
-            raise RuntimeError("channel message pre-effect audit is unavailable")
+        write_or_raise(
+            self._audit_writer, accepted.pre_audit_intent_id,
+            "channel message pre-effect audit is unavailable",
+        )
         return accepted
 
     def deliver_reply(
@@ -552,33 +544,32 @@ class GoogleChatLinkBroker:
             or claim.pre_audit_intent_id is None
         ):
             raise RuntimeError("conversation delivery claim is invalid")
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_reply_failed(job_id, claim_hash)
-            raise RuntimeError("conversation delivery pre-effect audit is unavailable")
-        try:
-            route = self._cipher.decrypt(
-                claim.encrypted, tenant_id=claim.tenant_id,
-                connector_id=destination_id, provider="google_chat_route",
-                credential_version=1,
-            )
-            space = route.get("space")
-            if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
-                raise RuntimeError("stored channel route is invalid")
+        encrypted, reply_text = claim.encrypted, claim.reply_text
+
+        def send() -> bytes:
+            space = self._decrypt_space(encrypted, claim.tenant_id, destination_id)
             message_ref = self._sender.send_message(
-                space=space, text=claim.reply_text, request_id=job_id
+                space=space, text=reply_text, request_id=job_id
             )
-            message_hash = self._reference_hasher.hash("message", message_ref)
-        except BaseException:
-            self._complete_reply_failed(job_id, claim_hash)
-            raise
+            return self._reference_hasher.hash("message", message_ref)
+
+        message_hash = deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_reply_failed(job_id, claim_hash),
+            unavailable_message="conversation delivery pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_conversation_delivery(
             job_id=job_id, claim_hash=claim_hash, succeeded=True,
             provider_message_ref_hash=message_hash,
         )
         if completed.delivery_state != "delivered":
             raise RuntimeError("conversation delivery completion is invalid")
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("conversation delivery outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "conversation delivery outcome audit is unavailable",
+        )
         return True
 
     def deliver_brief(
@@ -608,70 +599,76 @@ class GoogleChatLinkBroker:
             or claim.pre_audit_intent_id is None
         ):
             raise RuntimeError("brief delivery claim is invalid")
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_brief_failed(job_id, destination_id, claim_hash)
-            raise RuntimeError("brief delivery pre-effect audit is unavailable")
-        try:
-            route = self._cipher.decrypt(
-                claim.encrypted, tenant_id=claim.tenant_id,
-                connector_id=destination_id, provider="google_chat_route",
-                credential_version=1,
-            )
-            space = route.get("space")
-            if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
-                raise RuntimeError("stored channel route is invalid")
+        encrypted, brief_text = claim.encrypted, claim.brief_text
+
+        def send() -> bytes:
+            space = self._decrypt_space(encrypted, claim.tenant_id, destination_id)
             request_id = UUID(
-                bytes=hashlib.sha256(
-                    job_id.bytes + destination_id.bytes
-                ).digest()[:16],
+                bytes=hashlib.sha256(job_id.bytes + destination_id.bytes).digest()[:16],
                 version=4,
             )
             message_ref = self._sender.send_message(
-                space=space, text=claim.brief_text, request_id=request_id
+                space=space, text=brief_text, request_id=request_id
             )
-            message_hash = self._reference_hasher.hash("message", message_ref)
-        except BaseException:
-            self._complete_brief_failed(job_id, destination_id, claim_hash)
-            raise
+            return self._reference_hasher.hash("message", message_ref)
+
+        message_hash = deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_brief_failed(
+                job_id, destination_id, claim_hash
+            ),
+            unavailable_message="brief delivery pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_brief_delivery(
             job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
             succeeded=True, provider_message_ref_hash=message_hash,
         )
         if completed.delivery_state != "delivered":
             raise RuntimeError("brief delivery completion is invalid")
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("brief delivery outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "brief delivery outcome audit is unavailable",
+        )
         return True
 
+    def _decrypt_space(
+        self, encrypted: EncryptedCredential, tenant_id: UUID, destination_id: UUID,
+    ) -> str:
+        route = self._cipher.decrypt(
+            encrypted, tenant_id=tenant_id, connector_id=destination_id,
+            provider="google_chat_route", credential_version=1,
+        )
+        space = route.get("space")
+        if not isinstance(space, str) or not _DESTINATION_REF.fullmatch(space):
+            raise RuntimeError("stored channel route is invalid")
+        return space
+
     def _complete_failed(self, destination_id: UUID, claim_hash: bytes) -> None:
-        try:
-            completed = self._repository.complete_delivery(
-                destination_id=destination_id,
-                claim_hash=claim_hash,
-                succeeded=False,
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_delivery(
+                destination_id=destination_id, claim_hash=claim_hash, succeeded=False,
+            ),
+        )
 
     def _complete_reply_failed(self, job_id: UUID, claim_hash: bytes) -> None:
-        try:
-            completed = self._repository.complete_conversation_delivery(
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_conversation_delivery(
                 job_id=job_id, claim_hash=claim_hash, succeeded=False,
                 provider_message_ref_hash=None,
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+            ),
+        )
 
     def _complete_brief_failed(
         self, job_id: UUID, destination_id: UUID, claim_hash: bytes
     ) -> None:
-        try:
-            completed = self._repository.complete_brief_delivery(
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_brief_delivery(
                 job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
                 succeeded=False, provider_message_ref_hash=None,
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+            ),
+        )

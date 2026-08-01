@@ -38,6 +38,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from .base import (
+    MAX_THREAD_BODY_CHARS,
     CalendarEvent,
     DraftRef,
     EmailThread,
@@ -151,7 +152,7 @@ class McpWorkspaceConnector(WorkspaceConnector):
             subject=d.get("subject", ""),
             snippet=d.get("snippet", ""),
             from_addr=d.get("from", ""),
-            body=d.get("body", d.get("snippet", "")),
+            body=d.get("body", d.get("snippet", ""))[:MAX_THREAD_BODY_CHARS],
             provenance=Provenance.FETCHED,
             labels=d.get("labels", []),
             last_from_addr=d.get("last_from", d.get("from", "")),

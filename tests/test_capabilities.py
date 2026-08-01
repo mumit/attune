@@ -27,7 +27,12 @@ from attune.orchestrator import (
     build_draft_approve_graph,
     default_matrix,
 )
-from attune.orchestrator.capabilities import Capability, CapabilityRegistry, capability_gates_pass
+from attune.orchestrator.capabilities import (
+    Capability,
+    CapabilityIdentity,
+    CapabilityRegistry,
+    capability_gates_pass,
+)
 
 langgraph = pytest.importorskip("langgraph")
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
@@ -321,3 +326,31 @@ def test_new_capability_passes_when_all_three_gates_hold(action_name):
         capability, connector=_FullMatrixConnector(), enabled=True,
         matrix=_granted_matrix(),
     ) is True
+
+
+def test_capability_identity_is_exercised_by_both_planes():
+    """Phase P9 (docs/plan-2026-h2.md, build prompt 35): one shared
+    ``CapabilityIdentity`` shape, satisfied by local's execution descriptor
+    AND hosted's admission-only descriptor, pinned against the one real
+    capability both planes register today -- drafting a Gmail reply."""
+    from attune.hosted.gmail_draft_capability import (
+        DRAFT_CAPABILITY,
+        build_draft_capability_registry,
+    )
+
+    local_registry = build_capability_registry()
+    local_capability = local_registry.get(Action.DRAFT_REPLY)
+    hosted_registry = build_draft_capability_registry()
+    hosted_definition = hosted_registry.get(DRAFT_CAPABILITY)
+
+    assert isinstance(local_capability, CapabilityIdentity)
+    assert isinstance(hosted_definition, CapabilityIdentity)
+    # Both descriptors agree on risk tier for the one capability both
+    # planes register -- the identity shape, not the storage/execution
+    # model, is what's shared (docs/decisions.md).
+    assert local_capability.capability_risk_tier == RiskTier.R2
+    assert hosted_definition.capability_risk_tier == RiskTier.R2
+    assert (
+        local_capability.capability_risk_tier
+        == hosted_definition.capability_risk_tier
+    )

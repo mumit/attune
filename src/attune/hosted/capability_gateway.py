@@ -17,6 +17,7 @@ from typing import Any, Mapping, Protocol
 from uuid import UUID
 
 from ..orchestrator.autonomy import RiskTier
+from ..orchestrator.capabilities import CapabilityIdentity
 from .repositories import ConnectionFactory
 from .tenant import TenantContext, tenant_transaction
 
@@ -97,6 +98,20 @@ class CapabilityDefinition:
             )
         ):
             raise ValueError("required scopes must be bounded and unique")
+
+    # -- CapabilityIdentity (Phase P9, build prompt 35) ----------------------
+
+    @property
+    def capability_name(self) -> str:
+        return self.name
+
+    @property
+    def capability_domain(self) -> str:
+        return self.domain
+
+    @property
+    def capability_risk_tier(self) -> RiskTier:
+        return self.risk
 
 
 class CapabilityRegistry:

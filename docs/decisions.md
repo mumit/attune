@@ -5039,3 +5039,438 @@ down rather than leave as an unexamined omission.
   non-model authorization path every other capability already goes
   through, rather than by the model's own judgment about a rendered page.
   Absent all three, browser automation stays out of scope.
+
+## 2026-08-01 — Converge the two planes, step 1: a shared base for the mirrored channel brokers (Phase P9, build prompt 35)
+
+Opens `docs/plan-2026-h2.md` P9. Three parallel research surveys of all 8
+diverged local/hosted pairs the build prompt names found the codebase has
+moved since the prompt was written: `RiskTier` is already the single shared
+risk vocabulary (build prompt 30), hosted's `DRAFT` model task already
+exists, and three of the eight steps (capability registry, audit, recurrence)
+describe a mismatch that doesn't hold today — see the follow-on entries below
+for each. This entry covers the step with the cleanest, highest-confidence
+win: `hosted/channel_broker.py` (Google Chat) and
+`hosted/slack_channel_broker.py` (Slack) were confirmed near-1:1 mirrors —
+same claim-then-audit-then-consume shape over `(repository, audit_writer,
+reference_hasher, cipher, sender)`, differing only in Slack's paired
+route+token secrets, OAuth install vs. link-code redemption, and Slack's
+extra message-acknowledgment flow.
+
+- **New `hosted/channel_broker_base.py`** holds exactly the byte-identical
+  parts, following the `hosted/intelligence.py` pattern of one shared shape
+  behind per-provider specifics: `execute_claim_call` (the repository's SQL
+  claim/consume/complete transaction wrapper — commit on a row, rollback on
+  any error including "no row"), `write_or_raise` (the ubiquitous "write this
+  audit intent or fail closed" check), `swallow_complete_failure`
+  (best-effort completion+audit from an `except` block that's about to
+  re-raise, so a secondary failure must never mask the original), and
+  `deliver_and_audit` (the claim-already-verified core of every delivery
+  attempt — a connection test, a conversation reply, a proactive brief,
+  Slack's acknowledgment — write the pre-effect audit failing closed with a
+  compensating action, then run the provider-specific `send` callback,
+  compensating and re-raising on any failure from either step).
+- **`deliver_and_audit` collapses 7 near-identical call sites** — GChat's
+  `test_delivery`/`deliver_reply`/`deliver_brief` and Slack's
+  `test_delivery`/`deliver_reply`/`deliver_brief`/`acknowledge_message` — each
+  now builds its claim, defines a small `send()` closure encapsulating only
+  its genuinely provider-specific work (GChat: decrypt one route secret and
+  validate the space; Slack: decrypt a route+token pair, and for
+  reply/brief also the team), and delegates the pre-audit/try/compensate
+  shape to one shared function instead of hand-duplicating it seven times
+  with subtly different try/except wiring. `channel_broker.py` gained one
+  small internal dedup of its own, `_decrypt_space`, since the
+  decrypt-and-validate-space logic recurred identically three times within
+  that file alone.
+- **Public API untouched.** Every broker/repository class keeps its exact
+  name, constructor signature, and method signatures — including the
+  provider-specific keyword names (`app_ref=` for Google Chat, `team_ref=`
+  for Slack) confirmed against `tests/test_channel_broker.py` and
+  `tests/test_slack_channel_broker.py` before the refactor. Both `AuditWriter`
+  Protocol definitions (previously copy-pasted identically in each file) now
+  import from the shared module. `channel_broker_app.py`,
+  `channel_broker_service.py`, and `worker_app.py` (the only external
+  importers of anything from these two modules) needed no changes.
+- **Genuine divergence deliberately not collapsed**: Slack's `consume()`
+  encrypting two secrets plus owner-tenant binding vs. GChat's one; Slack's
+  `install()` (full OAuth code exchange) vs. GChat's `link_owner_dm()`
+  (link-code redemption); Slack's acknowledgment flow, which has no Google
+  Chat equivalent at all. Forcing these into one shape would either lose the
+  extra Slack secret or invent a fictitious Google Chat OAuth step.
+- **Verification.** All 50 existing tests across
+  `tests/test_channel_broker.py`, `test_channel_broker_service.py`,
+  `test_channel_broker_client.py`, `test_slack_channel_broker.py`, and
+  `test_slack_channel_broker_service.py` pass unmodified — no test names,
+  fixtures, or assertions changed. Full suite: 2381 passed, 57 skipped, same
+  as the pre-change baseline.
+
+## 2026-08-01 — Converge the two planes, step 2: model-gateway bounds and prompt-registry dedup (Phase P9, build prompt 35)
+
+Continues Phase P9. Research found build prompt 28 already restored
+`Task.DRAFT` to `hosted/model_gateway.py`'s `TASKS`/`_CHAT_TASKS`/
+`_MAX_TOKENS_BY_TASK`, so the task-vocabulary gap the original build prompt
+names is already closed. Two real gaps remained: hosted's bounded-envelope
+constants had no local counterpart, and two prompt-registry entries existed
+with content that verbatim-duplicated literal strings still hardcoded in
+`hosted/google_chat_conversation_executor.py`.
+
+- **`MAX_MESSAGES`, `MAX_MESSAGE_CHARS`, `MAX_TOTAL_CHARS`, `MAX_RESPONSE_CHARS`,
+  and `ROLES` move to `llm.py`** as the canonical shared home, alongside a new
+  `validate_messages(messages)` performing the same shape/bounds check hosted
+  always had (message-list shape, per-message character cap, running total
+  budget, required leading system role) — following the
+  `hosted/intelligence.py` pattern of core owning the shape.
+  `hosted/model_gateway.py` imports these instead of redefining them; its own
+  `validate_messages(*, task, messages)` now does only its
+  untrusted-task-string check before delegating to the shared function. All
+  five names stay importable from `attune.hosted.model_gateway` (existing
+  external imports, including two test files, needed no changes) since
+  they're still bound at that module's top level via the import.
+- **Deliberately not wired to force existing local call sites.** The four
+  numeric bounds are shared as *available* constants and a *available*
+  validator, not yet a hard gate on `interaction.py`/`dispatcher.py`/
+  `brief.py`/`draft_approve.py`/`triage.py`/`mem0_store.py`'s six existing
+  chat-completion call sites. Checked before wiring: those call sites already
+  build multi-hundred-to-thousand-character system prompts (`PROMPT_BRIEF`/
+  `PROMPT_TRIAGE`/`PROMPT_DRAFT` stable prefixes plus a playbook block plus,
+  for brief, an aggregated day's worth of thread/event lines) with no
+  existing per-site truncation tuned against hosted's specific 8-message/
+  8,000-char/32,000-total numbers. Hard-enforcing those exact bounds today
+  risked turning a legitimate busy-day brief or a long playbook into a
+  production `ValueError` with no graceful truncation path — a real behavior
+  change requiring its own per-site tuning and tests, not something to bundle
+  into a convergence pass. `docs/plan-2026-h2.md` can revisit wiring
+  individual call sites once each is checked against real traffic shapes.
+- **Prompt-registry dedup, zero behavior change.** `PROMPT_HOSTED_CLASSIFY`
+  and `PROMPT_HOSTED_CONVERSE` (`prompts.py`) already held content identical
+  to two literals hardcoded in
+  `hosted/google_chat_conversation_executor.py`'s classify and converse call
+  sites, confirmed character-for-character before the change. Both call
+  sites now import `render_system_message` and build their system message
+  from the registry entry instead of a duplicated literal;
+  `render_system_message`'s gate-off default (no `capabilities` passed, as
+  before) reconstructs the exact same `{"role": "system", "content": ...}`
+  shape, so the change is a pure dedup.
+- **The "draft task never wired" finding is real but larger than a wiring
+  fix, so it's scoped out of this pass.** `_draft_create_propose`
+  (`google_chat_conversation_executor.py`) takes its draft body verbatim from
+  the user's own dictated chat command (`"draft reply <thread>: <body>"`,
+  parsed by `_parse_draft_command`) — there is no existing model call in this
+  path to "wire" `task="draft"` into; local's equivalent AI-generated
+  drafting (`orchestrator/draft_approve.py`) reads the live thread and calls
+  the model, and this executor does neither. Building that — reading the
+  Gmail thread via the secret broker, prompting the model with `task="draft"`,
+  and integrating a generated draft into the same approve/reject command flow
+  — is a genuine new capability for the hosted conversational surface with
+  its own design questions (what happens on a model failure mid-conversation,
+  how the generated text is bounded and re-presented for approval), not a
+  mechanical fix. It is out of scope for this convergence pass and is left as
+  a named follow-on rather than rushed in.
+- **Verification.** `tests/test_model_gateway.py`,
+  `test_model_gateway_client.py`, `test_model_gateway_service.py`,
+  `test_llm.py`, `test_model_layer.py` (98 tests) and
+  `test_google_chat_conversation_executor.py` (10 tests) pass unmodified.
+  Full suite: 2381 passed, 57 skipped.
+
+## 2026-08-01 — Converge the two planes, step 3: workspace-provider data minimization, narrowed (Phase P9, build prompt 35)
+
+Continues Phase P9. Research confirmed `connectors/base.py` already provides
+one real shared interface (`WorkspaceConnector`) behind both local
+implementations (`DirectOAuthConnector`, `McpWorkspaceConnector`), with one
+conformance test file (`tests/test_connectors.py`) already exercising both —
+this part of the prompt's ask was already done. Hosted's `google_provider.py`
+is a separate thing entirely: a narrow, response-minimized client for the
+control plane's own operations (profile check, connection test, bounded
+thread list, draft create), used only by `SecretBroker`, with its own
+dataclasses (`GmailThreadSummary`, `CalendarEventSummary`, ...) that don't map
+field-for-field onto `EmailThread`/`CalendarEvent`/`DraftRef` — local's shapes
+carry fields (`reply_to`, full `body`, `raw_attendees`, ...) hosted's minimized
+responses never need, and vice versa. Merging them into "one interface, two
+transports" as the prompt literally describes would either drop fields
+triage/brief/dispatch need or bolt unused fields onto hosted's deliberately
+narrow responses — a real design project, not this session's scope.
+
+- **Fixed the concrete, named gap instead: prompt 24 finding #5.**
+  `get_thread` (both `DirectOAuthConnector` and `McpWorkspaceConnector`)
+  decoded/received an entire email body with no size cap at all — unlike
+  hosted's provider, which has always bounded every response
+  (`MAX_PROVIDER_RESPONSE_BYTES = 32768`, a raw-HTTP-response-bytes cap
+  before JSON parsing). New `connectors.base.MAX_THREAD_BODY_CHARS = 32_768`
+  caps the already-decoded body text at the same order of magnitude and
+  posture, applied in `google_oauth._thread_from_full` and
+  `mcp.McpWorkspaceConnector._to_thread`. The two units don't share meaning
+  (bytes of raw response vs. chars of decoded text), so the constant isn't
+  imported from hosted's module — it's a new, purpose-built cap that matches
+  hosted's discipline rather than its literal number by coincidence.
+  Every existing consumer of `EmailThread.body`
+  (`dispatcher.py`'s `INCOMING_BODY_CHAR_LIMIT = 1_600`) already truncates
+  far below this, so it's a hard backstop against an unbounded body ever
+  reaching memory, not a behavior change to any real call site.
+- **Verification.** New `test_direct_oauth_get_thread_caps_an_oversized_body`
+  and `test_mcp_to_thread_caps_an_oversized_body` in
+  `tests/test_connectors.py` (61 tests, up from 59) confirm both
+  implementations cap a deliberately oversized body at exactly
+  `MAX_THREAD_BODY_CHARS`. Full suite: 2383 passed, 57 skipped.
+- **Deferred, named plainly**: reconciling `GmailThreadSummary`/
+  `CalendarEventSummary`/`GmailDraftCreated` against `EmailThread`/
+  `CalendarEvent`/`DraftRef` field-by-field, and deciding whether hosted's
+  narrow client should sit behind `WorkspaceConnector` at all given its
+  different caller (a credential-lease broker, not triage/brief/dispatch) —
+  left for a dedicated future pass.
+
+## 2026-08-01 — Converge the two planes, step 4: capability-registry shared identity, narrowed (Phase P9, build prompt 35)
+
+Continues Phase P9. Confirms `RiskTier` is already the single shared risk
+vocabulary (build prompt 30: canonical home `orchestrator/autonomy.py`,
+`hosted/capability_gateway.py` re-exports it, `max_rung_for_risk_tier` is
+the one pinned `Rung`↔`RiskTier` mapping) — that part of the prompt's ask
+was already done. What remained diverged is genuinely structural, not an
+oversight: local's `Capability` (`orchestrator/capabilities.py`) is an
+**execution** descriptor — `Action`-enum-keyed, 12 registered, carrying live
+`propose`/`apply`/`compensate` callables the draft-approve graph invokes
+directly. Hosted's `CapabilityDefinition` (`hosted/capability_gateway.py`)
+is a pure **admission** descriptor — string-name-keyed, 1 registered
+(`google.gmail.draft.create`, gated off by default), carrying a typed
+argument contract and a product-risk ceiling, with admission and execution
+deliberately separated by a SECURITY DEFINER claim boundary before any
+Cloud Tasks dispatch. Collapsing these into one dataclass as the prompt
+literally describes would mean inventing hosted execution backends for the
+other 11 actions, which don't exist yet — a real feature project, not a
+convergence step.
+
+- **New `orchestrator.capabilities.CapabilityIdentity`**: a
+  `@runtime_checkable` `Protocol` exposing `capability_name`,
+  `capability_domain`, `capability_risk_tier` — the identity triple both
+  descriptor shapes genuinely share regardless of what they're for. Local's
+  `Capability` gained three read-only properties mapping its existing
+  `action`/`domain`/`risk_tier` fields onto the protocol (no field changes,
+  no behavior change to any existing consumer). Hosted's
+  `CapabilityDefinition` gained the same three properties over its existing
+  `name`/`domain`/`risk` fields, importing `CapabilityIdentity` from
+  `orchestrator.capabilities` — hosted importing core, following the
+  established direction (confirmed: no `orchestrator/*` module imports
+  anything from `hosted/`).
+- **Verification, the acceptance criterion's own test.** New
+  `test_capability_identity_is_exercised_by_both_planes`
+  (`tests/test_capabilities.py`) pins the one capability both planes
+  register today — local's `DRAFT_REPLY` and hosted's
+  `google.gmail.draft.create` — asserting both satisfy `CapabilityIdentity`
+  structurally (an `isinstance` check against the `runtime_checkable`
+  protocol) and agree on risk tier (R2 both sides). 87 tests across
+  `test_capabilities.py`, `test_capability_gateway.py`,
+  `test_capability_admission.py`, `test_gmail_draft_capability.py`, and
+  `test_autonomy.py` pass unmodified plus the one new test. Full suite:
+  2384 passed, 57 skipped.
+- **Deferred, named plainly**: collapsing the two descriptor dataclasses
+  into one, which needs hosted execution backends (a Cloud Tasks-dispatched
+  apply path) for the 11 capabilities hosted doesn't yet execute — left for
+  a dedicated future pass once hosted execution exists for more than the one
+  gated Gmail-draft capability.
+
+## 2026-08-01 — Converge the two planes, step 5: audit outcome vocabulary, narrowed (Phase P9, build prompt 35)
+
+Continues Phase P9. Local's `audit/log.py` (single-call, hash-chained JSONL)
+and hosted's audit (`hosted/audit.py` + 5 more modules: a two-phase
+intent→writer Postgres outbox, RLS-scoped, with a SECURITY DEFINER writer
+function) are genuinely different substrates, not just differently coded —
+`test_hosted_db.py:1798` (`test_audit_is_tenant_bound_and_append_only`) and
+`:2088` (`test_audit_outbox_is_idempotent_and_writer_accepts_only_intent_ids`)
+pin hosted's RLS/SECURITY DEFINER posture at the live-DB level, and local has
+no database at all. "One `record` signature, two backends" as the prompt
+describes doesn't fit: hosted's `request()`/`write()` are two separate
+phases by design (an intent, then a privileged writer converting it into a
+hash-chained row); local's `record()` is one synchronous call. Unifying the
+call signature would mean redesigning one side's architecture, not sharing a
+shape.
+
+- **What genuinely is shareable: the outcome taxonomy and a bounded-metadata
+  check, not the storage.** New `AUDIT_OUTCOMES = frozenset({"allowed",
+  "denied", "failed", "observed"})` in `audit/log.py` — the same four words
+  hosted's outbox has always enforced — plus `_bounded_object`, the same
+  bounded-metadata shape as `hosted/repositories.py`'s helper of the same
+  name. `JsonlAuditLog.record` now validates an OPTIONAL `outcome` key on
+  each raw event dict against this vocabulary when present, and bounds
+  every event's merged `fields` at 16,384 bytes (hosted's own bound) — both
+  checks are new and additive, never applied to local's existing free-form
+  `event` strings (`"retrieved"`, `"apply_failed"`, `"autonomy_gate"`, ...),
+  which already fuse action and outcome into one word and are read directly
+  by `orchestrator/grants.py`'s graduation logic — renaming any of them is a
+  real behavior change this step deliberately does not make.
+- **Zero risk to existing recorded events.** No existing call site
+  (`dispatcher.py`, `draft_approve.py`, `pending.py`, `grants.py`, ...) ever
+  sets an `outcome` key today, confirmed by grep before adding the check —
+  the new validation is a no-op for every current caller. The 16,384-byte
+  metadata bound is far above what any existing `_audit()` call records
+  (small structured fields: action names, ids, booleans, never a full email
+  body), confirmed by inspection before enforcing it as a hard `ValueError`
+  rather than a silent truncation.
+- **Verification.** Four new tests in `tests/test_audit.py` (31 total, up
+  from 27): an outcome from the shared vocabulary is accepted and recorded,
+  one outside it is rejected, absence is a true no-op (no key written at
+  all), and an oversized `fields` dict is rejected. Full suite: 2388 passed,
+  57 skipped.
+- **Deferred, named plainly**: unifying the `record`/`query` call shape or
+  the storage backend itself — hosted's two-phase outbox and RLS/SECURITY
+  DEFINER posture are structurally required and left exactly as they are.
+
+## 2026-08-01 — Converge the two planes, step 6: a shared conversation turn shape (Phase P9, build prompt 35)
+
+Continues Phase P9, deliberately the lightest of the six steps this pass
+makes. `conversation.py` (local: a TTL+count JSON window, ephemeral replay
+context) and `hosted/web_conversation.py`/`hosted/durable.py` (a durable,
+sequence-numbered Postgres row per turn) solve genuinely different problems,
+as the build prompt itself says — the shared piece is the turn shape and
+replay convention, not the storage strategy. Research also found provenance
+handling is already deduplicated at the executor layer
+(`build_turn_provenance`, imported by multiple hosted executors) — the gap
+was only in the turn *shape* itself, one level down.
+
+- **New `conversation.ReplayTurn`** (a `TypedDict`: `role`, `content`) names
+  the shape a turn takes when replayed to the model — exactly what local's
+  `ConversationLog.recent()` already returns. Hosted's `HostedTurn`/
+  `WebConversationTurn` use `actor_type` instead of `role` (a broader
+  actor-identity concept shared with hosted's own audit actor-type
+  vocabulary — `"principal"`/`"workload"`/`"mcp_agent"` elsewhere — not a
+  fixed `user`/`assistant` pair), so the two aren't merged into one
+  dataclass; `ReplayTurn` documents the target shape both eventually
+  produce, not a new source-of-truth type either side is forced to adopt as
+  storage.
+- **New `conversation.role_for_actor_type`** is the "assistant, else user"
+  mapping `hosted/google_chat_conversation_executor.py` applied inline when
+  building a replay message from a stored turn — now one shared function
+  instead of a literal ternary, with that one confirmed call site
+  (`_respond`, building the converse-route message list) wired to it.
+- **Verification.** New `test_role_for_actor_type_maps_assistant_and_everything_else`
+  (`tests/test_conversation.py`, 6 tests total) plus the 54 existing tests
+  across `test_conversation.py`, `test_conversation_model_metering.py`,
+  `test_google_chat_conversation_executor.py`, `test_web_conversation.py`,
+  `test_web_conversation_executor.py`, and `test_slack_conversation_executor.py`
+  pass unmodified. Full suite: 2389 passed, 57 skipped.
+- **Deliberately not touched**: either side's storage/retention strategy, or
+  the `HostedTurn`/`WebConversationTurn` dataclasses themselves — the plan's
+  own framing (genuinely different problems) holds.
+
+## 2026-08-01 — Converge the two planes, step 7: declining a hosted scheduler (Phase P9, build prompt 35)
+
+Closes the recurrence step of Phase P9 with no code change. The build prompt
+frames this as convergence: "prompt 32's durable job ledger should be the
+shared abstraction, with the hosted plane binding it to its own scheduler
+identity." Research found there is no existing hosted scheduler code to
+converge with local's `scheduler.Scheduler`/`SqliteSchedulerStore`
+(build prompt 32) — `find src/attune/hosted -iname "*schedul*"` returns no
+matches, and `hosted/brief_producer.py`'s own docstring states plainly that
+recurring scheduling "is explicitly future operator work... mirroring the
+retention scheduler's own 'separate, non-database scheduler identity'
+pattern (`protocol_retention.py`) rather than inventing a second one here."
+`HostedBriefProducer.run` is purely reactive and idempotent-per-hour,
+triggered by an owner's explicit `POST /v1/brief/run` — no timer, no loop,
+no cron logic anywhere in the file. Recurrence in hosted is instead
+delegated to external GCP Cloud Scheduler jobs hitting Cloud Run endpoints
+(`docs/hosted-gcp.md`, `docs/install/hosted-operator.md`'s
+`enable_protocol_retention_schedule` and siblings — all external,
+independently authenticated, off by default).
+
+- **This is a deliberate architectural choice already made, not a gap to
+  converge.** Building a hosted binding to the local durable job ledger this
+  session would be new hosted feature work — there is no existing
+  duplication to unify, only a documented decision that hosted's
+  stateless-worker constraint is better served by an external scheduler than
+  by embedding `scheduler.py`'s SQLite-backed catch-up logic into a
+  tenant-scoped service with no durable local disk. `CLAUDE.md`'s "hosted
+  stays tenant-scoped with stateless workers" boundary supports the existing
+  choice, not a change to it.
+- **Not declined forever, conditioned plainly**: if a future hosted surface
+  needs the SAME catch-up/missed-run semantics `scheduler.py` provides (not
+  just "run this once when triggered," which Cloud Scheduler already
+  covers), that would be the point to design a shared job-ledger abstraction
+  — as a real feature project with its own scope, not a rename of an
+  existing pattern that already works.
+- No files changed; no tests added or modified.
+
+## 2026-08-01 — Converge the two planes, step 8: deferring the service framework (Phase P9, build prompt 35)
+
+Closes Phase P9 with the one step deferred entirely, per the user's explicit
+scope decision for this pass. Research confirmed the finding: 12 of
+`hosted/`'s `*_app.py`/`*_service.py` pairs (`channel_broker`,
+`control_plane`, `dispatch_broker`, `export_download`, `export_writer`,
+`google_chat_ingress`, `model_gateway`, `oauth_callback`, `oauth_exchange`,
+`secret_broker`, `slack_ingress`, `worker`) have inverted naming — the file
+named `*_app.py` is a thin composition root (env-var wiring,
+`create_production_app()`), and the file named `*_service.py` is the one
+that actually defines `create_app()`, instantiates `Flask(__name__)`, and
+registers every route — backwards from what the names suggest. 7 more
+`*_service.py` files (`audit`, `channel_setup`, `customer_export`,
+`hosted_channel`, `hosted_policy`, `model_profile`, `tenant_deletion`) pair
+with a bare domain/repository module instead of an `_app.py` sibling.
+`control_plane_service.py` is 1,802 lines with 38 inline route handlers, the
+largest file in `hosted/`.
+
+- **Why this is out of scope for this pass, not merely lower priority.**
+  Unlike steps 1–6, this step is entirely internal to `hosted/` — local has
+  no HTTP service layer at all, so there is no core shape to converge onto
+  and no reuse-ratio benefit from doing it (the prompt's own acceptance
+  metric, `grep -l '^from \.\.[a-zA-Z]' src/attune/hosted/*.py`, only counts
+  hosted importing core; a shared base class used only within `hosted/`
+  doesn't move that number). It is real, valuable deduplication — just a
+  different kind of value than the rest of this prompt targets.
+  38 production HTTP route handlers across a naming convention used
+  inconsistently is a large blast radius (every one of `control_plane`'s
+  identity, session, connector, onboarding, export, deletion, conversation,
+  brief, model-profile, usage, and channel-installation routes) for one
+  pass already covering six other steps.
+- **What a dedicated future pass should do**: extract one shared
+  auth→bounded-validate→delegate-to-repository base used by the 12
+  `_app.py`/`_service.py` pairs (collapsing real duplication, the same
+  `authorize()`-then-route-then-delegate shape confirmed identical across
+  `dispatch_broker_service.py`, `export_download_service.py`, and
+  `control_plane_service.py`'s 38 handlers); split
+  `control_plane_service.py` into blueprints by concern (identity/session,
+  connectors, exports, channels, conversation/brief, usage); and normalize
+  the `_app.py`/`_service.py` naming so the composition root and the route
+  definitions are named consistently with what they actually are.
+- No files changed; no tests added or modified.
+
+## 2026-08-01 — Converge the two planes: reuse ratio, LOC deltas, and what's left (Phase P9, build prompt 35)
+
+Closes this pass of Phase P9. Steps 1, 2, 5, and 6 landed as scoped; steps 3
+and 4 landed narrowed versions with the fuller merge explicitly deferred and
+reasoned about above; step 7 was declined as already correctly decided by
+the existing architecture; step 8 was deferred entirely to its own future
+build prompt. Every step kept both planes' existing tests passing
+unmodified, per the prompt's own constraint — the only test files touched
+added new tests, none changed an existing assertion.
+
+- **Reuse ratio** (the build prompt's own metric: files under `hosted/`
+  importing from core via a two-dot relative import, over total `hosted/`
+  modules). The prompt's quoted baseline (3/113 ≈ 2.7%) was already stale by
+  the time this pass started — the actual tree at the start of this session
+  measured **5/114 ≈ 4.4%** (`capability_gateway.py` and
+  `google_chat_conversation_executor.py` already imported from core, via
+  `RiskTier` and `ActionSignal` respectively, from earlier build prompts).
+  After this pass: **7/115 ≈ 6.1%** — `hosted/model_gateway.py` (now imports
+  `llm.py`'s bounded-envelope constants and `validate_messages`) and
+  `hosted/audit.py` (now imports `audit/log.py`'s `AUDIT_OUTCOMES`) are the
+  two newly-converged files. This is real progress, not the 40% target —
+  reaching that needs the work this pass deliberately deferred (a full
+  capability-registry merge once hosted has execution backends beyond one
+  gated capability, a full workspace-provider dataclass reconciliation, and
+  the service-framework pass), not a documentation exercise.
+- **LOC and module count for `hosted/`**: 23,505 lines / 114 modules at the
+  start of this pass → **23,607 lines / 115 modules** (+102 lines, +1
+  module — the new `channel_broker_base.py`, 92 lines). Core's top-level
+  gained **+72 lines** across `llm.py` (bounded-envelope constants and
+  `validate_messages`), `orchestrator/capabilities.py`
+  (`CapabilityIdentity`), `conversation.py` (`ReplayTurn`,
+  `role_for_actor_type`), `audit/log.py` (`AUDIT_OUTCOMES`,
+  `_bounded_object`), and `connectors/base.py`
+  (`MAX_THREAD_BODY_CHARS`) — the net LOC change across both planes is
+  modest by design: this pass converged shape and shared small, genuinely
+  common pieces, not a wholesale rewrite that would show as a large
+  deletion.
+- **`docs/design.md`** — "Instance and deployment model" no longer
+  describes the hosted plane as hypothetical ("a future hosted service");
+  it names the real module count and migration count, and records that the
+  two planes are converging onto one core rather than staying permanently
+  separate, with an honest note that the convergence is partial (hosted's
+  execution surface remains far behind local's).
+- **Full suite**: 2389 passed, 57 skipped, at every step and at the end —
+  zero regressions across the whole pass.

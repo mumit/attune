@@ -24,6 +24,52 @@ class Task(str, Enum):
     MEMORY_EXTRACT = "memory_extract"
 
 
+# ---------------------------------------------------------------------------
+# Phase P9 (docs/plan-2026-h2.md, build prompt 35): the bounded chat-messages
+# envelope hosted's model gateway always enforced, moved here as the
+# canonical shared home -- following the `hosted/intelligence.py` pattern of
+# core owning the shape. `hosted/model_gateway.py` imports these same
+# constants and `validate_messages` instead of redefining them, so a bound
+# changed once applies to both planes. `validate_messages` here checks only
+# message shape and bounds; task-identity validation of an UNTRUSTED task
+# string (hosted's own callers) stays in hosted's own wrapper, since local's
+# `Task` is already a checked enum, never untrusted input.
+# ---------------------------------------------------------------------------
+
+MAX_MESSAGES = 8
+MAX_MESSAGE_CHARS = 8_000
+MAX_TOTAL_CHARS = 32_000
+MAX_RESPONSE_CHARS = 16_000
+ROLES = frozenset({"system", "user", "assistant"})
+
+
+def validate_messages(messages: object) -> list[dict[str, str]]:
+    """Bounded validation for a chat ``messages`` list: shape, a per-message
+    character cap, a running total budget, and a required leading system
+    boundary. Available for any local call site that opts in; existing call
+    sites are not yet wired to it (docs/decisions.md, build prompt 35)."""
+    if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_MESSAGES:
+        raise ValueError("model messages are invalid")
+    normalized: list[dict[str, str]] = []
+    total = 0
+    for item in messages:
+        if not isinstance(item, dict) or set(item) != {"role", "content"}:
+            raise ValueError("model message schema is invalid")
+        role = item["role"]
+        content = item["content"]
+        if not isinstance(role, str) or role not in ROLES or not isinstance(content, str):
+            raise ValueError("model message schema is invalid")
+        if not 1 <= len(content) <= MAX_MESSAGE_CHARS:
+            raise ValueError("model message content is invalid")
+        total += len(content)
+        if total > MAX_TOTAL_CHARS:
+            raise ValueError("model message budget exceeded")
+        normalized.append({"role": role, "content": content})
+    if normalized[0]["role"] != "system":
+        raise ValueError("model messages require a system boundary")
+    return normalized
+
+
 def model_for(task: Task, settings: Settings | None = None) -> str:
     settings = settings or Settings.from_env()
     value = getattr(settings, f"model_{task.value}")

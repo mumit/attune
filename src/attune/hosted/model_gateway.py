@@ -8,14 +8,13 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
+from ..llm import MAX_MESSAGE_CHARS, MAX_MESSAGES, MAX_TOTAL_CHARS, ROLES
+from ..llm import MAX_RESPONSE_CHARS
+from ..llm import validate_messages as _validate_message_bounds
+
 TASKS = frozenset({"classify", "converse", "embed", "draft"})
 _CHAT_TASKS = frozenset({"classify", "converse", "draft"})
-ROLES = frozenset({"system", "user", "assistant"})
 MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$")
-MAX_MESSAGES = 8
-MAX_MESSAGE_CHARS = 8_000
-MAX_TOTAL_CHARS = 32_000
-MAX_RESPONSE_CHARS = 16_000
 MAX_GATEWAY_RESPONSE_BYTES = 100_000
 MAX_EMBED_CHARS = 8_000
 MAX_EMBED_DIMENSIONS = 4_096
@@ -199,28 +198,12 @@ def validate_embed_input(text: object) -> str:
 
 
 def validate_messages(*, task: str, messages: object) -> list[dict[str, str]]:
+    """Hosted's task-identity check (an UNTRUSTED task string) followed by
+    the shared message-shape/bounds validation now owned by
+    ``attune.llm`` (Phase P9, build prompt 35)."""
     if not isinstance(task, str) or task not in _CHAT_TASKS:
         raise ValueError("unsupported model task")
-    if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_MESSAGES:
-        raise ValueError("model messages are invalid")
-    normalized: list[dict[str, str]] = []
-    total = 0
-    for item in messages:
-        if not isinstance(item, dict) or set(item) != {"role", "content"}:
-            raise ValueError("model message schema is invalid")
-        role = item["role"]
-        content = item["content"]
-        if not isinstance(role, str) or role not in ROLES or not isinstance(content, str):
-            raise ValueError("model message schema is invalid")
-        if not 1 <= len(content) <= MAX_MESSAGE_CHARS:
-            raise ValueError("model message content is invalid")
-        total += len(content)
-        if total > MAX_TOTAL_CHARS:
-            raise ValueError("model message budget exceeded")
-        normalized.append({"role": role, "content": content})
-    if normalized[0]["role"] != "system":
-        raise ValueError("model messages require a system boundary")
-    return normalized
+    return _validate_message_bounds(messages)
 
 
 def make_openai_client(*, base_url: str, api_key: str):

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from attune.audit.log import AuditEntry, JsonlAuditLog
+from attune.audit.log import AUDIT_OUTCOMES, AuditEntry, JsonlAuditLog
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +81,60 @@ def test_record_stamps_thread_id_workflow_domain_user(tmp_path):
     assert line["user_id"] == "me@example.com"
     assert line["event"] == "drafted"
     assert line["chars"] == 42
+
+
+# --- shared outcome vocabulary (Phase P9, build prompt 35) ------------------
+
+
+def test_record_accepts_an_optional_outcome_from_the_shared_vocabulary(tmp_path):
+    """AUDIT_OUTCOMES is the same four-word vocabulary hosted's audit outbox
+    has always enforced -- an entirely new, optional classification, not a
+    replacement for the free-form ``event`` strings existing callers use."""
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    for outcome in sorted(AUDIT_OUTCOMES):
+        log.record(
+            thread_id="t1", workflow="draft_approve",
+            events=[{"event": "applied", "outcome": outcome}],
+        )
+    lines = [json.loads(line) for line in path.read_text().strip().split("\n")]
+    assert [line["outcome"] for line in lines] == sorted(AUDIT_OUTCOMES)
+
+
+def test_record_rejects_an_outcome_outside_the_shared_vocabulary(tmp_path):
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    with pytest.raises(ValueError):
+        log.record(
+            thread_id="t1", workflow="draft_approve",
+            events=[{"event": "applied", "outcome": "success"}],
+        )
+
+
+def test_record_without_outcome_is_unaffected(tmp_path):
+    """Every existing call site never sets ``outcome`` -- confirms that
+    absence is a complete no-op, not an implicit default value."""
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    log.record(
+        thread_id="t1", workflow="draft_approve",
+        events=[{"event": "retrieved", "ts": "2026-07-10T00:00:00+00:00"}],
+    )
+    line = json.loads(path.read_text().strip())
+    assert "outcome" not in line
+
+
+def test_record_rejects_fields_over_the_bounded_metadata_limit(tmp_path):
+    """The same bounded-metadata discipline hosted's audit outbox always
+    had (``_bounded_object``) -- local's per-event fields had no size cap
+    at all before this."""
+    path = tmp_path / "audit.log.jsonl"
+    log = JsonlAuditLog(str(path))
+    with pytest.raises(ValueError):
+        log.record(
+            thread_id="t1", workflow="draft_approve",
+            events=[{"event": "applied", "blob": "x" * 20_000}],
+        )
 
 
 def test_record_appends_across_calls(tmp_path):

@@ -59,11 +59,27 @@ credential set, audit log, and state directory. Deployment targets—local host,
 VM, container platform, or cloud—are operational choices. When isolation is
 required, deploy separate instances instead of adding named profiles to code.
 
-This describes the current self-hosted runtime. A future hosted service does not
-make local state multi-tenant: it separates control/event ingress from queued,
-tenant-scoped execution and replaces SQLite, JSON, JSONL, and local Qdrant state
-with explicitly tenant-aware durable services. Hosted workers remain stateless
-between jobs.
+The paragraph above describes the self-hosted runtime specifically. A second,
+already-shipping deployment target — the hosted service (`src/attune/hosted/`,
+113+ modules, 47 migrations) — does not make local state multi-tenant: it
+separates control/event ingress from queued, tenant-scoped execution and
+replaces SQLite, JSON, JSONL, and local Qdrant state with explicitly
+tenant-aware, RLS-scoped Postgres services. Hosted workers remain stateless
+between jobs, and every privileged state transition (approval claims, audit
+writes) goes through a SECURITY DEFINER database function rather than
+application-level trust.
+
+The two planes are converging onto one core rather than staying two full
+reimplementations of the same product (`docs/plan-2026-h2.md` Phase P9,
+`docs/decisions.md`'s "Converge the two planes" entries): shared rule
+engines and dataclasses live in core and hosted imports them, following the
+pattern `hosted/intelligence.py` established first — storage and tenancy
+isolation stay per-plane, but the shape of a capability, a model task
+envelope, and a channel-broker delivery attempt do not. This convergence is
+partial and ongoing, not complete: hosted's execution surface (which
+capabilities it can actually carry out, not just admit) remains far behind
+local's, and unifying that gap is real, scoped future work, not a
+documentation fiction to resolve by prose alone.
 
 Polling is the portable default. `google_pubsub` explicitly names the advanced
 Google-specific transport. Gmail and Chat Workspace Events can publish to pull

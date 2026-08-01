@@ -48,6 +48,29 @@ from ..fslock import locked
 
 GENESIS_HASH = "0" * 64
 
+# Phase P9 (docs/plan-2026-h2.md, build prompt 35): the outcome vocabulary
+# hosted's audit outbox has always enforced (`hosted/audit.py`'s
+# `AUDIT_OUTCOMES`), shared here as the canonical home so a future caller on
+# either plane classifying an audit event's outcome uses the same four
+# words. This does NOT change local's existing free-form `event` strings
+# (`"retrieved"`, `"apply_failed"`, `"autonomy_gate"`, ...), which already
+# encode both an action and an outcome in one word and are read by
+# `orchestrator/grants.py`'s graduation logic today — renaming any of them
+# is a real behavior change this step does not make. `outcome` is an
+# additional, OPTIONAL classification a raw event dict may include going
+# forward; existing call sites, which never set it, are unaffected.
+AUDIT_OUTCOMES = frozenset({"allowed", "denied", "failed", "observed"})
+
+
+def _bounded_object(name: str, value: dict[str, Any], byte_limit: int) -> None:
+    """The same bounded-metadata shape hosted's audit outbox always
+    enforced (`hosted/repositories.py`'s `_bounded_object`) — local's
+    per-event ``fields`` had no size cap at all before this."""
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be an object")
+    if len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()) > byte_limit:
+        raise ValueError(f"{name} exceeds its byte limit")
+
 
 @dataclass
 class AuditEntry:
@@ -204,6 +227,15 @@ class JsonlAuditLog:
             prev_hash = self._last_hash()
             with open(self._path, "a") as fh:
                 for raw in events:
+                    outcome = raw.get("outcome")
+                    if outcome is not None and outcome not in AUDIT_OUTCOMES:
+                        raise ValueError(
+                            f"audit outcome {outcome!r} is not in {sorted(AUDIT_OUTCOMES)}"
+                        )
+                    fields = {
+                        k: v for k, v in raw.items() if k not in ("event", "ts")
+                    }
+                    _bounded_object("fields", fields, 16_384)
                     entry = AuditEntry(
                         thread_id=thread_id,
                         workflow=workflow,
@@ -211,9 +243,7 @@ class JsonlAuditLog:
                         ts=raw.get("ts", _now_iso()),
                         domain=domain,
                         user_id=user_id,
-                        fields={
-                            k: v for k, v in raw.items() if k not in ("event", "ts")
-                        },
+                        fields=fields,
                     )
                     payload = entry.to_json()
                     entry_hash = _entry_hash(prev_hash, payload)

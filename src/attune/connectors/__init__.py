@@ -19,6 +19,7 @@ from .base import (
     DraftRef,
     EmailThread,
     LabelNotPermitted,
+    MAX_THREAD_BODY_CHARS,
     Provenance,
     SendNotPermitted,
     WorkspaceConnector,

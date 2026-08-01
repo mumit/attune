@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from ..audit.log import AUDIT_OUTCOMES
 from .repositories import (
     ConnectionFactory,
     _bounded_object,
@@ -17,7 +18,6 @@ from .repositories import (
 from .tenant import TenantContext, tenant_transaction
 
 AUDIT_PRODUCER_KINDS = frozenset({"control_plane", "worker", "secret_broker"})
-AUDIT_OUTCOMES = frozenset({"allowed", "denied", "failed", "observed"})
 
 
 @dataclass(frozen=True)

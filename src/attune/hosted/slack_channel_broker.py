@@ -6,12 +6,17 @@ import hashlib
 import hmac
 import re
 import secrets
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
 from uuid import UUID, uuid4
 
+from .channel_broker_base import (
+    AuditWriter,
+    deliver_and_audit,
+    execute_claim_call,
+    swallow_complete_failure,
+    write_or_raise,
+)
 from .repositories import ConnectionFactory, _fixed_hash
 from .slack_provider import (
     ACKNOWLEDGMENT_TEXT,
@@ -31,10 +36,6 @@ _MESSAGE_REF = re.compile(
 )
 ROUTE_PROVIDER = "slack_route"
 TOKEN_PROVIDER = "slack_bot_token"
-
-
-class AuditWriter(Protocol):
-    def write(self, audit_intent_id: UUID) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -467,18 +468,7 @@ class PostgresSlackChannelBrokerRepository:
         return CompletedSlackAcknowledgment(*row)
 
     def _call(self, statement: str, values: tuple):
-        with closing(self._connect()) as connection:
-            try:
-                with closing(connection.cursor()) as cursor:
-                    cursor.execute(statement, values)
-                    row = cursor.fetchone()
-                if row is None:
-                    raise RuntimeError("channel broker returned no state")
-                connection.commit()
-                return row
-            except BaseException:
-                connection.rollback()
-                raise
+        return execute_claim_call(self._connect, statement, values)
 
 
 class SlackInstallBroker:
@@ -534,8 +524,10 @@ class SlackInstallBroker:
                 or claim.owner_principal_id != owner_principal_id
             ):
                 raise RuntimeError("Slack install browser binding does not match")
-            if not self._audit_writer.write(claim.pre_audit_intent_id):
-                raise RuntimeError("Slack install pre-effect audit is unavailable")
+            write_or_raise(
+                self._audit_writer, claim.pre_audit_intent_id,
+                "Slack install pre-effect audit is unavailable",
+            )
             installation = self._provider.exchange_code(
                 code=code, redirect_uri=self._redirect_uri
             )
@@ -588,8 +580,10 @@ class SlackInstallBroker:
             except Exception:
                 pass
             raise
-        if not self._audit_writer.write(installed.outcome_audit_intent_id):
-            raise RuntimeError("Slack install outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, installed.outcome_audit_intent_id,
+            "Slack install outcome audit is unavailable",
+        )
         return installed
 
     def test_delivery(
@@ -606,25 +600,27 @@ class SlackInstallBroker:
             claim_hash=claim_hash,
             expires_at=current + timedelta(seconds=45),
         )
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_failed(destination_id, claim_hash)
-            raise RuntimeError("channel delivery pre-effect audit is unavailable")
-        try:
+        def send() -> None:
             channel, bot_token = self._decrypt_route_and_token(
                 claim.encrypted_route, claim.encrypted_token,
                 tenant_id=claim.tenant_id, destination_id=destination_id,
             )
-            self._provider.send_connection_test(
-                bot_token=bot_token, channel=channel
-            )
-        except BaseException:
-            self._complete_failed(destination_id, claim_hash)
-            raise
+            self._provider.send_connection_test(bot_token=bot_token, channel=channel)
+
+        deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_failed(destination_id, claim_hash),
+            unavailable_message="channel delivery pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_delivery(
             destination_id=destination_id, claim_hash=claim_hash, succeeded=True
         )
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("channel delivery outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "channel delivery outcome audit is unavailable",
+        )
         return completed
 
     def accept_message(
@@ -647,8 +643,10 @@ class SlackInstallBroker:
             message_ref_hash=self._reference_hasher.hash("message", message_ref),
             text=text,
         )
-        if not self._audit_writer.write(accepted.pre_audit_intent_id):
-            raise RuntimeError("channel message pre-effect audit is unavailable")
+        write_or_raise(
+            self._audit_writer, accepted.pre_audit_intent_id,
+            "channel message pre-effect audit is unavailable",
+        )
         return accepted
 
     def acknowledge_message(
@@ -678,25 +676,31 @@ class SlackInstallBroker:
             or claim.pre_audit_intent_id is None
         ):
             raise RuntimeError("Slack acknowledgment claim is invalid")
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_acknowledgment_failed(message_ref_hash)
-            raise RuntimeError("Slack acknowledgment pre-effect audit is unavailable")
-        try:
+        encrypted_route, encrypted_token = claim.encrypted_route, claim.encrypted_token
+
+        def send() -> None:
             channel, bot_token = self._decrypt_route_and_token(
-                claim.encrypted_route, claim.encrypted_token,
+                encrypted_route, encrypted_token,
                 tenant_id=claim.tenant_id, destination_id=claim.destination_id,
             )
             self._provider.send_message(
                 bot_token=bot_token, channel=channel, text=ACKNOWLEDGMENT_TEXT
             )
-        except BaseException:
-            self._complete_acknowledgment_failed(message_ref_hash)
-            raise
+
+        deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_acknowledgment_failed(message_ref_hash),
+            unavailable_message="Slack acknowledgment pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_acknowledgment(
             message_ref_hash=message_ref_hash, succeeded=True
         )
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("Slack acknowledgment outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "Slack acknowledgment outcome audit is unavailable",
+        )
         return True
 
     def deliver_reply(
@@ -720,35 +724,43 @@ class SlackInstallBroker:
             or claim.reply_text is None or claim.pre_audit_intent_id is None
         ):
             raise RuntimeError("conversation delivery claim is invalid")
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_reply_failed(job_id, claim_hash)
-            raise RuntimeError("conversation delivery pre-effect audit is unavailable")
-        try:
+        encrypted_route, encrypted_token, reply_text = (
+            claim.encrypted_route, claim.encrypted_token, claim.reply_text
+        )
+
+        def send() -> bytes:
             channel, bot_token = self._decrypt_route_and_token(
-                claim.encrypted_route, claim.encrypted_token,
+                encrypted_route, encrypted_token,
                 tenant_id=claim.tenant_id, destination_id=destination_id,
             )
             team = self._decrypt_team(
-                claim.encrypted_route, tenant_id=claim.tenant_id,
+                encrypted_route, tenant_id=claim.tenant_id,
                 destination_id=destination_id,
             )
             posted_ts = self._provider.send_message(
-                bot_token=bot_token, channel=channel, text=claim.reply_text,
+                bot_token=bot_token, channel=channel, text=reply_text,
                 request_id=job_id,
             )
             message_ref = f"teams/{team}/channels/{channel}/messages/{posted_ts}"
-            message_hash = self._reference_hasher.hash("message", message_ref)
-        except BaseException:
-            self._complete_reply_failed(job_id, claim_hash)
-            raise
+            return self._reference_hasher.hash("message", message_ref)
+
+        message_hash = deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_reply_failed(job_id, claim_hash),
+            unavailable_message="conversation delivery pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_conversation_delivery(
             job_id=job_id, claim_hash=claim_hash, succeeded=True,
             provider_message_ref_hash=message_hash,
         )
         if completed.delivery_state != "delivered":
             raise RuntimeError("conversation delivery completion is invalid")
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("conversation delivery outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "conversation delivery outcome audit is unavailable",
+        )
         return True
 
     def deliver_brief(
@@ -777,16 +789,17 @@ class SlackInstallBroker:
             or claim.brief_text is None or claim.pre_audit_intent_id is None
         ):
             raise RuntimeError("brief delivery claim is invalid")
-        if not self._audit_writer.write(claim.pre_audit_intent_id):
-            self._complete_brief_failed(job_id, destination_id, claim_hash)
-            raise RuntimeError("brief delivery pre-effect audit is unavailable")
-        try:
+        encrypted_route, encrypted_token, brief_text = (
+            claim.encrypted_route, claim.encrypted_token, claim.brief_text
+        )
+
+        def send() -> bytes:
             channel, bot_token = self._decrypt_route_and_token(
-                claim.encrypted_route, claim.encrypted_token,
+                encrypted_route, encrypted_token,
                 tenant_id=claim.tenant_id, destination_id=destination_id,
             )
             team = self._decrypt_team(
-                claim.encrypted_route, tenant_id=claim.tenant_id,
+                encrypted_route, tenant_id=claim.tenant_id,
                 destination_id=destination_id,
             )
             request_id = UUID(
@@ -796,22 +809,31 @@ class SlackInstallBroker:
                 version=4,
             )
             posted_ts = self._provider.send_message(
-                bot_token=bot_token, channel=channel, text=claim.brief_text,
+                bot_token=bot_token, channel=channel, text=brief_text,
                 request_id=request_id,
             )
             message_ref = f"teams/{team}/channels/{channel}/messages/{posted_ts}"
-            message_hash = self._reference_hasher.hash("message", message_ref)
-        except BaseException:
-            self._complete_brief_failed(job_id, destination_id, claim_hash)
-            raise
+            return self._reference_hasher.hash("message", message_ref)
+
+        message_hash = deliver_and_audit(
+            pre_audit_intent_id=claim.pre_audit_intent_id,
+            audit_writer=self._audit_writer,
+            on_failure=lambda: self._complete_brief_failed(
+                job_id, destination_id, claim_hash
+            ),
+            unavailable_message="brief delivery pre-effect audit is unavailable",
+            send=send,
+        )
         completed = self._repository.complete_brief_delivery(
             job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
             succeeded=True, provider_message_ref_hash=message_hash,
         )
         if completed.delivery_state != "delivered":
             raise RuntimeError("brief delivery completion is invalid")
-        if not self._audit_writer.write(completed.outcome_audit_intent_id):
-            raise RuntimeError("brief delivery outcome audit is unavailable")
+        write_or_raise(
+            self._audit_writer, completed.outcome_audit_intent_id,
+            "brief delivery outcome audit is unavailable",
+        )
         return True
 
     def _references(
@@ -881,43 +903,37 @@ class SlackInstallBroker:
         return team
 
     def _complete_failed(self, destination_id: UUID, claim_hash: bytes) -> None:
-        try:
-            completed = self._repository.complete_delivery(
-                destination_id=destination_id,
-                claim_hash=claim_hash,
-                succeeded=False,
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_delivery(
+                destination_id=destination_id, claim_hash=claim_hash, succeeded=False,
+            ),
+        )
 
     def _complete_acknowledgment_failed(self, message_ref_hash: bytes) -> None:
-        try:
-            completed = self._repository.complete_acknowledgment(
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_acknowledgment(
                 message_ref_hash=message_ref_hash, succeeded=False
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+            ),
+        )
 
     def _complete_reply_failed(self, job_id: UUID, claim_hash: bytes) -> None:
-        try:
-            completed = self._repository.complete_conversation_delivery(
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_conversation_delivery(
                 job_id=job_id, claim_hash=claim_hash, succeeded=False,
                 provider_message_ref_hash=None,
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+            ),
+        )
 
     def _complete_brief_failed(
         self, job_id: UUID, destination_id: UUID, claim_hash: bytes
     ) -> None:
-        try:
-            completed = self._repository.complete_brief_delivery(
+        swallow_complete_failure(
+            self._audit_writer,
+            lambda: self._repository.complete_brief_delivery(
                 job_id=job_id, destination_id=destination_id, claim_hash=claim_hash,
                 succeeded=False, provider_message_ref_hash=None,
-            )
-            self._audit_writer.write(completed.outcome_audit_intent_id)
-        except Exception:
-            pass
+            ),
+        )

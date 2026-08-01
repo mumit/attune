@@ -29,16 +29,42 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 
 DEFAULT_MAX_TURNS = 10
 DEFAULT_TTL_MINUTES = 120
 
 
+class ReplayTurn(TypedDict):
+    """The shape a conversation turn takes when replayed to the model as a
+    chat message — the shared piece across both planes' otherwise different
+    turn representations (Phase P9, docs/plan-2026-h2.md build prompt 35).
+    Local's dict-backed turns already return exactly this shape from
+    ``recent()``. Hosted's ``HostedTurn``/``WebConversationTurn``
+    (``hosted/durable.py``, ``hosted/web_conversation.py``) use
+    ``actor_type`` instead of ``role`` — a broader actor-identity concept
+    shared with hosted's own audit actor-type vocabulary, not a fixed
+    ``user``/``assistant`` pair — and convert via :func:`role_for_actor_type`
+    at the point of replay. The turn *shape* is shared; the storage strategy
+    (this module's TTL+count JSON window vs. hosted's durable sequenced
+    Postgres rows) deliberately is not — they solve genuinely different
+    problems (ephemeral replay context vs. a durable canonical record)."""
+
+    role: str
+    content: str
+
+
+def role_for_actor_type(actor_type: str, *, assistant_marker: str = "assistant") -> str:
+    """Map a hosted turn's ``actor_type`` onto the ``role`` a chat-completion
+    message expects — one shared place for the "assistant, else user" rule
+    hosted's conversation executors apply when replaying stored turns."""
+    return "assistant" if actor_type == assistant_marker else "user"
+
+
 class ConversationLog(Protocol):
     def recent(
         self, *, channel: str, user_id: str, now: datetime | None = None
-    ) -> list[dict[str, str]]:
+    ) -> list[ReplayTurn]:
         """Unexpired turns for one (channel, user), oldest first, each
         ``{"role": "user"|"assistant", "content": ...}``."""
         ...
@@ -77,7 +103,7 @@ class JsonConversationLog:
 
     def recent(
         self, *, channel: str, user_id: str, now: datetime | None = None
-    ) -> list[dict[str, str]]:
+    ) -> list[ReplayTurn]:
         now = now or datetime.now(timezone.utc)
         turns = self._load().get(self._key(channel, user_id), [])
         return [

@@ -46,9 +46,35 @@ passing tests. See ``docs/decisions.md`` for the record of this scoping.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .autonomy import Action, Domain, RiskTier, Rung
+
+
+@runtime_checkable
+class CapabilityIdentity(Protocol):
+    """Phase P9 (docs/plan-2026-h2.md, build prompt 35): the identity triple
+    every capability descriptor exposes across both planes, whether it's an
+    execution descriptor that dispatches inline (:class:`Capability`, this
+    module) or a pure admission descriptor that defers execution to an async
+    job (hosted's ``CapabilityDefinition``) — a stable name, a domain, and a
+    risk tier. This is the shared shape following the
+    `hosted/intelligence.py` pattern (core owns the shape; storage/execution
+    stay per-plane): NOT a merge of the two dataclasses, which genuinely
+    differ in what they're for (one carries live propose/apply/compensate
+    callables and is keyed by a closed `Action` enum with 12 entries; the
+    other carries a typed argument contract and a product-risk ceiling and
+    is keyed by an open capability-name string with 1 entry today). See
+    docs/decisions.md for why a fuller merge is deferred."""
+
+    @property
+    def capability_name(self) -> str: ...
+
+    @property
+    def capability_domain(self) -> str: ...
+
+    @property
+    def capability_risk_tier(self) -> RiskTier: ...
 from .draft_approve import (
     SourceChangedError,
     _check_freshness_calendar_event,
@@ -323,6 +349,20 @@ class Capability:
                 "30's own constraint: never ship a capability without one "
                 "or the other."
             )
+
+    # -- CapabilityIdentity (Phase P9, build prompt 35) ----------------------
+
+    @property
+    def capability_name(self) -> str:
+        return self.action.value
+
+    @property
+    def capability_domain(self) -> str:
+        return self.domain.value
+
+    @property
+    def capability_risk_tier(self) -> RiskTier:
+        return self.risk_tier
 
 
 class CapabilityRegistry:

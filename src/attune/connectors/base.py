@@ -85,6 +85,21 @@ class Provenance(str, Enum):
     FETCHED = "fetched"               # came from email/chat/web -> UNTRUSTED
 
 
+# Phase P9 (docs/plan-2026-h2.md, build prompt 35): the data-minimization
+# gap prompt 24 finding #5 named -- ``get_thread`` decoded a full email body
+# with no size cap at all, unlike the hosted plane's provider, which has
+# always bounded every response (``hosted/google_provider.py``'s
+# ``MAX_PROVIDER_RESPONSE_BYTES``). That constant caps a raw HTTP response
+# before JSON parsing -- a different unit and layer than this one, which
+# caps the already-decoded body text -- so it isn't imported directly, but
+# the number matches deliberately: same order of magnitude, same posture.
+# Every current consumer (``dispatcher.py``'s ``INCOMING_BODY_CHAR_LIMIT``,
+# 1,600 chars) truncates far below this, so this is a hard backstop against
+# an unbounded body reaching memory at all, not a behavior change to any
+# existing call site.
+MAX_THREAD_BODY_CHARS = 32_768
+
+
 @dataclass
 class EmailThread:
     """A minimal, provenance-tagged view of a mail thread. Bodies are FETCHED

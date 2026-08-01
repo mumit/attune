@@ -27,6 +27,7 @@ from typing import Any
 
 from ..retry import retry_call
 from .base import (
+    MAX_THREAD_BODY_CHARS,
     CalendarEvent,
     CalendarWriteNotPermitted,
     DraftRef,
@@ -809,7 +810,9 @@ def _thread_from_full(
     messages = data.get("messages") or []
     first = messages[0] if messages else {}
     last = messages[-1] if messages else {}
-    body = _decode_body(last.get("payload", {})) or last.get("snippet", "")
+    body = (_decode_body(last.get("payload", {})) or last.get("snippet", ""))[
+        :MAX_THREAD_BODY_CHARS
+    ]
     return EmailThread(
         thread_id=data.get("id", ""),
         subject=_header(first, "subject"),

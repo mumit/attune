@@ -9,6 +9,7 @@ import pytest
 from attune.config import Settings
 from attune.connectors import (
     DEFAULT_NOISE_LABEL,
+    MAX_THREAD_BODY_CHARS,
     CalendarWriteNotPermitted,
     DirectOAuthConnector,
     LabelNotPermitted,
@@ -451,6 +452,51 @@ def test_mcp_list_thread_ids_uses_the_base_default():
     no override needed."""
     conn = McpWorkspaceConnector(FakeMcp())
     assert conn.list_thread_ids("is:unread") == ["t1"]
+
+
+# --- data minimization: bounded thread body (Phase P9, build prompt 35) -----
+
+
+def test_direct_oauth_get_thread_caps_an_oversized_body():
+    """prompt 24 finding #5 / prompt 35 step 1: get_thread previously decoded
+    an entire email body with no size cap at all, unlike hosted's provider,
+    which has always bounded every response."""
+    import base64
+
+    oversized = "x" * (MAX_THREAD_BODY_CHARS + 5_000)
+    data = base64.urlsafe_b64encode(oversized.encode("utf-8")).decode("ascii")
+    detail = {
+        "id": "t1",
+        "messages": [{
+            "id": "m-t1",
+            "snippet": "hi",
+            "internalDate": "1700000000000",
+            "labelIds": ["UNREAD"],
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": "a@x.com"},
+                    {"name": "Subject", "value": "Hi"},
+                ],
+                "body": {"data": data},
+            },
+        }],
+    }
+    gmail = FakeGmailThreadService({"t1": detail})
+    conn = DirectOAuthConnector(gmail_service=gmail)
+
+    thread = conn.get_thread("t1")
+
+    assert len(thread.body) == MAX_THREAD_BODY_CHARS
+
+
+def test_mcp_to_thread_caps_an_oversized_body():
+    conn = McpWorkspaceConnector(FakeMcp())
+    oversized = "y" * (MAX_THREAD_BODY_CHARS + 5_000)
+    thread = conn._to_thread({
+        "thread_id": "t1", "subject": "Hi", "snippet": "hi",
+        "from": "a@x.com", "body": oversized,
+    })
+    assert len(thread.body) == MAX_THREAD_BODY_CHARS
 
 
 # --- decline_invite/reschedule_event: stop double-fetching (build prompt 33,

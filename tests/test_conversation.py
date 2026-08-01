@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from attune.conversation import JsonConversationLog
+from attune.conversation import JsonConversationLog, role_for_actor_type
 
 T0 = datetime(2026, 7, 10, 9, 0, tzinfo=timezone.utc)
 
@@ -71,3 +71,15 @@ def test_survives_reload(tmp_path):
     )
     turns = JsonConversationLog(path).recent(channel="chat", user_id="U1", now=T0)
     assert [t["content"] for t in turns] == ["persisted"]
+
+
+# --- shared turn shape (Phase P9, build prompt 35) --------------------------
+
+
+def test_role_for_actor_type_maps_assistant_and_everything_else():
+    """The shared mapping hosted's conversation executors apply when
+    replaying a stored (``actor_type``-keyed) turn as a chat message."""
+    assert role_for_actor_type("assistant") == "assistant"
+    assert role_for_actor_type("user") == "user"
+    assert role_for_actor_type("principal") == "user"
+    assert role_for_actor_type("owner") == "user"
