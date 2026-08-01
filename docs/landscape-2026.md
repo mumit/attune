@@ -5,6 +5,18 @@ trilogy](current-state.md); where that trilogy scored Attune against its own
 product goal, this one scores it against what shipped elsewhere. The
 remediation sequence is in [plan-2026-h2.md](plan-2026-h2.md).
 
+> **This review is the evidence base `plan-2026-h2.md` was built to close —
+> read the §6 scorecard as the "before" picture, not current state.** Build
+> prompts 24-35 (Phases P0-P9, all landed 2026-07-31/2026-08-01, after this
+> review) directly targeted most of the internal (non-competitive) rows
+> below: the learning loop, evals, proactivity design, performance, the
+> model layer, interop, and engineering economics all changed materially.
+> The competitive verdicts against other vendors (action surface vs.
+> Claude/Outlook, voice/mobile/meeting capture, the market's own retreat
+> from ambient briefs) are external claims this repository's own work
+> doesn't move and were not reverified. See each row's inline note below
+> and `docs/decisions.md` for what shipped.
+
 Source-quality note: OpenAI's own domains return HTTP 403 to automated
 fetching, so every OpenAI claim below is secondary-sourced. Several vendor
 prices resolved in CAD/EUR. Numbers marked *(vendor)* are self-reported and
@@ -373,27 +385,38 @@ denominator or it will reward-hack itself into uselessness.**
 | Dimension | Attune | Verdict |
 |---|---|---|
 | Safety spine — approvals, freshness re-checks, idempotency, actor allowlists, structural refusals, hash-chained audit | Built and tested | **Ahead of the market.** ClawsBench's 7–33% unsafe-action rates are the external case for it |
-| Earned autonomy ladder | Built, never graduates in-product; scoped grants have no earning mechanism at all | **Best idea in the product, unrealized.** Externally validated by the Digital Apprentice framework and by Skej pricing unsupervised mode as premium |
+| Earned autonomy ladder | Built, never graduates in-product; scoped grants have no earning mechanism at all | **Best idea in the product, unrealized.** Externally validated by the Digital Apprentice framework and by Skej pricing unsupervised mode as premium. *Since built (build prompt 31): in-product graduation cards accept in-channel, with automatic demotion on evidence — "never graduates in-product" no longer holds.* |
 | Event-driven ingestion | Pub/Sub push + polling | **Ahead of both consumer leaders**, and unmarketed |
 | Self-hosting / no vendor dependency / data portability | Real | **Uniquely defensible** given §1's body count |
-| Multi-tenant isolation engineering (hosted) | RLS, memberless SECURITY DEFINER owners, KMS vault, two-phase audit outbox, capability gateway | Exceeds what most products ship — **and is wired to one dormant capability** |
-| Action surface | 6 writes; no undo, no batching, no expiry; Chat/Slack write-dead | **Far behind.** Claude has full read/write Calendar; Outlook Agent Mode does the whole triage-and-reschedule loop |
-| Learning loop | Deterministic half works; **semantic half writes sender-less strings and cannot function** | **Broken, and it is the reason the product exists** |
-| Evals | No metric computed anywhere; live eval cannot execute | **Behind a published LangChain tutorial** |
-| Proactivity design | Static brief + arrival-order caps | **Behind the market's own retraction.** Needs ranking and user-authored routines |
-| Performance | ~64 serial Google calls per brief (10–25s); 60–90s per 25-thread batch; zero concurrency; no prompt caching | **Behind.** Glean now competes on **cost-per-answer** (Waldo: ~50% lower latency, ~25% fewer tokens) |
-| Model layer | Chat Completions text-in/text-out; no tool calling, structured outputs, caching, or streaming | **A capability floor mislabelled as neutrality** |
-| Interop | MCP client only; contract predates a breaking spec | **Missing the position it is best suited to hold** |
-| Voice / mobile / meeting capture | None | Behind — but capture carries live legal exposure; consume over MCP instead |
-| Engineering economics | 2.7% code reuse across two implementations of one product | **A compounding velocity tax** |
+| Multi-tenant isolation engineering (hosted) | RLS, memberless SECURITY DEFINER owners, KMS vault, two-phase audit outbox, capability gateway | Exceeds what most products ship — **and is wired to one dormant capability.** *Since built (build prompt 34): a gated `google.gmail.draft.create` (R2) capability is now wired end to end through this gateway, off by default via `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY` — "dormant" now means gated-off, not unwired.* |
+| Action surface | 6 writes; no undo, no batching, no expiry; Chat/Slack write-dead | **Far behind.** Claude has full read/write Calendar; Outlook Agent Mode does the whole triage-and-reschedule loop. *Since narrowed (build prompt 30/31): 12 registered capabilities, undo/compensating actions for 5, approval TTL, batch cards. Chat/Slack still write-dead — that part of the verdict stands.* |
+| Learning loop | Deterministic half works; **semantic half writes sender-less strings and cannot function** | **Broken, and it is the reason the product exists.** *Since fixed (build prompt 25): sender/subject/priority now flow into both `meta` and `text`.* |
+| Evals | No metric computed anywhere; live eval cannot execute | **Behind a published LangChain tutorial.** *Since built (build prompts 26/27): decision ledger with `context_attribution`, pairwise eval harness with a published judge-agreement rate, running in CI.* |
+| Proactivity design | Static brief + arrival-order caps | **Behind the market's own retraction.** Needs ranking and user-authored routines. *Since built (build prompt 32): the attention budget ranks by importance with a hard daily ceiling, plus user-authored routines (`attune routine add`).* |
+| Performance | ~64 serial Google calls per brief (10–25s); 60–90s per 25-thread batch; zero concurrency; no prompt caching | **Behind.** Glean now competes on **cost-per-answer** (Waldo: ~50% lower latency, ~25% fewer tokens). *Since addressed (build prompt 33): concurrency, batching, an incremental brief, and sleep-time precompute — numbers not independently reverified against these new claims.* |
+| Model layer | Chat Completions text-in/text-out; no tool calling, structured outputs, caching, or streaming | **A capability floor mislabelled as neutrality.** *Since built (build prompt 28): a prompt registry, structured-output parsing, capability-gated tool calling, and prompt caching.* |
+| Interop | MCP client only; contract predates a breaking spec | **Missing the position it is best suited to hold.** *Since built (build prompt 34): the MCP spec migration landed, and Attune is now also an MCP server — see `docs/mcp-server.md`.* |
+| Voice / mobile / meeting capture | None | Behind — but capture carries live legal exposure; consume over MCP instead. *Meeting-context-over-MCP shipped (build prompt 34, "consume, don't capture"); voice and mobile remain not built, and browser automation was separately declined for now (see `decisions.md`).* |
+| Engineering economics | 2.7% code reuse across two implementations of one product | **A compounding velocity tax.** *Since narrowed (build prompt 35, Phase P9): reuse moved to ~6.1% — real progress, not the 40% target; see `decisions.md`'s "Converge the two planes" entries for what shipped, what was deliberately narrowed, and why.* |
 
-**Summary.** Attune has built the hard, unglamorous half of a category the
-market keeps failing at, and has not yet built the half that makes anyone want
-it. The safety, durability, and auditability work is genuinely ahead — and it
-is sitting under a six-action product whose learning loop does not close and
-whose flagship surface is the one thing three major vendors measured and
-retired. The correction is not feature parity with Gemini, which is
-unwinnable and free. It is to make the compounding loop real and provable,
-widen the action surface enough to be worth trusting, and market the two things
-nobody else can offer: an agent that earns authority on an evidence trail you
-can audit, and one that cannot be switched off by its vendor.
+**Summary, as written 2026-07-31.** Attune has built the hard, unglamorous
+half of a category the market keeps failing at, and has not yet built the
+half that makes anyone want it. The safety, durability, and auditability
+work is genuinely ahead — and it is sitting under a six-action product whose
+learning loop does not close and whose flagship surface is the one thing
+three major vendors measured and retired. The correction is not feature
+parity with Gemini, which is unwinnable and free. It is to make the
+compounding loop real and provable, widen the action surface enough to be
+worth trusting, and market the two things nobody else can offer: an agent
+that earns authority on an evidence trail you can audit, and one that
+cannot be switched off by its vendor.
+
+**As of 2026-08-01**, the specific correction this summary called for —
+"make the compounding loop real and provable" — is largely done: the
+learning loop closes (build prompt 25), it's measured (26/27), and it
+compounds (the playbook, 29). The action surface widened from six to twelve
+capabilities with undo (30/31). What this summary got right and remains
+true: Chat/Slack are still write-dead, hosted's execution surface is still
+one gated capability deep, and the market-positioning argument (audit trail,
+no vendor kill-switch) is unchanged by any of this session's engineering —
+that's a marketing and adoption question, not a code gap.

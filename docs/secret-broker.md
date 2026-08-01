@@ -43,14 +43,29 @@ tenant field.
 |---|---|---|---|
 | `/v1/credentials/install` | control plane | `control_plane/install` | encrypt and version a credential |
 | `/v1/credentials/revoke` | control plane | `control_plane/revoke/google.oauth.disconnect` | revoke the active Google credential and connector |
+| `/v1/oauth/google/exchange` | control plane | `control_plane/install` (capability `google.oauth.install`) | exchange an authorization code for a credential, encrypt, and version it |
 | `/v1/providers/google/gmail/profile` | worker | `worker/use/google.gmail.profile.read` | return bounded mailbox counters and history ID |
 | `/v1/providers/google/calendar/primary` | worker | `worker/use/google.calendar.primary.read` | prove primary-calendar readability; return no content |
+| `/v1/providers/google/gmail/threads` | worker | `worker/use/google.gmail.threads.read` | return a bounded (≤10), fields-masked list of Gmail thread summaries for a caller-supplied query |
+| `/v1/providers/google/gmail/drafts/create` | worker | `worker/use/google.gmail.draft.create` | create a Gmail draft on a thread — the one write route this broker exposes |
+| `/v1/providers/google/calendar/events` | worker | `worker/use/google.calendar.events.read` | return a bounded (≤25) list of Calendar event summaries in a caller-supplied window |
 
-The first provider operations are intentionally narrow and read-only. The broker
-accepts no URL, Google user ID, query, or provider argument. It exchanges the
+The original provider operations (`gmail/profile`, `calendar/primary`) were
+intentionally narrow and read-only; the broker has since grown a bounded
+Gmail-threads read, a bounded Calendar-events read, and one write route
+(`gmail/drafts/create`, gated off by default via
+`ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY` — see
+[`capability-gateway.md`](capability-gateway.md)) — the discipline (no URL,
+Google user ID, or provider argument accepted from the caller; every
+provider request shape and bound is fixed server-side) is unchanged, but
+"read-only" no longer describes every route this broker exposes. The broker
+accepts no URL, Google user ID, query, or provider argument beyond the
+bounded fields each route above validates. It exchanges the
 refresh token only at `https://oauth2.googleapis.com/token`, disables HTTP
-redirects and ambient proxy environment variables, and calls only Gmail's fixed
-`users/me/profile` endpoint or Calendar's fixed `calendars/primary` endpoint.
+redirects and ambient proxy environment variables, and calls only Gmail's
+fixed `users/me/profile`, `threads`, and `drafts` endpoints or Calendar's
+fixed `calendars/primary` and `events` endpoints — one fixed Google endpoint
+per route, never a caller-supplied URL.
 All responses have strict status, type, timeout, and 32 KB size checks. The worker
 receives only `history_id`, `messages_total`, and `threads_total`; the Gmail
 profile's email address and the OAuth access token never leave the broker.

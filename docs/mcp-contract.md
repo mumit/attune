@@ -1,5 +1,11 @@
 # Attune Workspace MCP contract
 
+This document covers Attune as an MCP *client* — how `connectors/mcp.py`/
+`connectors/mcp_client.py` reach a Gmail/Calendar MCP server. For Attune as
+an MCP *server* (other agents querying Attune), see
+[`mcp-server.md`](mcp-server.md) — a separate contract, separate versioning,
+separate security posture.
+
 Document version: **2.0** · Tool contract version: **1.1** · Client
 transport/protocol version: **2.0**
 
@@ -167,7 +173,7 @@ A new extensions framework adds **MCP Apps** and **Tasks** (async
 long-running operations with polling, mid-flight input, and a durable
 handle). Attune does not consume Tasks as an MCP *client* here — that
 extension is adopted on the *server* side, for `attune.propose`; see
-`docs/decisions.md` and the MCP server's own docs.
+[`mcp-server.md`](mcp-server.md) and `docs/decisions.md`'s Phase P8 entries.
 
 ### Client/server compatibility matrix
 

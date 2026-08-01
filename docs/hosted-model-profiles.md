@@ -109,7 +109,9 @@ is the customer-facing half of metering; the operator-facing half
 4. Enable `ATTUNE_ENABLE_TENANT_MODEL_PROFILES` on the model gateway,
    control plane, and worker together; configure the gateway's premium
    route environment variables (`ATTUNE_MODEL_PREMIUM_CLASSIFY`,
-   `ATTUNE_MODEL_PREMIUM_CONVERSE`, `ATTUNE_MODEL_PREMIUM_EMBED`) and the
+   `ATTUNE_MODEL_PREMIUM_CONVERSE`, `ATTUNE_MODEL_PREMIUM_EMBED`,
+   `ATTUNE_MODEL_PREMIUM_DRAFT` — `model_gateway_app.py` reads all four
+   unconditionally when constructing the premium profile) and the
    exact Cloud Armor rule admitting `/v1/model-profile`.
 5. Confirm the byte-identical gate-off model routing pin still holds for
    any tenant that has never set a preference, then have a freshly

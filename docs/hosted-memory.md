@@ -82,10 +82,14 @@ alone is treated as sufficient (SEC-200, SEC-201).
 
 ## The `embed` model-gateway task
 
-`src/attune/hosted/model_gateway.py` currently exposes two fixed tasks,
-`classify` and `converse`, both text-in/text-out through
-`/v1/models/complete`. Memory search needs vectors, so this stage adds a
-third fixed task, `embed`, following the identical discipline:
+At the time this stage was built, `src/attune/hosted/model_gateway.py`
+exposed two fixed tasks, `classify` and `converse`, both text-in/text-out
+through `/v1/models/complete`. Memory search needs vectors, so this stage
+adds a third fixed task, `embed`, following the identical discipline. (Build
+prompt 28 later added a fourth task, `draft`, restoring the hosted gateway's
+ability to draft — see `docs/decisions.md`'s model-layer-floor entry;
+`TASKS` today is `{"classify", "converse", "embed", "draft"}`, not the
+three-task set this section describes as current at the time.)
 
 - `TASKS` becomes `{"classify", "converse", "embed"}`; `HostedModelGateway`'s
   constructor still requires the caller's `models` mapping to supply exactly

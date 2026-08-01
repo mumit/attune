@@ -1,5 +1,17 @@
 # Future state — plan toward the product goal (2026-07-18)
 
+> **Superseded for product sequencing.** This document's own premise — plan
+> toward the product goal from the 2026-07-18 gap analysis — has been
+> replaced by [`plan-2026-h2.md`](plan-2026-h2.md) (2026-07-31), whose P0-P9
+> phases (build prompts 24-35) cover most of what Phases 1-6 below describe,
+> plus real work this document never anticipated (the decision ledger and
+> eval harness, the model-layer floor, the ACE-style playbook, the
+> capability-registry collapse, reversibility/undo, MCP interoperability in
+> both directions, and the core/hosted convergence pass). See
+> [`decisions.md`](decisions.md) for what actually shipped, phase by phase,
+> and `docs/gap-analysis.md`'s own banner for the G-number-level detail. This
+> file is kept for its historical sequencing rationale, not as a current plan.
+
 Target: *a personal assistant that attends to email, calendar, chat, and
 Slack; learns what's important; suggests actions from those sources; and
 moves toward measured autonomy like a real assistant.*

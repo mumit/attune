@@ -136,13 +136,14 @@ live here, all defaulting `false`:
 | `enable_hosted_memory` | Registers the worker's hosted conversational memory repository (`ATTUNE_ENABLE_HOSTED_MEMORY`) |
 | `enable_hosted_draft_capability` | Registers the worker's typed draft-and-approve capability gateway (`ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`); requires `enable_dispatch_broker` |
 | `enable_hosted_brief` | Registers the worker's proactive-brief executor and route (`ATTUNE_ENABLE_HOSTED_BRIEF`); requires `enable_channel_broker`; must be flipped together with edge's variable of the same name |
-| `enable_tenant_model_profiles` | Registers per-tenant model profile support on the worker and model gateway (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`); requires the model gateway's `model_premium_classify`/`model_premium_converse`/`model_premium_embed` to be set; must be flipped together with edge's variable of the same name |
+| `enable_tenant_model_profiles` | Registers per-tenant model profile support on the worker and model gateway (`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`); requires the model gateway's `model_premium_classify`/`model_premium_converse`/`model_premium_embed`/`model_premium_draft` to be set; must be flipped together with edge's variable of the same name |
 | `enable_model_usage_metering` | Registers the worker's per-tenant model usage metering (`ATTUNE_ENABLE_MODEL_USAGE_METERING`); independently activatable from edge's read route of the same name |
 
 Also `oauth_min_instance_count` (default `0`; the rollout evidence sets it to
 `1` only after OAuth activation), `model_embed`/`model_premium_classify`/
-`model_premium_converse`/`model_premium_embed` (the model gateway's premium
-route configuration for `enable_tenant_model_profiles`), and the SLO
+`model_premium_converse`/`model_premium_embed`/`model_premium_draft` (the
+model gateway's premium route configuration for
+`enable_tenant_model_profiles`), and the SLO
 threshold variables (`slo_5xx_error_threshold` default `5`,
 `slo_alert_window_seconds` default `300`,
 `slo_worker_conversation_p95_latency_ms` default `15000`) — these last are
@@ -462,7 +463,17 @@ and complete the live probe and abuse-monitoring checks in
   model gateway's premium-route variables (`model_premium_classify`,
   `model_premium_converse`, `model_premium_embed`, all default `""`) are
   required by a precondition whenever `enable_tenant_model_profiles` is true.
-  While wiring this, a pre-existing, unrelated gap was found and fixed: the
+  **A fourth premium route, `model_premium_draft`, exists as a Terraform
+  variable and is passed to the container unconditionally, but is NOT
+  covered by that precondition** (build prompt 28 added the gateway's
+  `draft` task after this precondition was written; `main.tf`'s check
+  still validates only the original three). An operator can enable tenant
+  model profiles with `model_premium_draft` left at its `""` default and
+  hit no Terraform-time error — the failure surfaces later, at the first
+  premium-profile draft request, as a request routed to an empty model
+  name. Until the precondition is extended, set `model_premium_draft`
+  explicitly whenever `enable_tenant_model_profiles` is true. While wiring
+  this, a pre-existing, unrelated gap was found and fixed: the
   model gateway's `ATTUNE_MODEL_EMBED` environment variable (read
   unconditionally by `model_gateway_app.py` as part of the fixed
   `standard_models` map) was never wired at all — any deployment enabling

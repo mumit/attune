@@ -232,12 +232,21 @@ Reviewers must distinguish three states, tracked in
   rollout notes in the `hosted-*` documents record immutable image digests,
   migration executions, negative probes, and empty Terraform plans for each
   activation.
-- **Not yet built or gated for later:** production signup/tenant creation,
-  capability-gateway dispatch integration and execution budgets,
-  customer-visible audit UI, deletion/repair flows, adversarial isolation
-  suites, independent penetration testing, and the alpha/beta launch gates
-  (roadmap steps 6–10). Development activations are explicitly not
-  production launch evidence.
+- **Since built** (were listed here as not-yet-built as of an earlier review
+  pass; see `docs/decisions.md` for the dated entries): production
+  signup/tenant creation (a sessionless, function-owned ceremony), and
+  owner-initiated tenant deletion with customer content retention. Both
+  remain gated activations with their own rollout evidence, not the same as
+  a completed alpha/beta launch. Capability-gateway dispatch integration is
+  also now built and tested for exactly one registered capability
+  (`google.gmail.draft.create` v1, R2, gated off by default via
+  `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`) — the gap today is coverage (11
+  of 12 registered local capabilities have no hosted execution backend at
+  all), not the dispatch mechanism itself.
+- **Not yet built or gated for later:** execution budgets, customer-visible
+  audit UI, adversarial isolation suites, independent penetration testing,
+  and the alpha/beta launch gates (roadmap steps 6–10). Development
+  activations are explicitly not production launch evidence.
 
 ## 9. How to verify
 

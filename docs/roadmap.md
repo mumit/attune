@@ -9,6 +9,13 @@
 > migration path is dropped** (see landscape §5 — bitemporal metadata on Mem0
 > records instead), and **voice moves behind the attention-budget work**. This
 > file remains authoritative for the hosted assurance sequence.
+>
+> **This banner itself predates `plan-2026-h2.md`'s Phase P9** (2026-08-01,
+> build prompt 35, "Converge the two planes onto one core") — see
+> `decisions.md`'s "Converge the two planes" entries for what shipped
+> (partially: three of the phase's eight sub-steps landed narrowed, one was
+> declined, one deferred, with reasoning recorded per step) and the
+> before/after reuse-ratio numbers.
 
 A full 2026-07-18 review of the implementation is recorded in
 [`current-state.md`](current-state.md); its

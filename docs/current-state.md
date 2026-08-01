@@ -1,5 +1,14 @@
 # Current state — full product review (2026-07-18)
 
+> **Refreshed 2026-08-01.** The original 2026-07-18 review below is largely
+> superseded by build prompts 24-35 (`docs/plan-2026-h2.md`'s Phases P0-P9)
+> — most notably, the "share... no intelligence code" claim and the F1-F9
+> security table are now flatly wrong if read without the notes added
+> below. Rather than a full rewrite, this pass corrected the sections that
+> were actively misleading and left the rest as the original point-in-time
+> narrative it always was; check `docs/decisions.md` before relying on any
+> unmarked claim below as current.
+
 This is a point-in-time review of Attune across architecture, design,
 implementation, security, and user experience, covering both the
 single-principal self-hosted runtime and the hosted multi-tenant platform.
@@ -11,37 +20,72 @@ authorities. The companion documents are the
 
 ## Scale snapshot
 
-- ~24,900 LOC single-principal runtime across 147 files (`src/attune/`,
-  excluding `hosted/`); ~17,700 LOC hosted platform (`src/attune/hosted/`,
-  98 files); ~5,700 lines of Terraform (`deploy/gcp/`).
-- 112 test files, ~1,035 test functions; 41 hosted SQL migrations; 27 docs.
-- Local configuration surface: 49 variables in `.env.example`. Hosted
-  operator surface: ~95 additional `ATTUNE_` variables plus 12+ default-off
-  activation gates.
+**As of 2026-07-18** (original review): ~24,900 LOC single-principal
+runtime across 147 files (`src/attune/`, excluding `hosted/`); ~17,700 LOC
+hosted platform (`src/attune/hosted/`, 98 files); ~5,700 lines of Terraform
+(`deploy/gcp/`). 112 test files, ~1,035 test functions; 41 hosted SQL
+migrations; 27 docs. Local configuration surface: 49 variables in
+`.env.example`. Hosted operator surface: ~95 additional `ATTUNE_` variables
+plus 12+ default-off activation gates.
+
+**As of 2026-08-01**: ~32,200 LOC single-principal runtime across 109 files
+(`src/attune/`, excluding `hosted/`); ~23,600 LOC hosted platform
+(`src/attune/hosted/`, 115 top-level modules); ~7,900 lines of Terraform. 163
+test files, 2,446 test cases (2,389 passed + 57 intentionally skipped as of
+the last full run). 48 hosted SQL migrations; 34 top-level docs plus 4
+install docs plus 37 build-prompt docs. 53 `ATTUNE_`-prefixed variables in
+`.env.example`. These numbers will keep drifting — re-measure rather than
+trust either snapshot for anything precision-sensitive.
 
 ## Two products in one repository
 
-Attune is currently two parallel systems that share a repository, a design
-philosophy, and Workspace connectors — but no intelligence code:
+**As of 2026-07-18** (original review), Attune was two parallel systems
+sharing a repository, a design philosophy, and Workspace connectors — but
+no intelligence code. `grep` at the time confirmed the hosted package
+imported nothing from `attune.orchestrator`, `attune.memory`, `attune.brief`,
+or `attune.conversation`; the hosted conversation executor
+(`hosted/google_chat_conversation_executor.py`, subclassed by the Slack and
+web executors) reimplemented routing, bounded reads, and response
+generation from scratch.
+
+**This claim is no longer accurate.** Build prompt 30 (before Phase P9 even
+started) unified `RiskTier` as the single risk vocabulary in
+`orchestrator/autonomy.py`, re-exported by `hosted/capability_gateway.py`.
+`hosted/intelligence.py` imports `orchestrator.attention`/
+`orchestrator.importance`'s dataclasses and rule engine directly (`Postgres
+ImportanceProfile`/`PostgresAttentionStore`, dormant pending a production
+entry point, but real shared code, not zero). Build prompt 35 (Phase P9,
+"Converge the two planes onto one core") is the dedicated pass closing this
+gap: a shared channel-broker base, model-gateway bounds imported from
+`llm.py`, a `CapabilityIdentity` protocol spanning local's `Capability` and
+hosted's `CapabilityDefinition`, a shared audit outcome vocabulary
+(`hosted/audit.py` now imports `AUDIT_OUTCOMES` from `audit/log.py`), and a
+shared conversation turn shape all now exist. The prompt's own reuse-ratio
+metric (`hosted/` files importing from core, over total `hosted/` modules)
+moved from 2.7% to ~6.1% — real, verified progress, and still a real gap:
+most of hosted's execution surface (which capabilities it can actually
+carry out, not just admit) remains far behind local's. See
+`docs/decisions.md`'s "Converge the two planes" entries for the full,
+step-by-step account of what's shared today and what's deliberately not
+(hosted's Postgres/RLS storage and tenancy isolation stay per-plane by
+design, not by omission).
+
+The two systems described below remain accurate at the deployment-topology
+level:
 
 1. **The single-principal runtime** — SQLite/JSONL/Mem0+Qdrant, LangGraph
    draft-approve workflows, the earned-autonomy ladder, briefs, follow-up
-   nudges, and conflict holds. This is where all product intelligence lives.
+   nudges, and conflict holds. This is where the deepest product
+   intelligence still lives, though the rule engines behind importance,
+   attention, capabilities, and audit are now core code hosted can and
+   partly does import.
 2. **The hosted multi-tenant platform** — Cloud Run services over forced-RLS
    PostgreSQL with envelope-encrypted credentials, broker-mediated provider
    access, and a hash-chained audit spine. This is where all tenant-grade
    security engineering lives. Its product surface today is bounded
    read-only conversation over three front doors (Google Chat, Slack,
-   browser) plus onboarding, channel lifecycle, retention, and export
-   ceremonies.
-
-`grep` confirms the hosted package imports nothing from
-`attune.orchestrator`, `attune.memory`, `attune.brief`, or
-`attune.conversation`. The hosted conversation executor
-(`hosted/google_chat_conversation_executor.py`, subclassed by the Slack and
-web executors) reimplements routing, bounded reads, and response generation
-from scratch. Every future intelligence improvement currently has to be
-built twice or deliberately converged.
+   browser), proactive briefs, one gated draft-and-approve write capability,
+   plus onboarding, channel lifecycle, retention, and export ceremonies.
 
 ## Architecture — single-principal runtime
 
@@ -130,7 +174,9 @@ Services (each its own Cloud Run service and workload identity): control
 plane (all owner-facing HTTP), worker, dispatch broker (opaque-intent task
 authority), secret broker (KMS-wrapped credential vault), channel broker(s)
 (Slack + Google Chat lifecycle and delivery), per-provider ingress services,
-model gateway (two fixed tasks: classify, converse), export pipeline,
+model gateway (as of 2026-07-18, two fixed tasks: classify, converse — build
+prompt 28 later added `embed` and `draft`, restoring the hosted gateway's
+ability to draft; four fixed tasks today), export pipeline,
 retention job, OAuth exchange/callback pair, audit writer, migrator.
 
 Tenancy enforcement is the strongest engineering in the repository:
@@ -149,18 +195,35 @@ Tenancy enforcement is the strongest engineering in the repository:
   reinstall defect fixed by migration 0039, evidence the ceremonies are
   genuinely exercised.
 
-Maturity honestly stated: implemented **and live in development** — identity
-and sessions, Workspace connect/verify/disconnect, the R0 policy ceremony,
-Slack and Google Chat installation/test/disconnect lifecycles, all three
-conversation front doors, protocol retention with paging, and most export
-slices. Implemented **but dormant** — the typed capability gateway (tested;
-imported by no live path) and the `PostgresMemoryRepository` (schema and
-pgvector search exist; no executor calls it). **Missing** — production
-signup (first sign-in dead-ends on operator provisioning), customer-content
-retention/deletion, export completion/download/UI, billing and quotas,
-per-tenant model configuration, support/repair tooling, SLO-grade
-monitoring (seven job-failure alert policies only), and production scale
-(every service capped at `max_instance_count = 3`).
+Maturity **as of 2026-07-18**: implemented **and live in development** —
+identity and sessions, Workspace connect/verify/disconnect, the R0 policy
+ceremony, Slack and Google Chat installation/test/disconnect lifecycles, all
+three conversation front doors, protocol retention with paging, and most
+export slices. Implemented **but dormant** — the typed capability gateway
+(tested; imported by no live path) and the `PostgresMemoryRepository`
+(schema and pgvector search exist; no executor calls it). **Missing** —
+production signup (first sign-in dead-ends on operator provisioning),
+customer-content retention/deletion, export completion/download/UI, billing
+and quotas, per-tenant model configuration, support/repair tooling,
+SLO-grade monitoring (seven job-failure alert policies only), and
+production scale (every service capped at `max_instance_count = 3`).
+
+**As of 2026-08-01, several "Missing" items have shipped** (see
+`docs/decisions.md`'s 2026-07-19 entries): production signup is now a
+sessionless, function-owned ceremony; customer-content retention and
+owner-initiated tenant deletion exist; customer export completed its writer
+invocation/download/cleanup/UI close-out; per-tenant model configuration
+and usage metering are both wired (gated by
+`ATTUNE_ENABLE_TENANT_MODEL_PROFILES`/`ATTUNE_ENABLE_MODEL_USAGE_METERING`);
+and SLO-grade observability (request/task metrics, log-based metrics,
+alerts, a dashboard) replaced the seven job-failure-only policies. Billing
+and quotas, support/repair tooling beyond what shipped, and production
+scale limits were not reverified this pass — treat those as still open
+pending direct verification. The typed capability gateway is no longer
+"imported by no live path": `hosted/gmail_draft_capability.py` wires one
+capability (`google.gmail.draft.create`, R2) through it end to end, gated
+off by default via `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY` — dormant by
+configuration, not by absence of a caller.
 
 ## Security posture
 
@@ -172,19 +235,23 @@ LLM call; write intent from free-form chat is deterministically refused;
 the only two write paths (Gmail draft creation, calendar hold) sit behind
 the approval interrupt or an explicit grant.
 
-Findings, prioritized (all in the local runtime unless noted):
+Findings, prioritized (all in the local runtime unless noted). **All nine
+are now shipped/resolved** — see the Status column (dated 2026-07-19/
+2026-08-01) and the addendum immediately below the table for what each fix
+actually was; the "Finding" column is kept verbatim as the original
+as-found description, not current behavior:
 
-| # | Sev | Finding |
-|---|-----|---------|
-| F1 | Med | Local JSONL audit log has no hash chain or tamper evidence, yet is the trust root for autonomy-graduation suggestions (`audit/log.py`, `orchestrator/grants.py`). |
-| F2 | Low/Med | `JsonPendingApprovals.claim()` is guarded only by an in-process lock; two overlapping runtime processes could double-claim one approval (`orchestrator/pending.py`). |
-| F3 | Low | Secret redaction in logs is a stated writing discipline, not a filter (`logging_setup.py`). |
-| F4 | Low | Republisher Chat OIDC verification is self-documented as never exercised against a live Chat app (`deploy/republisher/main.py`). |
-| F5 | Low | With `ATTUNE_DATA_DIR` unset, state files (conversation text, audit) fall back to CWD with default umask (`config/__init__.py`). |
-| F6 | Info | Correction-derived memories (which touched untrusted content) are not provenance-weighted differently from explicit teaching at retrieval time — a theoretical two-stage memory-poisoning path. |
-| F7 | Info | Hosted vector retrieval (SEC-201) is unimplemented; tenant filtering must be adapter-injected the moment it lands. |
-| F8 | Low | `GoogleChatChannel.handle_interaction` has no in-class actor guard (authorization lives one layer up in the dispatcher), unlike `SlackChannel`. |
-| F9 | Info | No local rate/volume ceilings on model calls or channel messages; hosted has Cloud Armor and DB-level leasing, local has nothing analogous. |
+| # | Sev | Finding | Status |
+|---|-----|---------|--------|
+| F1 | Med | Local JSONL audit log has no hash chain or tamper evidence, yet is the trust root for autonomy-graduation suggestions (`audit/log.py`, `orchestrator/grants.py`). | **Shipped** — hash chain (`prev_hash`/`entry_hash`, `JsonlAuditLog.verify`) |
+| F2 | Low/Med | `JsonPendingApprovals.claim()` is guarded only by an in-process lock; two overlapping runtime processes could double-claim one approval (`orchestrator/pending.py`). | **Shipped** — cross-process `fslock` |
+| F3 | Low | Secret redaction in logs is a stated writing discipline, not a filter (`logging_setup.py`). | **Shipped** — `RedactionFilter` |
+| F4 | Low | Republisher Chat OIDC verification is self-documented as never exercised against a live Chat app (`deploy/republisher/main.py`). | **Shipped** — complete negative-test matrix; live exercise remains operator work |
+| F5 | Low | With `ATTUNE_DATA_DIR` unset, state files (conversation text, audit) fall back to CWD with default umask (`config/__init__.py`). | **Shipped** — Doctor FAILs fast on unset var; state files chmod `0600` |
+| F6 | Info | Correction-derived memories (which touched untrusted content) are not provenance-weighted differently from explicit teaching at retrieval time — a theoretical two-stage memory-poisoning path. | **Shipped** — `frame_memory_text` provenance-frames every retrieval site |
+| F7 | Info | Hosted vector retrieval (SEC-201) is unimplemented; tenant filtering must be adapter-injected the moment it lands. | **Satisfied** by the hosted memory design as built |
+| F8 | Low | `GoogleChatChannel.handle_interaction` has no in-class actor guard (authorization lives one layer up in the dispatcher), unlike `SlackChannel`. | **Shipped** — in-class actor guard, mirroring `SlackChannel._authorized` |
+| F9 | Info | No local rate/volume ceilings on model calls or channel messages; hosted has Cloud Armor and DB-level leasing, local has nothing analogous. | **Shipped** — `InboundRateLimiter` plus a per-run triage batch ceiling |
 
 > **Status addendum (2026-07-19, does not alter the review above — see
 > `docs/decisions.md`'s dated entry for full detail):** F1/F2 shipped
@@ -240,13 +307,22 @@ a development activation, not an operated product.
 
 ## Overall assessment
 
-Attune is an unusually disciplined codebase with honest documentation: the
-safety spine (approvals, durability, audit, tenancy) is largely built and
-verified, and the hosted platform's isolation engineering exceeds what most
-products ship with. What is thin is the product's stated reason to exist:
-importance is computed once and mostly discarded, learning crystallizes too
-slowly to feel adaptive, the suggestion surface is two features, autonomy
-never graduates without a terminal command, and none of the intelligence
-exists in the hosted path at all. The [gap analysis](gap-analysis.md) maps
-these against the goal; the [future-state plan](future-state.md) sequences
-the work.
+**As of 2026-07-18**, Attune was an unusually disciplined codebase with
+honest documentation: the safety spine (approvals, durability, audit,
+tenancy) was largely built and verified, and the hosted platform's
+isolation engineering exceeded what most products ship with. What was thin
+was the product's stated reason to exist: importance was computed once and
+mostly discarded, learning crystallized too slowly to feel adaptive, the
+suggestion surface was two features, autonomy never graduated without a
+terminal command, and none of the intelligence existed in the hosted path
+at all.
+
+**As of 2026-08-01**, most of that thinness has been directly addressed —
+priority now propagates and ranks by a real importance profile, the
+playbook adds a faster learning path, the suggestion surface covers twelve
+registered capabilities (most local-only), in-product graduation cards
+exist, and hosted has real (if dormant or narrowly gated) importance,
+attention, and capability-execution machinery imported from the same core
+code local uses. See [`gap-analysis.md`](gap-analysis.md) for the
+G-number-level detail on what changed and what's still open, and
+`docs/decisions.md` for exactly what each build prompt shipped.

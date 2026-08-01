@@ -123,4 +123,26 @@ only after durable handling or durable retry recording. Approval actions are
 idempotent and actor-authorized.
 
 The earned-autonomy ladder remains: observe, draft, act-with-notification, and
-act. Graduation is task-scoped, based on track record, and always reversible.
+act. Graduation is task-scoped, based on track record, and the grant itself
+is always revocable — an autonomy rung can demote automatically on evidence,
+with no terminal command. This is distinct from whether a given *action* is
+reversible: every registered capability declares either a compensating
+(undo) action or an explicit `irreversible=True` (e.g. `SEND_REPLY` — a sent
+reply is irreversible by construction; a follow-up "please ignore that"
+email is not an undo). Graduation being revocable does not mean every action
+it authorizes can be undone.
+
+## Interoperability: Attune as an MCP client and an MCP server
+
+Attune both consumes and exposes MCP, under separate contracts. As a
+*client*, `mcp` is a real alternative to direct OAuth for Gmail/Calendar
+access (above). As a *server* (`src/attune/mcp_server/`), Attune exposes a
+small set of bounded read-only tools — a brief, what-matters, importance,
+memory search, pending approvals, the playbook — to other agents, plus one
+gated write path: a proposal is admitted against a curated capability
+registry and persisted as a Task in `INPUT_REQUIRED` state, never executed
+at proposal time. This server process is deliberately the one process in
+this repository permitted a public listener: it holds no workspace, model,
+or memory credential, and every caller is authenticated, allowlisted, and
+audited under its own actor type, distinct from the principal. See
+[`mcp-server.md`](mcp-server.md) for the full contract.

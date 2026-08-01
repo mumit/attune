@@ -178,6 +178,15 @@ connector and returns only queued, running, succeeded, or failed. The worker
 creates separate one-use Gmail-profile and Calendar-primary intents, so the
 composite job cannot turn either provider read into broader authority.
 
+A second capability is now wired through this same broker, behind its own
+activation variable: `google.gmail.draft.create` v1 (R2), admitted by
+`hosted/capability_gateway.py`'s `TypedCapabilityGateway` and dispatched via
+`CapabilityAdmissionProducer` only after the SECURITY DEFINER
+`claim_capability_approval` claim succeeds (see
+[`capability-gateway.md`](capability-gateway.md)). It follows the identical
+claim-once-dispatch-once discipline as the connection-verify route above,
+gated off by default via `ATTUNE_ENABLE_HOSTED_DRAFT_CAPABILITY`.
+
 The broker must not receive customer traffic until all of the following pass:
 
 1. producers have lost direct queue and delivery-identity permissions;
