@@ -21,6 +21,8 @@ a 600-line manual runbook. The CLI is the human front door:
                      window (build prompt 31)
     attune routine   user-authored recurring proactivity — the daily brief
                      ships as one default routine (build prompt 32)
+    attune optimize  offline GEPA (draft) + MIPRO (triage) prompt
+                     optimization against the golden set (build prompt 36)
 
 Stdlib ``argparse`` — a CLI with five subcommands doesn't justify a click/
 typer dependency. Heavy imports happen inside subcommands so
@@ -247,6 +249,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     e_label.set_defaults(func=_cmd_eval_label)
     p_eval.set_defaults(func=_cmd_eval_help, parser=p_eval)
+
+    p_optimize = sub.add_parser(
+        "optimize",
+        help="offline prompt optimization: GEPA (draft) + MIPRO (triage) against the golden set",
+    )
+    optimize_sub = p_optimize.add_subparsers(dest="optimize_command")
+    o_run = optimize_sub.add_parser(
+        "run", help="run the optimizer, promote any candidate that passes the gate"
+    )
+    o_run.add_argument(
+        "--offline", action="store_true",
+        help="use deterministic, non-network fakes (plumbing check only; not a quality "
+        "signal — see docs/decisions.md)",
+    )
+    o_run.add_argument("--rollout-budget", type=int, default=200, help="GEPA rollout budget (case-scorings)")
+    o_run.add_argument("--minibatch-size", type=int, default=8, help="GEPA minibatch size")
+    o_run.add_argument("--n-candidates", type=int, default=4, help="MIPRO candidate prefixes per run")
+    o_run.add_argument("--seed", type=int, default=0, help="RNG seed")
+    o_run.add_argument("--output", default=None, help="write the run report as JSON to this path")
+    o_run.set_defaults(func=_cmd_optimize_run)
+    o_history = optimize_sub.add_parser("history", help="show a prompt's promoted-version history")
+    o_history.add_argument("name", help="draft or triage")
+    o_history.set_defaults(func=_cmd_optimize_history)
+    o_revert = optimize_sub.add_parser("revert", help="append a new version reverting to an earlier one")
+    o_revert.add_argument("name", help="draft or triage")
+    o_revert.add_argument("to_version", type=int)
+    o_revert.add_argument("--note", default="")
+    o_revert.set_defaults(func=_cmd_optimize_revert)
+    p_optimize.set_defaults(func=_cmd_optimize_help, parser=p_optimize)
 
     p_playbook = sub.add_parser(
         "playbook", help="see, correct, and audit the git-backed playbook"
@@ -516,6 +547,33 @@ def _cmd_eval_label(args: Any) -> int:
 
 
 def _cmd_eval_help(args: Any) -> int:
+    args.parser.print_help()
+    return 1
+
+
+def _cmd_optimize_run(args: Any) -> int:
+    from .optimize_cmd import run_optimize_run
+
+    return run_optimize_run(
+        offline=args.offline, rollout_budget=args.rollout_budget,
+        minibatch_size=args.minibatch_size, n_candidates=args.n_candidates,
+        seed=args.seed, output=args.output,
+    )
+
+
+def _cmd_optimize_history(args: Any) -> int:
+    from .optimize_cmd import run_optimize_history
+
+    return run_optimize_history(name=args.name)
+
+
+def _cmd_optimize_revert(args: Any) -> int:
+    from .optimize_cmd import run_optimize_revert
+
+    return run_optimize_revert(name=args.name, to_version=args.to_version, note=args.note)
+
+
+def _cmd_optimize_help(args: Any) -> int:
     args.parser.print_help()
     return 1
 

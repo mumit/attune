@@ -47,13 +47,20 @@ def test_parser_knows_all_subcommands():
                  ["run", "--no-checks"], ["init", "--fresh"],
                  ["memory"], ["autonomy"], ["importance"], ["metrics"],
                  ["eval"], ["eval", "run", "--offline"], ["eval", "capture"],
-                 ["eval", "label", "--sample", "5"]):
+                 ["eval", "label", "--sample", "5"],
+                 ["optimize"], ["optimize", "run", "--offline"],
+                 ["optimize", "history", "draft"], ["optimize", "revert", "draft", "1"]):
         args = parser.parse_args(argv)
         assert hasattr(args, "func")
 
 
 def test_eval_without_subcommand_prints_help(capsys):
     assert main(["eval"]) == 1
+    assert "run" in capsys.readouterr().out
+
+
+def test_optimize_without_subcommand_prints_help(capsys):
+    assert main(["optimize"]) == 1
     assert "run" in capsys.readouterr().out
 
 

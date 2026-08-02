@@ -201,6 +201,11 @@ class Settings:
     eval_agreement_path: str = "./evals/agreement.json"
     eval_labels_dir: str = "./evals/labels"
 
+    # Build prompt 36: promoted prompt versions -- a checked-in project
+    # fixture like the eval fixtures above (meant to be committed and
+    # reviewed in a PR diff), not per-instance runtime state.
+    prompt_versions_dir: str = "./prompt_versions"
+
     approval_ignore_hours: int = 48
     # Build prompt 31, task 3: the approval TTL — how long a card may sit
     # PENDING/IGNORED before its workflow is cancelled outright (distinct
@@ -429,6 +434,7 @@ class Settings:
             eval_injection_corpus_path=e.get("ATTUNE_EVAL_INJECTION_CORPUS_PATH") or "./evals/injection_corpus.json",
             eval_agreement_path=e.get("ATTUNE_EVAL_AGREEMENT_PATH") or "./evals/agreement.json",
             eval_labels_dir=e.get("ATTUNE_EVAL_LABELS_DIR") or "./evals/labels",
+            prompt_versions_dir=e.get("ATTUNE_PROMPT_VERSIONS_DIR") or "./prompt_versions",
             approval_ignore_hours=int(e.get("ATTUNE_APPROVAL_IGNORE_HOURS", "48")),
             approval_expiry_days=int(e.get("ATTUNE_APPROVAL_EXPIRY_DAYS", "7")),
             converse_window_turns=int(e.get("ATTUNE_CONVERSE_WINDOW_TURNS", "10")),

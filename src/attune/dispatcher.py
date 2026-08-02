@@ -106,6 +106,7 @@ from .llm import (
     model_for,
     resolve_capabilities,
 )
+from . import prompts
 from .prompts import PROMPT_CONVERSE, PROMPT_LIVE_SOURCE, PROMPT_TRIAGE, render_system_message
 from .retry import retry_call
 from .memory.signals import frame_memory_text
@@ -665,7 +666,7 @@ def _triage_audit_fields(triage: TriageResult) -> dict[str, Any]:
         "priority": triage.priority.value,
         "base_priority": triage.base_priority.value,
         "adjusted": triage.adjusted,
-        "prompt_version": PROMPT_TRIAGE.version,
+        "prompt_version": prompts.current(PROMPT_TRIAGE).version,
     }
 
 

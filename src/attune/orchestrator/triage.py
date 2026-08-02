@@ -93,6 +93,7 @@ from ..llm import (
     resolve_capabilities,
 )
 from ..memory.signals import UNTRUSTED_FIELD_NOTE, UNTRUSTED_FIELD_OPEN, frame_memory_text
+from .. import prompts
 from ..prompts import PROMPT_TRIAGE, render_system_message
 from .importance import ImportanceTier
 
@@ -183,6 +184,7 @@ def triage_thread(
     min_score: float | None = None,
     now: datetime | None = None,
     capabilities: ModelCapabilities | None = None,
+    stable_prefix: str | None = None,
 ) -> TriageResult:
     """Classify one incoming thread as URGENT, ROUTINE, or NOISE.
 
@@ -217,6 +219,14 @@ def triage_thread(
     simply typing the same sentence, whereas nothing a sender writes can
     reach the system prompt. Callers must pass only text they constructed
     themselves, never content from the message.
+
+    ``stable_prefix`` (build prompt 36, additive/keyword-only): overrides
+    the ``triage`` prompt's stable prefix for this call only -- the eval
+    harness and the offline prompt optimizer use it to score a CANDIDATE
+    prefix without touching what production sends. Omitted (every
+    production call site), the currently promoted version resolves via
+    ``prompts.current(PROMPT_TRIAGE)``, exactly as before build prompt 36
+    existed when nothing has ever been promoted.
     """
     volatile = ""
     reactions = _past_reactions(store, sender, user_id, min_score=min_score)
@@ -245,8 +255,9 @@ def triage_thread(
             "type": "json_schema",
             "json_schema": {"name": "triage_result", "schema": _TRIAGE_JSON_SCHEMA, "strict": True},
         }
+    prefix = stable_prefix if stable_prefix is not None else prompts.current(PROMPT_TRIAGE).stable_prefix
     messages = [
-        render_system_message(PROMPT_TRIAGE.stable_prefix, volatile, capabilities=caps),
+        render_system_message(prefix, volatile, capabilities=caps),
         {"role": "user", "content": f"[UNTRUSTED mail]\n{incoming_summary}"},
     ]
 

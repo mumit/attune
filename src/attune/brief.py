@@ -114,6 +114,7 @@ from .llm import (
     resolve_capabilities,
 )
 from .memory.signals import frame_memory_text
+from . import prompts
 from .prompts import PROMPT_BRIEF, render_system_message
 from .orchestrator.attention import AttentionItem
 from .orchestrator.correlation import (
@@ -1151,7 +1152,7 @@ def assemble_brief(
             client,
             model=model_for(Task.CONVERSE),
             messages=[
-                render_system_message(PROMPT_BRIEF.stable_prefix, capabilities=caps),
+                render_system_message(prompts.current(PROMPT_BRIEF).stable_prefix, capabilities=caps),
                 {"role": "user", "content": untrusted},
             ],
             **call_kwargs(caps),
@@ -1163,7 +1164,7 @@ def assemble_brief(
         generated_at=now,
         unread_count=len(threads),
         event_count=len(events),
-        prompt_version=PROMPT_BRIEF.version,
+        prompt_version=prompts.current(PROMPT_BRIEF).version,
         summary=summary,
         meetings=meetings,
         waiting_on=waiting_on,

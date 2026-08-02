@@ -5474,3 +5474,147 @@ added new tests, none changed an existing assertion.
   execution surface remains far behind local's).
 - **Full suite**: 2389 passed, 57 skipped, at every step and at the end —
   zero regressions across the whole pass.
+
+## 2026-08-01 — Offline prompt optimization: GEPA for draft, MIPRO for triage, promotion gated on north star + coverage (Phase P10, build prompt 36)
+
+**The build prompt's own prerequisite is only partially met by the calendar,
+and that is recorded here rather than papered over.** Build prompt 36 says
+"do not start this prompt until... the playbook has been accumulating for at
+least a month." The playbook (build prompt 29) landed 2026-07-31; this build
+prompt lands 2026-08-01 — one day of simulated accumulation, not a month.
+The other three prerequisites are genuinely met: the decision ledger records
+`context_attribution` (build prompt 26), the eval harness reports a judge
+agreement rate with a 75% gate (build prompt 27), and prompts are versioned
+(build prompt 28). Rather than fabricate a month of playbook history to
+satisfy a real-world data-volume gate no amount of same-session engineering
+can honestly produce, this build lands the full mechanism — optimizer,
+promotion gate, versioned registry, CLI, weekly job — with the same posture
+build prompt 27 held for its own golden set ("explicitly allowed to start
+small and grow from real data rather than padded to an arbitrary target").
+The mechanism is real and tested end to end against the actual (currently
+tiny) fixtures in `evals/`; a live weekly run against a real principal's
+accumulated month of data is a deployment fact, not a code fact, and
+`docs/plan-2026-h2.md`'s P10 entry says so.
+
+- **The optimizer choice follows the shape of the feedback, per prompt, not
+  one algorithm for every prompt.** `draft`'s golden set (build prompt 27) is
+  a human's own edited/sent text — rich textual feedback — so it gets a
+  reflective optimizer: `optimize/gepa.py`, a direct implementation of
+  GEPA's loop (sample trajectories, reflect on losses in natural language,
+  propose a revised prefix, maintain a Pareto frontier, merge complementary
+  frontier members). `triage`'s golden set (`evals/triage_cases.json`) is a
+  label, not an edit — there is no "what the human actually said" for a
+  reflective optimizer to read — so it gets `optimize/mipro.py`, a
+  lightweight MIPROv2-style bootstrapped instruction search: propose N
+  candidate prefixes from misclassified cases, score each once on the scalar
+  (triage accuracy, with the adjustment-direction rate as a tiebreak), keep
+  the single best. `brief` is NOT optimized by this build: it has no
+  ledger-derived golden set at all (brief is a read-only summary, never an
+  approved/edited/rejected proposal — `Domain` has no `brief` member), so
+  there is no trustworthy signal to optimize against yet. `prompts.py`'s
+  versioned-registry mechanism (`current`/`promote`/`revert`/`history`)
+  applies to any registry prompt uniformly; wiring `brief` into an actual
+  optimizer is future work once a real quality signal for it exists — this
+  is the same "excluded, not optimized against a bad signal" discipline the
+  judge-agreement gate already holds, generalized to "no signal" instead of
+  "an untrustworthy one."
+- **No DSPy/`gepa` package dependency.** The build prompt explicitly
+  sanctions "via DSPy... or a direct implementation of the same loop." A
+  bespoke loop over the already-existing eval harness needed no new runtime
+  dependency, keeps every collaborator (candidate drafter, judge, reflector,
+  instruction proposer) the same injectable-client shape every other model
+  collaborator here already follows, and is exactly as offline-testable
+  against deterministic fakes as `evals.judge`/`evals.triage_eval` already
+  are (`optimize/offline_fakes.py`, mirroring `evals/offline_fakes.py`'s
+  "plumbing only, never a quality signal" posture). `pyproject.toml` gained
+  no new dependency for this build prompt at all.
+- **A versioned prompt registry, checked in, not runtime state.**
+  `prompts.py` gained `current()`/`promote()`/`revert()`/`history()` over
+  one immutable, append-only JSON file per prompt name under
+  `prompt_versions/` (new `ATTUNE_PROMPT_VERSIONS_DIR` setting, default
+  `./prompt_versions`) — deliberately a checked-in project fixture like
+  `evals/cases/`, not `ATTUNE_DATA_DIR`-relative instance state, because
+  "land promotions as pull requests" (task 3) only works if the artifact is
+  something `git diff` shows. `promote`/`revert` only ever append a new
+  highest-numbered record; neither ever rewrites or removes one, so a
+  revert supersedes a bad version rather than erasing it from history — the
+  same "never a rewrite" discipline `playbook/bullets.py` already holds for
+  its own delta edits, applied to a different (committed, not git-backed)
+  storage shape because a prompt version is product code a PR reviews, not
+  a principal's own learned, unreviewed policy.
+- **Production call sites resolve `current()` at the point of use, not the
+  frozen registry constant** — `triage.triage_thread`, `draft_approve.
+  _default_draft_fn`, and `brief.assemble_brief` all now call
+  `prompts.current(PROMPT_X)` instead of reading `PROMPT_X.stable_prefix`/
+  `.version` directly, and the first two gained an additive, keyword-only
+  `stable_prefix` override the eval harness and optimizer use to score a
+  candidate without touching what production sends. Without this change,
+  promoting or reverting a prompt version would update a file nobody's code
+  path ever reads — "reverting the version reverts behaviour" would be
+  false. `dispatcher._triage_audit_fields`'s version stamp and `draft_approve`'s
+  `drafted` audit event both resolve the same way, so a ledger row's
+  `prompt_version` always names the version that actually produced it.
+- **The north star and the coverage guardrail are judge-free, so the
+  75%-agreement gate does not gate them.** `edit_burden_proxy`
+  (`orchestrator.ledger.compute_edit_metrics`) is a deterministic
+  Levenshtein-style distance and `optimize/coverage.py`'s proxy is a length
+  check — neither ever calls an LLM judge. Only the pairwise win rate
+  depends on the judge, and `evals.report.DomainPairwise.gates` (build
+  prompt 27) already carries that per domain; `optimize/promotion.py`
+  reuses `evals.ci_gate.check_regression_budget` unchanged for that part
+  rather than re-deriving it, and adds only what the existing harness has
+  no opinion on: a domain below the 75% threshold is reported as
+  **excluded** from the run (informational, since the regression-budget
+  diff already can't fail on it), and — the acceptance-mandated hard
+  constraint — **a candidate whose coverage proxy fell is rejected
+  outright, regardless of any edit-burden gain**, scoped to EDIT-kind golden
+  cases only (a REJECT-kind case's correct answer is often silence a human
+  already confirmed; penalizing that would be the reward-hack in reverse).
+  `tests/test_optimize_promotion.py::test_coverage_reducing_candidate_is_rejected_even_with_edit_burden_improvement`
+  and `::test_domain_below_agreement_threshold_is_excluded_from_optimization`
+  are the two acceptance-mandated tests.
+- **Trajectory assertions are not re-run inside the optimizer.**
+  `evals.trajectory`'s assertions (capability selection, autonomy rung,
+  retrieval score floor, freshness-before-apply) check structural
+  invariants a prompt's WORDING cannot change. Every promotion lands as a
+  pull request (task 3), and ordinary CI (`ci.yml`'s `evals` job) already
+  runs the full suite — trajectory assertions included — against that PR.
+  Re-running them inside `optimize/promotion.py` would duplicate a
+  guarantee CI already gives the same diff, for no additional signal.
+- **Promotion requires an actual improvement on the north star, not merely
+  "no regression."** `evaluate_promotion` rejects a candidate whose
+  `edit_burden_proxy` doesn't strictly improve (or isn't measurable),
+  independent of the regression-budget diff, which only ever checks for
+  regressions beyond a tolerance — "no worse" and "actually better" are
+  different bars, and task 3 asks for the second one.
+- **Weights, RL, and RFT are explicitly out of scope for this build**, per
+  the RLUF precedent (`docs/landscape-2026.md` §5: +28% on a target metric
+  while the model learned to end conversations, helpfulness dropped 4–16%,
+  and the reward model penalized valid safety refusals) and the plan's own
+  framing: GEPA beats GRPO at up to 78× the sample efficiency, and this
+  product will never generate GRPO-scale data from one principal. Neither a
+  style LoRA nor a distilled triage model (the build prompt's "then, and
+  only then, weights" section) is implemented in this build — both are
+  gated on this optimizer's own promotion mechanism proving out first, per
+  the build prompt's own ordering, and remain future work.
+- **Weekly cadence is a GitHub Actions workflow, not an in-process
+  scheduler job** (`.github/workflows/prompt-optimize.yml`), the same
+  "offline, secrets-gated, skip cleanly without configuration" posture
+  `eval-live.yml`/`memory-eval.yml` already hold for this project's other
+  model-backed scheduled work. It runs `attune optimize run`, which may
+  append new (immutable) records to `prompt_versions/*.json`, and opens a
+  pull request via `peter-evans/create-pull-request` only when that path
+  actually changed — a run that promotes nothing opens no PR. The workflow
+  never pushes to `main` and never merges: a human always reviews the
+  per-scorer delta table in the PR body before a promotion takes effect.
+- **Verification**: one full offline run recorded end to end
+  (`tests/test_optimize_job.py`) — candidate versions, per-scorer deltas,
+  the promotion decision, and the resulting prompt version id, traceable
+  back to exact prompt text via `prompts.history()`
+  (`tests/test_prompts_registry.py::test_ledger_row_prompt_version_is_traceable_back_to_exact_text`
+  and `::test_reverting_the_version_reverts_behaviour`). 44 new tests across
+  `test_prompts_registry.py`, `test_optimize_coverage.py`,
+  `test_optimize_scoring.py`, `test_optimize_gepa.py`,
+  `test_optimize_mipro.py`, `test_optimize_promotion.py`,
+  `test_optimize_job.py`, plus `optimize`-subcommand coverage added to
+  `test_cli.py`. Full suite: 2434 passed, 57 skipped, zero regressions.

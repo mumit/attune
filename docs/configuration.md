@@ -181,6 +181,7 @@ Times use 24-hour `HH:MM` notation in `ATTUNE_TIMEZONE`.
 | `ATTUNE_EVAL_INJECTION_CORPUS_PATH` | `./evals/injection_corpus.json` | Path to the injection-resistance adversarial corpus (build prompt 27). |
 | `ATTUNE_EVAL_AGREEMENT_PATH` | `./evals/agreement.json` | Path to the last-computed judge-human agreement rate per domain, written by `attune eval label` and read by `attune eval run` to decide which domains' pairwise result may gate CI (build prompt 27; below 75% agreement, a domain never gates). |
 | `ATTUNE_EVAL_LABELS_DIR` | `./evals/labels` | Directory of hand-labeled judge-vs-human sessions written by `attune eval label` (build prompt 27). |
+| `ATTUNE_PROMPT_VERSIONS_DIR` | `./prompt_versions` | Directory of one immutable, append-only JSON file per registry prompt name, holding every version the offline optimizer (or a manual `attune optimize revert`) has ever promoted (build prompt 36). A checked-in project fixture, like the eval fixtures above — meant to be committed and reviewed in a pull request, not `ATTUNE_DATA_DIR`-relative instance state. |
 | `ATTUNE_CONVERSE_WINDOW_TURNS` | `10` | Maximum recent interaction turns retained in conversational context. |
 | `ATTUNE_CONVERSE_TTL_MINUTES` | `120` | Idle minutes after which conversational context expires. |
 | `ATTUNE_LOG_LEVEL` | `INFO` | Python log level. Use `DEBUG` temporarily for diagnosis; `INFO` is recommended in normal operation. |

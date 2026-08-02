@@ -54,6 +54,7 @@ from ..memory.signals import (
     capture_correction,
     frame_memory_text,
 )
+from .. import prompts
 from ..prompts import PROMPT_DRAFT, render_system_message
 from .autonomy import Action, Domain, PermissionMatrix, Rung, default_matrix
 from .state import DraftApproveState
@@ -329,7 +330,7 @@ def build_draft_approve_graph(
         fields: dict[str, Any] = {
             "model": model_for(Task.DRAFT),
             "chars": len(text),
-            "prompt_version": PROMPT_DRAFT.version,
+            "prompt_version": prompts.current(PROMPT_DRAFT).version,
         }
         usage = usage_box[0] if usage_box else None
         if usage is not None:
@@ -1167,6 +1168,7 @@ def _default_draft_fn(
     capabilities: ModelCapabilities | None = None,
     usage_sink: Callable[[Any], None] | None = None,
     playbook_text: str = "",
+    stable_prefix: str | None = None,
 ) -> str:
     """Default drafting: one Chat Completions call routed to the DRAFT model.
 
@@ -1187,6 +1189,12 @@ def _default_draft_fn(
     call's :class:`llm.Usage` so the ``drafted`` audit event can report
     token counts and cache hit/miss. Neither changes this function's return
     value or its behavior for a caller that doesn't pass them.
+
+    ``stable_prefix`` (build prompt 36, additive/keyword-only): overrides
+    the ``draft`` prompt's stable prefix for this call only, for the eval
+    harness and the offline prompt optimizer scoring a candidate. Omitted
+    (every production call site), the currently promoted version resolves
+    via ``prompts.current(PROMPT_DRAFT)``.
     """
     caps = capabilities or resolve_capabilities()
     mem_block = "\n".join(f"- {m}" for m in memories) or "(no prior preferences)"
@@ -1201,12 +1209,13 @@ def _default_draft_fn(
         # Build prompt 29: shapes tone/ordering/phrasing only — it grants
         # no authority (see playbook/bullets.py's module docstring).
         volatile += "\n\nPlaybook guidance:\n" + playbook_text
+    prefix = stable_prefix if stable_prefix is not None else prompts.current(PROMPT_DRAFT).stable_prefix
     resp = call_with_retry(
         lambda: create_chat_completion(
             client,
             model=model_for(Task.DRAFT),
             messages=[
-                render_system_message(PROMPT_DRAFT.stable_prefix, volatile, capabilities=caps),
+                render_system_message(prefix, volatile, capabilities=caps),
                 {"role": "user", "content": f"[UNTRUSTED {domain}]\n{incoming_summary}"},
             ],
             **call_kwargs(caps),

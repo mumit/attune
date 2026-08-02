@@ -1,0 +1,108 @@
+name: prompt-optimize
+
+# Weekly offline prompt optimization (build prompt 36, docs/plan-2026-h2.md
+# P10): GEPA over `draft`, MIPRO over `triage`, against the golden set
+# `attune eval capture` has accumulated. Same "offline in CI, live on a
+# schedule, skip cleanly without secrets" posture memory-eval.yml and
+# eval-live.yml already established for this project's other model-backed
+# scheduled jobs — this one differs only in what it does when it finds an
+# improvement: `attune optimize run` may append a new (immutable) prompt
+# version to `prompt_versions/*.json` and never commits it itself. A human
+# always merges the resulting pull request; this workflow never pushes to
+# main and never auto-merges (build prompt 36, task 3: "promotion is a
+# gated, reviewable change — never automatic").
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Monday 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Check required secrets
+        id: check
+        env:
+          ATTUNE_LLM_API_KEY: ${{ secrets.ATTUNE_LLM_API_KEY }}
+          ATTUNE_LLM_BASE_URL: ${{ secrets.ATTUNE_LLM_BASE_URL }}
+          ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
+        # Secrets can't be referenced directly in `if:` conditionals, so
+        # they're exported to the environment above and checked here — the
+        # same skip-cleanly posture eval-live.yml/memory-eval.yml already
+        # hold for a scheduled run nobody is watching.
+        run: |
+          if [ -z "$ATTUNE_LLM_API_KEY" ] || [ -z "$ATTUNE_LLM_BASE_URL" ] || \
+             [ -z "$ATTUNE_MODEL_DEFAULT" ]; then
+            echo "::notice::Prompt-optimize secrets are not configured (ATTUNE_LLM_API_KEY, ATTUNE_LLM_BASE_URL, ATTUNE_MODEL_DEFAULT) — skipping this run."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run the optimizer
+        if: steps.check.outputs.configured == 'true'
+        env:
+          ATTUNE_LLM_API_KEY: ${{ secrets.ATTUNE_LLM_API_KEY }}
+          ATTUNE_LLM_BASE_URL: ${{ secrets.ATTUNE_LLM_BASE_URL }}
+          ATTUNE_MODEL_DEFAULT: ${{ secrets.ATTUNE_MODEL_DEFAULT }}
+        run: |
+          mkdir -p evals/reports
+          attune optimize run --output evals/reports/optimize-run.json
+      - name: Render the per-scorer delta table
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("evals/reports/optimize-run.json") as f:
+              report = json.load(f)
+
+          lines = [
+              "Weekly offline prompt optimization (build prompt 36) — "
+              f"run at {report['run_at']}.",
+              "",
+              "| prompt | optimizer | promoted | new version | deltas | reasons |",
+              "|---|---|---|---|---|---|",
+          ]
+          any_promoted = False
+          for o in report["outcomes"]:
+              if o["promoted_version"] is not None:
+                  any_promoted = True
+              deltas = ", ".join(f"{k}: {v:+.3f}" for k, v in o["scorer_deltas"].items()) or "—"
+              reasons = "; ".join(o["reasons"]) or "—"
+              lines.append(
+                  f"| {o['name']} | {o['optimizer']} | {o['approved']} | "
+                  f"{o['promoted_version'] or '—'} | {deltas} | {reasons} |"
+              )
+          with open("evals/reports/optimize-pr-body.md", "w") as f:
+              f.write("\n".join(lines) + "\n")
+          print("any_promoted=" + ("true" if any_promoted else "false"))
+          PY
+      - name: Upload the run report
+        if: steps.check.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-optimize-report
+          path: evals/reports/optimize-run.json
+      - name: Open a pull request for any promoted prompt version
+        if: steps.check.outputs.configured == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          add-paths: prompt_versions/*.json
+          commit-message: "prompts: weekly optimizer promotion(s)"
+          branch: prompt-optimize/weekly
+          delete-branch: true
+          title: "Weekly prompt optimization: candidate promotion(s)"
+          body-path: evals/reports/optimize-pr-body.md
+          labels: prompt-optimization
