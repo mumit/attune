@@ -494,6 +494,6 @@ OAuth-style Chat install remain open. The dated design record is in
 ## Later
 
 - richer calendar negotiation and follow-up workflows
-- temporal/entity memory evaluation and optional Graphiti migration path
+- temporal/entity memory evaluation using bitemporal metadata on Mem0 records
 - additional channel adapters behind the same routing interface
 - voice as a separate front door, without coupling it to a model provider

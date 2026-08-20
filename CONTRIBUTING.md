@@ -13,9 +13,10 @@ python -m venv .venv && source .venv/bin/activate
 - Model access stays provider-neutral: configure the official OpenAI SDK with
   a base URL, API key, and model identifiers. Do not add gateway clients or
   provider-specific catalogs.
-- Keep the memory interface substrate-agnostic (`add` / `search` / `consolidate`)
-  so the planned Mem0 → Graphiti migration is an implementation change, not an
-  API change.
+- Keep contributor code dependent on the substrate-neutral memory interface
+  (`add` / `search` / `consolidate`) so any storage change remains an
+  implementation detail, not an API change. Graphiti migration is not on the
+  active roadmap.
 
 ## Non-negotiable security rules
 
