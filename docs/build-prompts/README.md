@@ -6,11 +6,16 @@ each was run; do not use their setup instructions as current deployment
 documentation. Use the root `README.md`, `.env.example`, and
 `docs/deployment.md` for the maintained operator path.
 
-**Prompts 24–36 are open work**, implementing
-[`docs/plan-2026-h2.md`](../plan-2026-h2.md). Their evidence base is the
-[2026-07-31 landscape review](../landscape-2026.md); the earlier product review
-is [`current-state.md`](../current-state.md) and its
-[gap analysis](../gap-analysis.md).
+**Prompts 24–36 are also a completed archive.** They implemented
+[`docs/plan-2026-h2.md`](../plan-2026-h2.md): prompts 24–34 shipped their phases,
+while prompts 35 and 36 shipped partial P9 and P10 outcomes documented in the
+plan and [`docs/decisions.md`](../decisions.md). Keep these prompts as
+point-in-time implementation records; use the root `README.md`,
+`.env.example`, and `docs/deployment.md` for maintained operator guidance.
+Their evidence base is the [2026-07-31 landscape
+review](../landscape-2026.md); the earlier product review is
+[`current-state.md`](../current-state.md) and its [gap
+analysis](../gap-analysis.md).
 
 Baseline at the time 24–36 were written (2026-07-31): **1,921 passing, 8
 failing, 56 skipped**, plus the standalone republisher suite. The 8 failures are
@@ -55,26 +60,27 @@ a milestone; cross-milestone dependencies are noted at the top of each file.
 | 22 | `22-verified-consolidation.md` | M6 | — |
 | 23 | `23-calendar-bootstrap.md` | M6 | — |
 
-Open work — [`docs/plan-2026-h2.md`](../plan-2026-h2.md). P0→P1→P2 are strictly
-serial; P3 may run alongside P2; 30/31 and 32 are independent of each other; do
-not start 35 before 30 lands, because the capability registry is the seam it
-converges onto.
+Completed H2 build sequence —
+[`docs/plan-2026-h2.md`](../plan-2026-h2.md). The ordering below is historical
+execution context: P0→P1→P2 were strictly serial; P3 could run alongside P2;
+30/31 and 32 were independent of each other; and 35 depended on 30 because the
+capability registry is the seam it converges onto.
 
-| # | File | Phase | Depends on |
-|---|---|---|---|
-| 24 | `24-repair.md` | P0 Repair | — |
-| 25 | `25-reconnect-learning.md` | P1 Reconnect the loop | 24 |
-| 26 | `26-decision-ledger.md` | P2 Measure | 25 |
-| 27 | `27-eval-harness.md` | P2 | 26 |
-| 28 | `28-model-layer.md` | P3 Model layer floor | 24 |
-| 29 | `29-playbook.md` | P4 Compound | 26, 27, 28 |
-| 30 | `30-capability-registry.md` | P5 Act | 28 |
-| 31 | `31-reversibility.md` | P5 | 26, 30 |
-| 32 | `32-attention-budget.md` | P6 Attention budget | 26 |
-| 33 | `33-performance.md` | P7 Perform | 28 |
-| 34 | `34-mcp-server.md` | P8 Interoperate | 30, 31 |
-| 35 | `35-converge-planes.md` | P9 Converge | 30 |
-| 36 | `36-prompt-optimization.md` | P10 Optimize | 26, 27, 28, 29 |
+| # | File | Phase | Status | Depends on |
+|---|---|---|---|---|
+| 24 | `24-repair.md` | P0 Repair | Shipped | — |
+| 25 | `25-reconnect-learning.md` | P1 Reconnect the loop | Shipped | 24 |
+| 26 | `26-decision-ledger.md` | P2 Measure | Shipped | 25 |
+| 27 | `27-eval-harness.md` | P2 | Shipped | 26 |
+| 28 | `28-model-layer.md` | P3 Model layer floor | Shipped | 24 |
+| 29 | `29-playbook.md` | P4 Compound | Shipped | 26, 27, 28 |
+| 30 | `30-capability-registry.md` | P5 Act | Shipped | 28 |
+| 31 | `31-reversibility.md` | P5 | Shipped | 26, 30 |
+| 32 | `32-attention-budget.md` | P6 Attention budget | Shipped | 26 |
+| 33 | `33-performance.md` | P7 Perform | Shipped | 28 |
+| 34 | `34-mcp-server.md` | P8 Interoperate | Shipped | 30, 31 |
+| 35 | `35-converge-planes.md` | P9 Converge | Shipped, partial | 30 |
+| 36 | `36-prompt-optimization.md` | P10 Optimize | Shipped, partial | 26, 27, 28, 29 |
 
 House rules every prompt inherits (do not skip):
 

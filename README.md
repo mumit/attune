@@ -134,8 +134,8 @@ cloud mutations.
 - **I want the plan** — the active product plan is
   [plan-2026-h2.md](docs/plan-2026-h2.md), evidenced by the
   [landscape review](docs/landscape-2026.md) (how Attune compares to what
-  shipped elsewhere in 2026). Open implementation prompts are
-  [24–36](docs/build-prompts/README.md).
+  shipped elsewhere in 2026). The completed implementation prompts
+  [24–36](docs/build-prompts/README.md) are retained as a historical archive.
 - **I want the design history** — read [Design](docs/design.md), the
   [durable decisions record](docs/decisions.md), and the
   [roadmap](docs/roadmap.md), plus the 2026-07-18 review trilogy: a full
